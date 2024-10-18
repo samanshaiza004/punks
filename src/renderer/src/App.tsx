@@ -89,11 +89,11 @@ export function App() {
     }
 
     if (currentHistoryIndex < directoryHistory.length - 1) {
-      setDirectoryHistory((prev) => [...prev.slice(0, currentHistoryIndex + 1), newEntry])
+      setDirectoryHistory((prev: string[]) => [...prev.slice(0, currentHistoryIndex + 1), newEntry])
     } else {
-      setDirectoryHistory((prev) => [...prev, newEntry])
+      setDirectoryHistory((prev: any) => [...prev, newEntry])
     }
-    setCurrentHistoryIndex((prev) => prev + 1)
+    setCurrentHistoryIndex((prev: number) => prev + 1)
   }
 
   const handleDirectoryClick = (directory: string[]) => {
@@ -113,7 +113,7 @@ export function App() {
     if (currentHistoryIndex > 0) {
       const previousEntry = directoryHistory[currentHistoryIndex - 1]
       setDirectoryPath(previousEntry.path)
-      setCurrentHistoryIndex((prev) => prev - 1)
+      setCurrentHistoryIndex((prev: number) => prev - 1)
     }
   }
 
@@ -122,7 +122,7 @@ export function App() {
     if (currentHistoryIndex < directoryHistory.length - 1) {
       const nextEntry = directoryHistory[currentHistoryIndex + 1]
       setDirectoryPath(nextEntry.path)
-      setCurrentHistoryIndex((prev) => prev + 1)
+      setCurrentHistoryIndex((prev: number) => prev + 1)
     }
   }
 
@@ -197,7 +197,7 @@ export function App() {
 
   return (
     <div className="h-4/5 p-2.5 ">
-      <DirectoryPicker onDirectorySelected={(path) => handleDirectoryChange(path)} />
+      <DirectoryPicker onDirectorySelected={(path: string[]) => handleDirectoryChange(path)} />
       <div className="flex items-center space-x-4">
         {/* <NavigationControls
           canGoBack={currentHistoryIndex > 0}
@@ -236,7 +236,7 @@ export function App() {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        onSave={(newBindings) => {
+        onSave={(_newBindings: any) => {
           // Handle the new bindings
           setIsSettingsOpen(false)
         }}

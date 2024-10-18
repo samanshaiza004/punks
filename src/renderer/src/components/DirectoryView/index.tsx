@@ -1,6 +1,8 @@
 import React from 'react'
 import { FileAddressItem } from '../FileAddressItem/FileAddressItem'
 import { useHotkeys } from 'react-hotkeys-hook'
+import { KeyHandlerMap } from '@renderer/keybinds/types'
+import { useKeyBindings } from '@renderer/keybinds/hooks'
 
 interface DirectoryViewProps {
   directoryPath: string[]
@@ -17,11 +19,14 @@ const DirectoryView: React.FC<DirectoryViewProps> = ({ directoryPath, onDirector
     }
   }
 
-  // Handle Alt+Left Arrow and Alt+H for going back
-  useHotkeys('alt+left, alt+h', (event) => {
-    event.preventDefault() // Prevent browser back navigation
-    goBack()
-  })
+  const handlers: KeyHandlerMap = {
+    GO_BACK: () => {
+      event.preventDefault()
+      goBack()
+    }
+  }
+
+  useKeyBindings(handlers)
 
   return (
     <div className="flex items-center space-x-1 p-2">

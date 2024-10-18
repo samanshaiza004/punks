@@ -1,6 +1,6 @@
 // src/keybinds/hooks.ts
-import { useEffect, useCallback } from 'react'
-import { KeyAction, KeyHandler, KeyHandlerMap } from './types'
+import { useEffect } from 'react'
+import { KeyHandlerMap } from './types'
 import { KeyBindingStore } from './store'
 
 export function useKeyBindings(handlers: KeyHandlerMap, enabled = true) {
@@ -23,7 +23,7 @@ export function useKeyBindings(handlers: KeyHandlerMap, enabled = true) {
         if (event.ctrlKey) currentKeys.push('Control')
         if (event.shiftKey) currentKeys.push('Shift')
         if (event.altKey) currentKeys.push('Alt')
-
+        if (event.metaKey) currentKeys.push('Command')
         // Map special keys
         const specialKeys: { [key: string]: string } = {
           ArrowUp: 'ArrowUp',
