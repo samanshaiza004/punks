@@ -1,6 +1,5 @@
 import React from 'react'
 import { FileAddressItem } from '../FileAddressItem/FileAddressItem'
-import { useHotkeys } from 'react-hotkeys-hook'
 import { KeyHandlerMap } from '@renderer/keybinds/types'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
 

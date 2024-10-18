@@ -83,7 +83,10 @@ const FileGrid: React.FC<FileGridProps> = ({
   )
 
   const handlers: KeyHandlerMap = {
-    NAVIGATE_UP: () => navigateFiles('up'),
+    NAVIGATE_UP: () => {
+      console.log('NAVIGATE_UP')
+      navigateFiles('up')
+    },
     NAVIGATE_DOWN: () => navigateFiles('down'),
     NAVIGATE_LEFT: () => navigateFiles('left'),
     NAVIGATE_RIGHT: () => navigateFiles('right'),
@@ -102,7 +105,7 @@ const FileGrid: React.FC<FileGridProps> = ({
   }, [directoryPath])
 
   return (
-    <div className="file-grid grid grid-cols-4 gap-4 p-4">
+    <div className="file-grid grid grid-cols-4 gap-4 p-4" tabIndex={0}>
       {files.map((file, index) => (
         <FileItem
           key={file.name}
