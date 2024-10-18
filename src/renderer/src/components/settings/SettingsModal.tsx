@@ -62,6 +62,19 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
     setEditingBinding(null) // End editing mode
   }
 
+  const formatKeyCombo = (combo: KeyCombo | string): string => {
+    if (typeof combo === 'string') return combo
+    if (Array.isArray(combo)) return combo.join('+')
+    return ''
+  }
+
+  const formatKeyBindingDisplay = (currentKeys: Array<KeyCombo | string>): string => {
+    return currentKeys
+      .map((combo) => formatKeyCombo(combo))
+      .filter(Boolean)
+      .join(' or ')
+  }
+
   const resetToDefault = (bindingId: string) => {
     setKeyBindings((prev) => ({
       ...prev,
@@ -131,9 +144,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
                         onClick={() => startEditing(binding.id)}
                         className="px-3 py-1 bg-gray-100 border border-gray-300 rounded hover:bg-gray-200 min-w-[100px] text-left"
                       >
-                        {binding.currentKeys
-                          .map((combo) => combo.join('+')) // Join individual key combos with '+'
-                          .join(' or ')}{' '}
+                        {formatKeyBindingDisplay(binding.currentKeys)}
                       </button>
                     )}
                   </td>

@@ -89,7 +89,10 @@ export function App() {
     }
 
     if (currentHistoryIndex < directoryHistory.length - 1) {
-      setDirectoryHistory((prev: string[]) => [...prev.slice(0, currentHistoryIndex + 1), newEntry])
+      setDirectoryHistory((prev: DirectoryHistoryEntry[]) => [
+        ...prev.slice(0, currentHistoryIndex + 1),
+        newEntry
+      ])
     } else {
       setDirectoryHistory((prev: any) => [...prev, newEntry])
     }
@@ -137,6 +140,9 @@ export function App() {
 
   useEffect(() => {
     const initializeApp = async () => {
+      const store = KeyBindingStore.getInstance()
+      await store.initialize()
+
       const lastSelectedDirectory = await window.api.getLastSelectedDirectory()
       if (lastSelectedDirectory) {
         setDirectoryPath([lastSelectedDirectory])
