@@ -138,7 +138,9 @@ export const api = {
       ipcRenderer.send('message', 'Error getting audio metadata: ' + err)
       return null
     }
-  }
+  },
+  getKeyBindings: () => ipcRenderer.invoke('get-key-bindings'),
+  saveKeyBindings: (bindings) => ipcRenderer.invoke('save-key-bindings', bindings)
 }
 
 if (process.contextIsolated) {

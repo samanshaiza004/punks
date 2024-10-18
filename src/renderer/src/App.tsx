@@ -9,14 +9,31 @@ import AudioPlayer from './components/AudioPlayer'
 import { FileInfo } from './types/FileInfo'
 import { useAudio } from './hooks/AudioContextProvider'
 import MetadataDisplay from './components/MetadataDisplay'
+import NavigationControls from './components/nav/NavigationControls'
+import SettingsModal from './components/settings/SettingsModal'
+import { KeyBindingStore } from './keybinds/store'
+
+interface DirectoryHistoryEntry {
+  path: string[]
+  timestamp: number
+}
 
 export function App() {
   const [directoryPath, setDirectoryPath] = useState<string[]>([])
+
+  const [directoryHistory, setDirectoryHistory] = useState<DirectoryHistoryEntry[]>([])
+  const [currentHistoryIndex, setCurrentHistoryIndex] = useState<number>(-1)
+
   const [currentAudio, setCurrentAudio] = useState<string | null>(null)
   const [volume, setVolume] = useState(0.8)
+
   const [searchQuery, setSearchQuery] = useState<string>('')
   const [searchResults, setSearchResults] = useState<FileInfo[]>([])
+
   const [files, setFiles] = useState<FileInfo[]>([])
+
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+
   const [audioMetadata, setAudioMetadata] = useState<any>(null)
   const FILE_EXTENSIONS = {
     images: ['jpg', 'png'],
@@ -47,7 +64,6 @@ export function App() {
     })
   }
 
-  /** Initiates a search for files and directories matching the query */
   const searchFiles = () => {
     if (searchQuery.length > 0) {
       window.api
@@ -58,6 +74,26 @@ export function App() {
     } else {
       setSearchResults([])
     }
+  }
+
+  const handleDirectoryChange = (newPath: string[]) => {
+    if (JSON.stringify(newPath) === JSON.stringify(directoryPath)) {
+      return
+    }
+
+    setDirectoryPath(newPath)
+
+    const newEntry: DirectoryHistoryEntry = {
+      path: newPath,
+      timestamp: Date.now()
+    }
+
+    if (currentHistoryIndex < directoryHistory.length - 1) {
+      setDirectoryHistory((prev) => [...prev.slice(0, currentHistoryIndex + 1), newEntry])
+    } else {
+      setDirectoryHistory((prev) => [...prev, newEntry])
+    }
+    setCurrentHistoryIndex((prev) => prev + 1)
   }
 
   const handleDirectoryClick = (directory: string[]) => {
@@ -72,7 +108,30 @@ export function App() {
     }
   }
 
+  // Handle going back in history
+  const handleGoBack = () => {
+    if (currentHistoryIndex > 0) {
+      const previousEntry = directoryHistory[currentHistoryIndex - 1]
+      setDirectoryPath(previousEntry.path)
+      setCurrentHistoryIndex((prev) => prev - 1)
+    }
+  }
+
+  // Handle going forward in history
+  const handleGoForward = () => {
+    if (currentHistoryIndex < directoryHistory.length - 1) {
+      const nextEntry = directoryHistory[currentHistoryIndex + 1]
+      setDirectoryPath(nextEntry.path)
+      setCurrentHistoryIndex((prev) => prev + 1)
+    }
+  }
+
   useEffect(() => {
+    if (directoryPath.length > 0 && directoryHistory.length === 0) {
+      setDirectoryHistory([{ path: directoryPath, timestamp: Date.now() }])
+      // setCurrentHistoryIndex(0)
+    }
+    console.log(currentHistoryIndex)
     fetchFiles()
   }, [directoryPath])
 
@@ -83,6 +142,9 @@ export function App() {
         setDirectoryPath([lastSelectedDirectory])
       }
     }
+
+    const store = KeyBindingStore.getInstance()
+    store.initialize()
 
     initializeApp()
 
@@ -135,15 +197,30 @@ export function App() {
 
   return (
     <div className="h-4/5 p-2.5 ">
-      <DirectoryPicker onDirectorySelected={setDirectoryPath} />
-      <DirectoryView directoryPath={directoryPath} onDirectoryClick={setDirectoryPath} />
+      <DirectoryPicker onDirectorySelected={(path) => handleDirectoryChange(path)} />
+      <div className="flex items-center space-x-4">
+        {/* <NavigationControls
+          canGoBack={currentHistoryIndex > 0}
+          canGoForward={currentHistoryIndex < directoryHistory.length - 1}
+          onGoBack={handleGoBack}
+          onGoForward={handleGoForward}
+        /> */}
+        <button
+          onClick={() => setIsSettingsOpen(true)}
+          className="px-4 py-2 bg-gray-100 rounded hover:bg-gray-200"
+        >
+          Settings
+        </button>
+        <DirectoryView directoryPath={directoryPath} onDirectoryClick={handleDirectoryChange} />
+      </div>
+
       <SearchBar
         searchQuery={searchQuery}
         setSearchQuery={setSearchQuery}
         onSearch={searchFiles}
         setSearchResults={setSearchResults}
       />
-      <div className="flex justify-between items-start gap-2.5 max-w-7xl mx-auto h-full">
+      <div className="flex justify-between items-start gap-2.5 max-w-7xl mx-auto h-full overflow-auto mb-24">
         <FileGrid
           files={searchResults.length > 0 ? searchResults : files}
           directoryPath={directoryPath}
@@ -156,6 +233,14 @@ export function App() {
       </div>
 
       <AudioPlayer currentAudio={currentAudio} volume={volume} setVolume={setVolume} shouldReplay />
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        onSave={(newBindings) => {
+          // Handle the new bindings
+          setIsSettingsOpen(false)
+        }}
+      />
     </div>
   )
 }

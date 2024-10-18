@@ -3,6 +3,8 @@
 import React, { useEffect, useRef } from 'react'
 import { FileInfo } from '../../types/FileInfo'
 import { useHotkeys } from 'react-hotkeys-hook'
+import { KeyHandlerMap } from '@renderer/keybinds/types'
+import { useKeyBindings } from '@renderer/keybinds/hooks'
 // const { ipcMain, ipcRenderer } = window.require('electron')
 
 interface SearchBarProps {
@@ -19,9 +21,13 @@ const SearchBar: React.FC<SearchBarProps> = ({
   setSearchResults
 }) => {
   const searchBarRef = useRef<HTMLInputElement>(null)
-  useHotkeys('ctrl+l', () => {
-    searchBarRef.current?.focus()
-  })
+  const handlers: KeyHandlerMap = {
+    FOCUS_SEARCH: () => {
+      searchBarRef.current?.focus()
+    }
+  }
+
+  useKeyBindings(handlers)
   useEffect(() => {
     const delayDebounceFn = setTimeout(() => {
       if (searchQuery.length > 0) {

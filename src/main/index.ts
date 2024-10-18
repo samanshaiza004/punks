@@ -9,6 +9,15 @@ let store
   store = new Store()
 })()
 
+ipcMain.handle('get-key-bindings', () => {
+  return store.get('keyBindings')
+})
+
+ipcMain.handle('save-key-bindings', (_, bindings) => {
+  store.set('keyBindings', bindings)
+  return true
+})
+
 // Helper function to resolve icon path
 function getIconPath() {
   if (is.dev) {

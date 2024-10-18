@@ -17,7 +17,7 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({}) => {
   }, [volume])
 
   return (
-    <div className="fixed bottom-8 w-full bg-white">
+    <div className="fixed bottom-0 left-0 w-full bg-white p-4 shadow-md z-10">
       <div id="waveform" />
       <div className="flex items-center">
         <span>Volume: </span>
