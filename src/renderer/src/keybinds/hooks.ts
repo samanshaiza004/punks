@@ -3,6 +3,8 @@ import { useEffect, useRef } from 'react'
 import { KeyHandlerMap } from './types'
 import { KeyBindingStore } from './store'
 
+// src/renderer/src/hooks/useKeyBindings.ts
+
 export function useKeyBindings(handlers: KeyHandlerMap, enabled = true) {
   const store = KeyBindingStore.getInstance()
   const handlersRef = useRef(handlers)
@@ -30,7 +32,15 @@ export function useKeyBindings(handlers: KeyHandlerMap, enabled = true) {
       const keyCombo = currentKeys.join('+')
 
       Object.entries(store.getAllBindings()).forEach(([action, binding]) => {
-        if (binding.currentKeys.some((combo) => combo.join('+') === keyCombo)) {
+        // Check if binding.currentKeys is an array and handle accordingly
+        const matchingCombo = Array.isArray(binding.currentKeys)
+          ? binding.currentKeys.some((combo) => {
+              // Ensure combo is an array before calling join
+              return Array.isArray(combo) ? combo.join('+') === keyCombo : combo === keyCombo
+            })
+          : binding.currentKeys === keyCombo
+
+        if (matchingCombo) {
           handlersRef.current[action]?.()
         }
       })
