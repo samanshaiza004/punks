@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/explicit-function-return-type */
 // src/keybinds/hooks.ts
 import { useEffect, useRef } from 'react'
 import { KeyHandlerMap } from './types'

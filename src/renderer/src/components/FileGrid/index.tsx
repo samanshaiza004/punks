@@ -4,6 +4,7 @@ import { FileItem } from '../FileItem'
 import { FileInfo } from '../../types/FileInfo'
 import { useKeyBindings } from '../../keybinds/hooks'
 import { KeyHandlerMap } from '../../keybinds/types'
+import { useTheme } from '@renderer/context/ThemeContext'
 
 interface FileGridProps {
   files: FileInfo[]
@@ -20,7 +21,7 @@ const FileGrid: React.FC<FileGridProps> = ({
 }) => {
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [gridColumns, setGridColumns] = useState(4)
-
+  const { isDarkMode } = useTheme()
   const handleFileClick = useCallback(
     (file: FileInfo) => {
       if (file.isDirectory) {
@@ -105,7 +106,12 @@ const FileGrid: React.FC<FileGridProps> = ({
   }, [directoryPath])
 
   return (
-    <div className="file-grid grid grid-cols-4 gap-4 p-4" tabIndex={0}>
+    <div
+      className={`file-grid grid grid-cols-4 gap-2 p-4 ${
+        isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'
+      }`}
+      tabIndex={0}
+    >
       {files.map((file, index) => (
         <FileItem
           key={file.name}
@@ -114,9 +120,16 @@ const FileGrid: React.FC<FileGridProps> = ({
           isDirectory={file.isDirectory}
           location={window.api.renderPath([...directoryPath, file.name])}
           isSelected={index === selectedIndex}
+          isDarkMode={isDarkMode}
         />
       ))}
-      {files.length === 0 && <div>No files found</div>}
+      {files.length === 0 && (
+        <div
+          className={`col-span-full text-center ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}
+        >
+          No files found
+        </div>
+      )}
     </div>
   )
 }

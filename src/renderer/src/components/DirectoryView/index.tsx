@@ -2,6 +2,7 @@ import React from 'react'
 import { FileAddressItem } from '../FileAddressItem/FileAddressItem'
 import { KeyHandlerMap } from '@renderer/keybinds/types'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
+import { useTheme } from '@renderer/context/ThemeContext'
 
 interface DirectoryViewProps {
   directoryPath: string[]
@@ -9,9 +10,12 @@ interface DirectoryViewProps {
 }
 
 const DirectoryView: React.FC<DirectoryViewProps> = ({ directoryPath, onDirectoryClick }) => {
+  const { isDarkMode } = useTheme()
+
   const handleClick = (index: number) => {
     onDirectoryClick(directoryPath.slice(0, index + 1))
   }
+
   const goBack = () => {
     if (directoryPath.length > 1) {
       onDirectoryClick(directoryPath.slice(0, -1))
@@ -19,7 +23,7 @@ const DirectoryView: React.FC<DirectoryViewProps> = ({ directoryPath, onDirector
   }
 
   const handlers: KeyHandlerMap = {
-    GO_BACK: () => {
+    GO_BACK: (event) => {
       event.preventDefault()
       goBack()
     }
@@ -28,11 +32,18 @@ const DirectoryView: React.FC<DirectoryViewProps> = ({ directoryPath, onDirector
   useKeyBindings(handlers)
 
   return (
-    <div className="flex items-center space-x-1 p-2">
+    <div
+      className={`flex items-center space-x-1 p-2 overflow-x-auto rounded-sm ${
+        isDarkMode ? 'bg-gray-800 text-gray-200' : 'bg-gray-100 text-gray-800'
+      }`}
+    >
       {directoryPath.map((directory, index) => (
         <React.Fragment key={index}>
-          {index > 0 && <span className="text-gray-400">/</span>}
-          <FileAddressItem onClick={() => handleClick(index)} fileName={directory} />
+          <FileAddressItem
+            onClick={() => handleClick(index)}
+            fileName={directory}
+            isDarkMode={isDarkMode}
+          />
         </React.Fragment>
       ))}
     </div>

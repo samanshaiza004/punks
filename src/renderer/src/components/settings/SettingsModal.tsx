@@ -1,6 +1,9 @@
+/* eslint-disable @typescript-eslint/explicit-function-return-type */
 import React, { useState, useEffect } from 'react'
 import { KeyBindingMap, KeyCombo } from '@renderer/keybinds/types'
 import { defaultKeyBindings } from '@renderer/keybinds/defaults'
+import { Button } from '../Button'
+import { useTheme } from '@renderer/context/ThemeContext'
 
 interface SettingsModalProps {
   isOpen: boolean
@@ -12,9 +15,9 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
   const [keyBindings, setKeyBindings] = useState<KeyBindingMap>(defaultKeyBindings)
   const [editingBinding, setEditingBinding] = useState<string | null>(null)
   const [tempKeys, setTempKeys] = useState<KeyCombo>([])
-
+  const { isDarkMode, toggleDarkMode } = useTheme()
   useEffect(() => {
-    const loadSavedBindings = async () => {
+    const loadSavedBindings = async (): Promise<void> => {
       try {
         const saved = await window.api.getKeyBindings()
         if (saved) {
@@ -98,19 +101,34 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
-      <div className="bg-white rounded-lg w-11/12 max-w-4xl max-h-[90vh] overflow-y-auto">
-        <div className="flex justify-between items-center p-4 border-b border-gray-200">
+    <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
+      <div
+        className={`w-11/12 max-w-4xl max-h-[90vh] overflow-y-auto rounded-lg ${
+          isDarkMode ? 'bg-gray-800 text-gray-100' : 'bg-white text-gray-900'
+        }`}
+      >
+        <div
+          className={`flex justify-between items-center p-4 border-b ${
+            isDarkMode ? 'border-gray-700' : 'border-gray-200'
+          }`}
+        >
           <h2 className="text-xl font-semibold">Keyboard Shortcuts</h2>
-          <button onClick={onClose} className="text-2xl hover:text-gray-700">
+          <button onClick={onClose} className={`text-2xl hover:opacity-75 transition-opacity`}>
             ×
           </button>
+        </div>
+
+        <div className="mt-4 px-4">
+          <h3 className="text-lg font-medium mb-2">Theme</h3>
+          <Button variant="primary" onClick={toggleDarkMode}>
+            {isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+          </Button>
         </div>
 
         <div className="p-4">
           <table className="w-full">
             <thead>
-              <tr className="border-b border-gray-200">
+              <tr className={`border-b ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`}>
                 <th className="text-left p-3">Action</th>
                 <th className="text-left p-3">Shortcut</th>
                 <th className="text-left p-3">Description</th>
@@ -119,7 +137,10 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
             </thead>
             <tbody>
               {Object.values(keyBindings).map((binding) => (
-                <tr key={binding.id} className="border-b border-gray-200">
+                <tr
+                  key={binding.id}
+                  className={`border-b ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`}
+                >
                   <td className="p-3">{binding.action}</td>
                   <td className="p-3">
                     {editingBinding === binding.id ? (
@@ -130,11 +151,15 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
                           placeholder="Press keys..."
                           onKeyDown={handleKeyDown}
                           readOnly
-                          className="px-2 py-1 border border-gray-300 rounded w-40"
+                          className={`px-2 py-1 border rounded w-40 ${
+                            isDarkMode
+                              ? 'bg-gray-700 border-gray-600 text-gray-100'
+                              : 'bg-white border-gray-300 text-gray-900'
+                          }`}
                         />
                         <button
                           onClick={saveBinding}
-                          className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600"
+                          className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
                         >
                           Save
                         </button>
@@ -142,7 +167,11 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
                     ) : (
                       <button
                         onClick={() => startEditing(binding.id)}
-                        className="px-3 py-1 bg-gray-100 border border-gray-300 rounded hover:bg-gray-200 min-w-[100px] text-left"
+                        className={`px-3 py-1 rounded min-w-[100px] text-left ${
+                          isDarkMode
+                            ? 'bg-gray-700 hover:bg-gray-600 border-gray-600'
+                            : 'bg-gray-100 hover:bg-gray-200 border-gray-300'
+                        } border transition-colors`}
                       >
                         {formatKeyBindingDisplay(binding.currentKeys)}
                       </button>
@@ -152,7 +181,11 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
                   <td className="p-3">
                     <button
                       onClick={() => resetToDefault(binding.id)}
-                      className="px-2 py-1 text-gray-600 hover:bg-gray-100 rounded"
+                      className={`px-2 py-1 rounded ${
+                        isDarkMode
+                          ? 'text-gray-300 hover:bg-gray-700'
+                          : 'text-gray-600 hover:bg-gray-100'
+                      } transition-colors`}
                     >
                       Reset
                     </button>
@@ -163,16 +196,22 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
           </table>
         </div>
 
-        <div className="flex justify-end gap-2 p-4 border-t border-gray-200">
+        <div
+          className={`flex justify-end gap-2 p-4 border-t ${
+            isDarkMode ? 'border-gray-700' : 'border-gray-200'
+          }`}
+        >
           <button
             onClick={onClose}
-            className="px-4 py-2 border border-gray-300 rounded hover:bg-gray-100"
+            className={`px-4 py-2 rounded border transition-colors ${
+              isDarkMode ? 'border-gray-600 hover:bg-gray-700' : 'border-gray-300 hover:bg-gray-100'
+            }`}
           >
             Cancel
           </button>
           <button
             onClick={handleSave}
-            className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+            className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 transition-colors"
           >
             Save Changes
           </button>

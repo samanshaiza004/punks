@@ -1,18 +1,35 @@
 import { ButtonHTMLAttributes } from 'react'
-// import FileIcons from '../FileIcons'
 
 type FileAddressItemProps = {
   fileName: string
+  isDarkMode: boolean
 } & ButtonHTMLAttributes<HTMLButtonElement>
 
-export function FileAddressItem(props: FileAddressItemProps) {
-  const onClick = props.onClick
+export function FileAddressItem({ fileName, isDarkMode, ...props }: FileAddressItemProps) {
   return (
     <button
-      className="h-6 px-1 mr-0 flex items-center rounded-none whitespace-nowrap overflow-hidden text-black font-medium cursor-pointer hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-      onClick={onClick}
+      className={`
+        h-8 
+        px-2 
+        flex 
+        items-center 
+        rounded-sm
+        whitespace-nowrap 
+        overflow-hidden 
+        font-medium 
+        cursor-pointer 
+        transition-colors
+        focus:outline-none 
+        focus:ring-2
+        ${
+          isDarkMode
+            ? 'text-gray-200 hover:bg-gray-700 focus:ring-gray-600'
+            : 'text-gray-800 hover:bg-gray-200 focus:ring-gray-300'
+        }
+      `}
+      {...props}
     >
-      {props.fileName}
+      {fileName}
     </button>
   )
 }

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/explicit-function-return-type */
 // src/App.tsx
 
 import { useState, useEffect } from 'react'
@@ -12,6 +13,8 @@ import MetadataDisplay from './components/MetadataDisplay'
 import NavigationControls from './components/nav/NavigationControls'
 import SettingsModal from './components/settings/SettingsModal'
 import { KeyBindingStore } from './keybinds/store'
+import { useTheme } from './context/ThemeContext'
+import { Button } from './components/Button'
 
 interface DirectoryHistoryEntry {
   path: string[]
@@ -19,6 +22,7 @@ interface DirectoryHistoryEntry {
 }
 
 export function App() {
+  const { isDarkMode } = useTheme()
   const [directoryPath, setDirectoryPath] = useState<string[]>([])
 
   const [directoryHistory, setDirectoryHistory] = useState<DirectoryHistoryEntry[]>([])
@@ -202,7 +206,7 @@ export function App() {
   }
 
   return (
-    <div className="h-4/5 p-2.5 ">
+    <div className={`h-4/5 p-2.5 ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}>
       <DirectoryPicker onDirectorySelected={(path: string[]) => handleDirectoryChange(path)} />
       <div className="flex items-center space-x-4">
         {/* <NavigationControls
@@ -211,12 +215,9 @@ export function App() {
           onGoBack={handleGoBack}
           onGoForward={handleGoForward}
         /> */}
-        <button
-          onClick={() => setIsSettingsOpen(true)}
-          className="px-4 py-2 bg-gray-100 rounded hover:bg-gray-200"
-        >
+        <Button onClick={() => setIsSettingsOpen(true)} variant="secondary" className="px-4 py-2">
           Settings
-        </button>
+        </Button>
         <DirectoryView directoryPath={directoryPath} onDirectoryClick={handleDirectoryChange} />
       </div>
 

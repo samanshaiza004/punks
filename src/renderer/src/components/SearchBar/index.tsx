@@ -1,11 +1,8 @@
-// src/components/SearchBar/index.tsx
-
 import React, { useEffect, useRef } from 'react'
 import { FileInfo } from '../../types/FileInfo'
-import { useHotkeys } from 'react-hotkeys-hook'
 import { KeyHandlerMap } from '@renderer/keybinds/types'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
-// const { ipcMain, ipcRenderer } = window.require('electron')
+import { useTheme } from '@renderer/context/ThemeContext'
 
 interface SearchBarProps {
   searchQuery: string
@@ -21,6 +18,8 @@ const SearchBar: React.FC<SearchBarProps> = ({
   setSearchResults
 }) => {
   const searchBarRef = useRef<HTMLInputElement>(null)
+  const { isDarkMode } = useTheme()
+
   const handlers: KeyHandlerMap = {
     FOCUS_SEARCH: () => {
       searchBarRef.current?.focus()
@@ -28,6 +27,7 @@ const SearchBar: React.FC<SearchBarProps> = ({
   }
 
   useKeyBindings(handlers)
+
   useEffect(() => {
     const delayDebounceFn = setTimeout(() => {
       if (searchQuery.length > 0) {
@@ -36,26 +36,65 @@ const SearchBar: React.FC<SearchBarProps> = ({
         setSearchResults([])
       }
     }, 300)
-
-    return () => clearTimeout(delayDebounceFn)
+    return (): void => clearTimeout(delayDebounceFn)
   }, [searchQuery, onSearch, setSearchResults])
-  useEffect(() => {}, [])
+
   return (
-    <div>
-      <input
-        id="search-bar"
-        ref={searchBarRef}
-        type="text"
-        value={searchQuery}
-        onChange={(e) => {
-          try {
-            setSearchQuery(e.target.value)
-          } catch (err) {
-            window.api.sendMessage('SearchBar.tsx: ' + err)
-          }
-        }}
-        placeholder="Search files or directories"
-      />
+    <div className={`relative max-w-xl w-full ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
+      <div className="relative">
+        <input
+          id="search-bar"
+          ref={searchBarRef}
+          type="text"
+          value={searchQuery}
+          onChange={(e) => {
+            try {
+              setSearchQuery(e.target.value)
+            } catch (err) {
+              window.api.sendMessage('SearchBar.tsx: ' + err)
+            }
+          }}
+          placeholder="Search files or directories"
+          className={`
+            w-full
+            py-2
+            px-1
+            rounded
+            border
+            outline-none
+            transition-colors
+            placeholder:transition-colors
+            ${
+              isDarkMode
+                ? 'bg-gray-800 border-gray-700 placeholder:text-gray-500 focus:border-gray-600'
+                : 'bg-white border-gray-300 placeholder:text-gray-400 focus:border-gray-400'
+            }
+            ${isDarkMode ? 'focus:ring-2 focus:ring-gray-700' : 'focus:ring-2 focus:ring-gray-200'}
+          `}
+        />
+        {searchQuery && (
+          <button
+            onClick={() => setSearchQuery('')}
+            className={`
+              absolute
+              right-3
+              top-1/2
+              transform
+              -translate-y-1/2
+              p-1
+              rounded-full
+              transition-colors
+              ${
+                isDarkMode
+                  ? 'text-gray-400 hover:text-gray-300 hover:bg-gray-700'
+                  : 'text-gray-500 hover:text-gray-600 hover:bg-gray-100'
+              }
+            `}
+          >
+            ×
+          </button>
+        )}
+      </div>
     </div>
   )
 }
