@@ -107,7 +107,7 @@ const FileGrid: React.FC<FileGridProps> = ({
 
   return (
     <div
-      className={`file-grid grid grid-cols-4 gap-2 p-4 ${
+      className={`grid grid-cols-4 gap-2 p-4 auto-rows-fr ${
         isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'
       }`}
       tabIndex={0}

@@ -36,6 +36,7 @@ export function FileItem({
         transition-colors
         focus:outline-none 
         focus:ring-2
+        min-w-[200px] min-h-[50px] 
         ${
           isSelected
             ? isDarkMode

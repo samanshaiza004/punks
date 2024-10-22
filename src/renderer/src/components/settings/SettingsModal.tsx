@@ -4,14 +4,21 @@ import { KeyBindingMap, KeyCombo } from '@renderer/keybinds/types'
 import { defaultKeyBindings } from '@renderer/keybinds/defaults'
 import { Button } from '../Button'
 import { useTheme } from '@renderer/context/ThemeContext'
+import { DirectoryPicker } from '../DirectoryPicker'
 
 interface SettingsModalProps {
   isOpen: boolean
   onClose: () => void
   onSave: (newBindings: KeyBindingMap) => void
+  onDirectorySelected: (directory: string[]) => void
 }
 
-const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }) => {
+const SettingsModal: React.FC<SettingsModalProps> = ({
+  isOpen,
+  onClose,
+  onSave,
+  onDirectorySelected
+}) => {
   const [keyBindings, setKeyBindings] = useState<KeyBindingMap>(defaultKeyBindings)
   const [editingBinding, setEditingBinding] = useState<string | null>(null)
   const [tempKeys, setTempKeys] = useState<KeyCombo>([])
@@ -117,9 +124,13 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
             ×
           </button>
         </div>
-
+        {/* Directory Picker */}
         <div className="mt-4 px-4">
-          <h3 className="text-lg font-medium mb-2">Theme</h3>
+          <h4 className="text-lg font-semibold">Select Directory</h4>
+          <DirectoryPicker onDirectorySelected={onDirectorySelected} />
+        </div>
+        <div className="mt-4 px-4">
+          <h3 className="text-lg font-semibold">Theme</h3>
           <Button variant="primary" onClick={toggleDarkMode}>
             {isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
           </Button>

@@ -1,3 +1,4 @@
+import { useTheme } from '@renderer/context/ThemeContext'
 import React, { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 
@@ -19,7 +20,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
   const [currentAudio, setCurrentAudio] = useState<string | null>(null)
   const [volume, setVolume] = useState(0.8)
   const waveSurferRef = useRef<WaveSurfer | null>(null)
-
+  const { isDarkMode } = useTheme()
   const playAudio = (filePath: string) => {
     if (waveSurferRef.current) {
       waveSurferRef.current?.load(filePath)
@@ -29,13 +30,14 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
   useEffect(() => {
     waveSurferRef.current = WaveSurfer.create({
       container: document.getElementById('waveform') as HTMLDivElement,
-      waveColor: 'white',
-      progressColor: '#433fc4',
       barWidth: 4,
       barRadius: 30,
-      barHeight: 4,
-      height: 64,
-      dragToSeek: true
+      dragToSeek: true,
+      waveColor: isDarkMode ? '#4B5563' : '#9CA3AF',
+      progressColor: isDarkMode ? '#60A5FA' : '#3B82F6',
+      cursorColor: isDarkMode ? '#F3F4F6' : '#1F2937',
+      height: 30,
+      barHeight: 1.5
     })
     if (waveSurferRef.current) {
       waveSurferRef.current.setVolume(volume)

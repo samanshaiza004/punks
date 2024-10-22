@@ -33,7 +33,7 @@ const DirectoryView: React.FC<DirectoryViewProps> = ({ directoryPath, onDirector
 
   return (
     <div
-      className={`flex items-center space-x-1 p-2 overflow-x-auto rounded-sm ${
+      className={`flex items-center space-x-1 px-2 py-1 overflow-x-auto rounded-sm ${
         isDarkMode ? 'bg-gray-800 text-gray-200' : 'bg-gray-100 text-gray-800'
       }`}
     >

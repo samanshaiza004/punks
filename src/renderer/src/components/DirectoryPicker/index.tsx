@@ -1,4 +1,5 @@
 import React from 'react'
+import { Button } from '../Button'
 
 interface DirectoryPickerProps {
   onDirectorySelected: (directory: string[]) => void
@@ -13,11 +14,8 @@ export const DirectoryPicker: React.FC<DirectoryPickerProps> = ({ onDirectorySel
   }
 
   return (
-    <button
-      className="px-1 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-      onClick={handlePickDirectory}
-    >
+    <Button variant="primary" onClick={handlePickDirectory}>
       Pick Directory
-    </button>
+    </Button>
   )
 }

@@ -19,32 +19,6 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
 
   useEffect(() => {
     if (!currentAudio) return
-
-    waveSurferRef.current = WaveSurfer.create({
-      container: '#waveform',
-      waveColor: isDarkMode ? '#4B5563' : '#9CA3AF',
-      progressColor: isDarkMode ? '#60A5FA' : '#3B82F6',
-      cursorColor: isDarkMode ? '#F3F4F6' : '#1F2937',
-      barWidth: 2,
-      barRadius: 3,
-      height: 60,
-      normalize: true
-    })
-
-    waveSurferRef.current.load(currentAudio)
-
-    waveSurferRef.current.on('ready', () => {
-      waveSurferRef.current?.setVolume(volume)
-      setDuration(waveSurferRef.current?.getDuration() || 0)
-    })
-
-    waveSurferRef.current.on('audioprocess', () => {
-      setCurrentTime(waveSurferRef.current?.getCurrentTime() || 0)
-    })
-
-    return () => {
-      waveSurferRef.current?.destroy()
-    }
   }, [currentAudio, isDarkMode])
 
   useEffect(() => {
@@ -82,8 +56,8 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
 
   return (
     <div
-      className={`fixed bottom-0 left-0 w-full p-4 shadow-lg z-10 ${
-        isDarkMode ? 'bg-gray-800 text-gray-200' : 'bg-white text-gray-800'
+      className={`fixed bottom-0 left-0 w-full p-4 shadow-lg backdrop-blur-sm ring-1 ring-black/5 z-10 ${
+        isDarkMode ? 'bg-gray-800/20 text-gray-200' : 'bg-white/20 text-gray-800'
       }`}
     >
       <div id="waveform" className="mb-4" />

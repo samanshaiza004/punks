@@ -206,43 +206,50 @@ export function App() {
   }
 
   return (
-    <div className={`h-4/5 p-2.5 ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}>
-      <DirectoryPicker onDirectorySelected={(path: string[]) => handleDirectoryChange(path)} />
-      <div className="flex items-center space-x-4">
-        {/* <NavigationControls
-          canGoBack={currentHistoryIndex > 0}
-          canGoForward={currentHistoryIndex < directoryHistory.length - 1}
-          onGoBack={handleGoBack}
-          onGoForward={handleGoForward}
-        /> */}
-        <Button onClick={() => setIsSettingsOpen(true)} variant="secondary" className="px-4 py-2">
-          Settings
-        </Button>
-        <DirectoryView directoryPath={directoryPath} onDirectoryClick={handleDirectoryChange} />
+    <div
+      className={`flex flex-col h-screen p-2.5 ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}
+    >
+      <div className="flex-shrink-0 ">
+        {/* <DirectoryPicker onDirectorySelected={(path: string[]) => handleDirectoryChange(path)} /> */}
+        <div className="flex items-center space-x-4 mb-1">
+          <Button onClick={() => setIsSettingsOpen(true)} variant="secondary" className="px-4 py-2">
+            Settings
+          </Button>
+          <DirectoryView directoryPath={directoryPath} onDirectoryClick={handleDirectoryChange} />
+        </div>
+
+        <SearchBar
+          searchQuery={searchQuery}
+          setSearchQuery={setSearchQuery}
+          onSearch={searchFiles}
+          setSearchResults={setSearchResults}
+        />
+      </div>
+      <div className="flex-shrink-0">
+        <AudioPlayer
+          currentAudio={currentAudio}
+          volume={volume}
+          setVolume={setVolume}
+          shouldReplay
+        />
       </div>
 
-      <SearchBar
-        searchQuery={searchQuery}
-        setSearchQuery={setSearchQuery}
-        onSearch={searchFiles}
-        setSearchResults={setSearchResults}
-      />
-      <div className="flex justify-between items-start gap-2.5 max-w-7xl mx-auto h-full overflow-auto mb-24">
+      <div className="flex flex-grow justify-between items-start gap-2.5 max-w-7xl mx-auto h-full overflow-auto mb-24">
         <FileGrid
           files={searchResults.length > 0 ? searchResults : files}
           directoryPath={directoryPath}
           onDirectoryClick={handleDirectoryClick}
           onFileClick={handleFileClick}
         />
-        <div>
+        {/* <div className="w-1/4 overflow-auto">
           <MetadataDisplay metadata={audioMetadata || null} />
-        </div>
+        </div> */}
       </div>
 
-      <AudioPlayer currentAudio={currentAudio} volume={volume} setVolume={setVolume} shouldReplay />
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
+        onDirectorySelected={(path: string[]) => handleDirectoryChange(path)}
         onSave={(_newBindings: any) => {
           // Handle the new bindings
           setIsSettingsOpen(false)
