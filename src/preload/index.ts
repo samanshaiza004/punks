@@ -5,6 +5,7 @@ import fs from 'fs'
 import path from 'path'
 import { FileInfo } from '../renderer/src/types/FileInfo'
 import * as musicMetadata from 'music-metadata'
+import { rejects } from 'assert'
 
 // Custom APIs for renderer
 
@@ -140,7 +141,45 @@ export const api = {
     }
   },
   getKeyBindings: () => ipcRenderer.invoke('get-key-bindings'),
-  saveKeyBindings: (bindings) => ipcRenderer.invoke('save-key-bindings', bindings)
+  saveKeyBindings: (bindings) => ipcRenderer.invoke('save-key-bindings', bindings),
+  deleteFile: (filePath: string): Promise<boolean> => {
+    return new Promise((resolve, reject) => {
+      try {
+        fs.unlink(filePath, (err) => {
+          if (err) {
+            api.sendMessage(`Error deleting file ${filePath}: ${err}`)
+            reject(err)
+          } else {
+            resolve(true)
+          }
+        })
+      } catch (err) {
+        api.sendMessage(`Error in deleteFile: ${err}`)
+        reject(err)
+      }
+    })
+  },
+  copyFile: (source: string, destinationPath: string): Promise<boolean> => {
+    return new Promise((resolve, reject) => {
+      try {
+        fs.copyFile(source, destinationPath, (err) => {
+          if (err) {
+            api.sendMessage(`Error copying file ${source}: ${err}`)
+            reject(err)
+          } else {
+            resolve(true)
+          }
+        })
+      } catch (err) {
+        api.sendMessage(`Error in deleteFile: ${err}`)
+        reject(err)
+      }
+    })
+  },
+
+  showSaveDialog: (): Promise<string | null> => {
+    return ipcRenderer.invoke('show-save-dialog')
+  }
 }
 
 if (process.contextIsolated) {

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import { FileInfo } from '../../types/FileInfo'
-import { KeyHandlerMap } from '@renderer/keybinds/types'
+import { KeyHandlerMap } from '@renderer/types/types'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
 import { useTheme } from '@renderer/context/ThemeContext'
 
@@ -57,7 +57,7 @@ const SearchBar: React.FC<SearchBarProps> = ({
           placeholder="Search files or directories"
           className={`
             w-full
-            py-2
+            
             px-1
             rounded
             border
@@ -81,7 +81,7 @@ const SearchBar: React.FC<SearchBarProps> = ({
               top-1/2
               transform
               -translate-y-1/2
-              p-1
+              px-1
               rounded-full
               transition-colors
               ${

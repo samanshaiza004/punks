@@ -28,6 +28,13 @@ function getIconPath() {
   }
 }
 
+ipcMain.handle('show-save-dialog', async () => {
+  const result = await dialog.showSaveDialog({
+    properties: ['createDirectory']
+  })
+  return result.canceled ? null : result.filePath
+})
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'sample',

@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 // src/keybinds/hooks.ts
 import { useEffect, useRef } from 'react'
-import { KeyHandlerMap } from './types'
+import { KeyHandlerMap } from '../types/types'
 import { KeyBindingStore } from './store'
 
 // src/renderer/src/hooks/useKeyBindings.ts

@@ -72,9 +72,15 @@ export function App() {
     if (searchQuery.length > 0) {
       window.api
         .search(directoryPath, searchQuery)
-        .then((result: any) => setSearchResults(result))
-        .catch((err: any) => window.api.sendMessage('App.tsx: ' + err))
-        .finally(() => {})
+        .then((result: FileInfo[]) => {
+          // Ensure result is always an array, even if empty
+          const searchResults = Array.isArray(result) ? result : []
+          setSearchResults(searchResults)
+        })
+        .catch((err: any) => {
+          window.api.sendMessage('App.tsx: ' + err)
+          setSearchResults([]) // Reset results on error
+        })
     } else {
       setSearchResults([])
     }
@@ -115,7 +121,7 @@ export function App() {
     }
   }
 
-  // Handle going back in history
+  /* // Handle going back in history
   const handleGoBack = () => {
     if (currentHistoryIndex > 0) {
       const previousEntry = directoryHistory[currentHistoryIndex - 1]
@@ -131,7 +137,7 @@ export function App() {
       setDirectoryPath(nextEntry.path)
       setCurrentHistoryIndex((prev: number) => prev + 1)
     }
-  }
+  } */
 
   useEffect(() => {
     if (directoryPath.length > 0 && directoryHistory.length === 0) {
@@ -236,10 +242,11 @@ export function App() {
 
       <div className="flex flex-grow justify-between items-start gap-2.5 max-w-7xl mx-auto h-full overflow-auto mb-24">
         <FileGrid
-          files={searchResults.length > 0 ? searchResults : files}
+          files={searchQuery.length > 0 ? searchResults : files}
           directoryPath={directoryPath}
           onDirectoryClick={handleDirectoryClick}
           onFileClick={handleFileClick}
+          isSearching={searchQuery.length > 0}
         />
         {/* <div className="w-1/4 overflow-auto">
           <MetadataDisplay metadata={audioMetadata || null} />

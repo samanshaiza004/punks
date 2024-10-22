@@ -1,6 +1,6 @@
 import React from 'react'
 import { FileAddressItem } from '../FileAddressItem/FileAddressItem'
-import { KeyHandlerMap } from '@renderer/keybinds/types'
+import { KeyHandlerMap } from '@renderer/types/types'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
 import { useTheme } from '@renderer/context/ThemeContext'
 

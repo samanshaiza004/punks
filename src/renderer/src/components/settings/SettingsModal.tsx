@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 import React, { useState, useEffect } from 'react'
-import { KeyBindingMap, KeyCombo } from '@renderer/keybinds/types'
+import { KeyBindingMap, KeyCombo } from '@renderer/types/types'
 import { defaultKeyBindings } from '@renderer/keybinds/defaults'
 import { Button } from '../Button'
 import { useTheme } from '@renderer/context/ThemeContext'

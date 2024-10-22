@@ -1,5 +1,5 @@
 // src/keybinds/defaults.ts
-import { KeyBindingMap } from './types'
+import { KeyBindingMap } from '../types/types'
 
 export const defaultKeyBindings: KeyBindingMap = {
   NAVIGATE_UP: {

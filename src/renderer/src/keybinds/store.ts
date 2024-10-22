@@ -1,5 +1,5 @@
 // src/keybinds/store.ts
-import { KeyBindingMap, KeyCombo, KeyBinding } from './types'
+import { KeyBindingMap, KeyCombo, KeyBinding } from '../types/types'
 import { defaultKeyBindings } from './defaults'
 
 export class KeyBindingStore {

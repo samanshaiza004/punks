@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { FileItem } from '../FileItem'
 import { FileInfo } from '../../types/FileInfo'
 import { useKeyBindings } from '../../keybinds/hooks'
-import { KeyHandlerMap } from '../../keybinds/types'
+import { KeyHandlerMap } from '../../types/types'
 import { useTheme } from '@renderer/context/ThemeContext'
 
 interface FileGridProps {
@@ -11,13 +11,14 @@ interface FileGridProps {
   directoryPath: string[]
   onDirectoryClick: (path: string[]) => void
   onFileClick: (file: FileInfo) => void
+  isSearching?: boolean // New prop to distinguish between empty directory and no search results
 }
-
 const FileGrid: React.FC<FileGridProps> = ({
   files,
   directoryPath,
   onDirectoryClick,
-  onFileClick
+  onFileClick,
+  isSearching = false
 }) => {
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [gridColumns, setGridColumns] = useState(4)
@@ -125,9 +126,21 @@ const FileGrid: React.FC<FileGridProps> = ({
       ))}
       {files.length === 0 && (
         <div
-          className={`col-span-full text-center ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}
+          className={`col-span-full flex flex-col items-center justify-center p-8 rounded-lg ${
+            isDarkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-50 text-gray-600'
+          }`}
         >
-          No files found
+          {isSearching ? (
+            <>
+              <p className="text-xl font-semibold mb-2">No search results found</p>
+              <p className="text-sm">Try adjusting your search terms</p>
+            </>
+          ) : (
+            <>
+              <p className="text-xl font-semibold mb-2">This folder is empty</p>
+              <p className="text-sm">Add some files to get started</p>
+            </>
+          )}
         </div>
       )}
     </div>
