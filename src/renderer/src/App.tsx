@@ -2,15 +2,14 @@
 // src/App.tsx
 
 import { useState, useEffect } from 'react'
-import { DirectoryPicker } from './components/DirectoryPicker'
+
 import DirectoryView from './components/DirectoryView'
 import SearchBar from './components/SearchBar'
 import FileGrid from './components/FileGrid'
 import AudioPlayer from './components/AudioPlayer'
 import { FileInfo } from './types/FileInfo'
 import { useAudio } from './hooks/AudioContextProvider'
-import MetadataDisplay from './components/MetadataDisplay'
-import NavigationControls from './components/nav/NavigationControls'
+
 import SettingsModal from './components/settings/SettingsModal'
 import { KeyBindingStore } from './keybinds/store'
 import { useTheme } from './context/ThemeContext'
@@ -38,7 +37,7 @@ export function App() {
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
 
-  const [audioMetadata, setAudioMetadata] = useState<any>(null)
+  const [_audioMetadata, setAudioMetadata] = useState<any>(null)
   const FILE_EXTENSIONS = {
     images: ['jpg', 'png'],
     text: ['txt', 'md'],

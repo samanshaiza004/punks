@@ -1,4 +1,4 @@
-import { contextBridge } from 'electron'
+import { clipboard, contextBridge } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { ipcRenderer } from 'electron/renderer'
 import fs from 'fs'
@@ -175,6 +175,26 @@ export const api = {
         reject(err)
       }
     })
+  },
+  copyFileToClipboard: (filePath: string): Promise<boolean> => {
+    return new Promise((resolve, reject) => {
+      try {
+        clipboard.writeBuffer('FileNameW', Buffer.from(filePath, 'utf16le'))
+        resolve(true)
+      } catch (err) {
+        api.sendMessage(`Error copying file to clipboard: ${err}`)
+        reject(err)
+      }
+    })
+  },
+
+  hasFileInClipboard: (): boolean => {
+    try {
+      return clipboard.has('FileNameW')
+    } catch (err) {
+      api.sendMessage(`Error checking clipboard: ${err}`)
+      return false
+    }
   },
 
   showSaveDialog: (): Promise<string | null> => {

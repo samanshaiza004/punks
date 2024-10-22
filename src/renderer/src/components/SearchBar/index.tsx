@@ -57,8 +57,8 @@ const SearchBar: React.FC<SearchBarProps> = ({
           placeholder="Search files or directories"
           className={`
             w-full
-            
-            px-1
+            py-1
+            px-2
             rounded
             border
             outline-none

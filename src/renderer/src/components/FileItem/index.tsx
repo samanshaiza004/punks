@@ -32,8 +32,6 @@ export function FileItem({
     if (confirmed) {
       try {
         await window.api.deleteFile(location)
-        // Trigger refresh of parent component
-        // onClick() // You might want to add a separate onDelete callback instead
       } catch (err) {
         console.error('Error deleting file:', err)
       }
@@ -47,16 +45,12 @@ export function FileItem({
 
   const handleCopy = async () => {
     try {
-      const destinationPath = await window.api.showSaveDialog()
-      if (destinationPath) {
-        await window.api.copyFile(location, destinationPath)
-      }
+      await window.api.copyFileToClipboard(location)
     } catch (err) {
-      console.error('Error copying file:', err)
+      console.error('Error copying file to clipboard:', err)
     }
     setContextMenu(null)
   }
-
   return (
     <button
       className={`

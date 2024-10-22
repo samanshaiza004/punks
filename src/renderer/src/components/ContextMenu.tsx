@@ -27,24 +27,30 @@ const ContextMenu: React.FC<ContextMenuProps> = ({
   }, [onClose])
 
   return (
-    <div>
+    <div
+      className={`absolute z-50 min-w-[160px] py-1 rounded-md shadow-lg ${
+        isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'
+      }`}
+      style={{ top: y, left: x }}
+    >
       {!isDirectory && (
         <button
-          className={`w-full px-4 py-2 text-left hover:${
+          className={`text-xs font-semibold w-full px-2 py-1 text-left hover:${
             isDarkMode ? 'bg-gray-700' : 'bg-gray-100'
-          }`}
+          } flex items-center gap-2`}
           onClick={(e) => {
             e.stopPropagation()
             onCopy()
           }}
         >
-          Copy
+          <span>Copy</span>
+          <span className="text-xs text-gray-500 ml-auto">Ctrl+C</span>
         </button>
       )}
       <button
-        className={`w-full px-4 py-2 text-left text-red-600 hover:${
+        className={`text-xs font-semibold w-full px-2 py-1 text-left hover:${
           isDarkMode ? 'bg-gray-700' : 'bg-gray-100'
-        }`}
+        } flex items-center gap-2`}
         onClick={(e) => {
           e.stopPropagation()
           onDelete()
