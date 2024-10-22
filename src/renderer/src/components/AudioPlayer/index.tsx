@@ -6,16 +6,23 @@ import { Play, Pause, SkipBack, SkipForward } from '@phosphor-icons/react'
 
 interface AudioPlayerProps {
   currentAudio: string | null
-  shouldReplay: boolean
+  shouldReplay?: boolean
 }
 
 const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
   const waveSurferRef = useRef<WaveSurfer | null>(null)
-  const { volume, setVolume } = useAudio()
+  const {
+    volume,
+    setVolume,
+    isPlaying,
+    currentTime,
+    duration,
+    togglePlayPause,
+    handleSkipBack,
+    handleSkipForward,
+    formatTime
+  } = useAudio()
   const { isDarkMode } = useTheme()
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [currentTime, setCurrentTime] = useState(0)
-  const [duration, setDuration] = useState(0)
 
   useEffect(() => {
     if (!currentAudio) return
@@ -24,35 +31,6 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
   useEffect(() => {
     waveSurferRef.current?.setVolume(volume)
   }, [volume])
-
-  const togglePlayPause = () => {
-    if (waveSurferRef.current) {
-      if (isPlaying) {
-        waveSurferRef.current.pause()
-      } else {
-        waveSurferRef.current.play()
-      }
-      setIsPlaying(!isPlaying)
-    }
-  }
-  /*
-  const handleSkipBack = () => {
-    if (waveSurferRef.current) {
-      waveSurferRef.current.skipBackward(5)
-    }
-  }
-
-  const handleSkipForward = () => {
-    if (waveSurferRef.current) {
-      waveSurferRef.current.skipForward(5)
-    }
-  }
-  */
-  const formatTime = (time: number) => {
-    const minutes = Math.floor(time / 60)
-    const seconds = Math.floor(time % 60)
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`
-  }
 
   return (
     <div
@@ -77,14 +55,13 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
           >
             {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
           </button>
-          {/*
-          <button
+
+          {/* <button
             onClick={handleSkipForward}
             className={`p-2 rounded-full ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
           >
             <SkipForward className="w-5 h-5" />
-          </button>
-          */}
+          </button> */}
         </div>
         <div className="flex items-center space-x-2">
           <span className="text-sm">{formatTime(currentTime)}</span>
@@ -103,7 +80,11 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
             value={volume}
             onChange={(e) => setVolume(Number(e.target.value))}
             style={{
-              background: `linear-gradient(to right, ${isDarkMode ? '#60A5FA' : '#3B82F6'} 0%, ${isDarkMode ? '#60A5FA' : '#3B82F6'} ${volume * 100}%, ${isDarkMode ? '#4B5563' : '#D1D5DB'} ${volume * 100}%, ${isDarkMode ? '#4B5563' : '#D1D5DB'} 100%)`
+              background: `linear-gradient(to right, 
+                ${isDarkMode ? '#60A5FA' : '#3B82F6'} 0%, 
+                ${isDarkMode ? '#60A5FA' : '#3B82F6'} ${volume * 100}%, 
+                ${isDarkMode ? '#4B5563' : '#D1D5DB'} ${volume * 100}%, 
+                ${isDarkMode ? '#4B5563' : '#D1D5DB'} 100%)`
             }}
           />
         </div>

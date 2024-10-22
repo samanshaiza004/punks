@@ -45,6 +45,7 @@ export function FileItem({
 
   const handleCopy = async () => {
     try {
+      window.api.sendMessage('hello')
       await window.api.copyFileToClipboard(location)
     } catch (err) {
       console.error('Error copying file to clipboard:', err)

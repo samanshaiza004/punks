@@ -216,7 +216,7 @@ export function App() {
     >
       <div className="flex-shrink-0 ">
         {/* <DirectoryPicker onDirectorySelected={(path: string[]) => handleDirectoryChange(path)} /> */}
-        <div className="flex items-center space-x-4 mb-1">
+        <div className="flex items-center space-x-2 mb-2">
           <Button onClick={() => setIsSettingsOpen(true)} variant="secondary" className="px-4 py-2">
             Settings
           </Button>

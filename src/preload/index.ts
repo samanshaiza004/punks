@@ -179,7 +179,8 @@ export const api = {
   copyFileToClipboard: (filePath: string): Promise<boolean> => {
     return new Promise((resolve, reject) => {
       try {
-        clipboard.writeBuffer('FileNameW', Buffer.from(filePath, 'utf16le'))
+        api.sendMessage('copied files heh')
+        clipboard.writeBuffer('FileNameW', Buffer.from(filePath, 'utf8'))
         resolve(true)
       } catch (err) {
         api.sendMessage(`Error copying file to clipboard: ${err}`)
