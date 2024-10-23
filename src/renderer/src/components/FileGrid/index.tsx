@@ -24,7 +24,8 @@ const FileGrid: React.FC<FileGridProps> = ({
   const [gridColumns, setGridColumns] = useState(4)
   const { isDarkMode } = useTheme()
   const handleFileClick = useCallback(
-    (file: FileInfo) => {
+    (file: FileInfo, index: number) => {
+      setSelectedIndex(index)
       if (file.isDirectory) {
         onDirectoryClick([...directoryPath, file.name])
       } else {
@@ -94,7 +95,7 @@ const FileGrid: React.FC<FileGridProps> = ({
     NAVIGATE_RIGHT: () => navigateFiles('right'),
     SELECT_ITEM: () => {
       if (files[selectedIndex]) {
-        handleFileClick(files[selectedIndex])
+        handleFileClick(files[selectedIndex], selectedIndex)
       }
     }
   }
@@ -108,7 +109,7 @@ const FileGrid: React.FC<FileGridProps> = ({
 
   return (
     <div
-      className={`grid grid-cols-4 gap-2 p-4 auto-rows-fr ${
+      className={`grid grid-cols-4 xs:grid-cols-2 gap-2 p-4 auto-rows-fr ${
         isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'
       }`}
       tabIndex={0}
@@ -116,7 +117,7 @@ const FileGrid: React.FC<FileGridProps> = ({
       {files.map((file, index) => (
         <FileItem
           key={file.name}
-          onClick={() => handleFileClick(file)}
+          onClick={() => handleFileClick(file, index)}
           fileName={file.name}
           isDirectory={file.isDirectory}
           location={window.api.renderPath([...directoryPath, file.name])}

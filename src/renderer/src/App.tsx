@@ -14,6 +14,9 @@ import SettingsModal from './components/settings/SettingsModal'
 import { KeyBindingStore } from './keybinds/store'
 import { useTheme } from './context/ThemeContext'
 import { Button } from './components/Button'
+import { type } from 'os'
+import { FileFilter, FileFilterOptions } from './components/FileFilter'
+import { filterFiles } from './utils/fileFilters'
 
 interface DirectoryHistoryEntry {
   path: string[]
@@ -28,7 +31,6 @@ export function App() {
   const [currentHistoryIndex, setCurrentHistoryIndex] = useState<number>(-1)
 
   const [currentAudio, setCurrentAudio] = useState<string | null>(null)
-  const [volume, setVolume] = useState(0.8)
 
   const [searchQuery, setSearchQuery] = useState<string>('')
   const [searchResults, setSearchResults] = useState<FileInfo[]>([])
@@ -38,6 +40,16 @@ export function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
 
   const [_audioMetadata, setAudioMetadata] = useState<any>(null)
+
+  const [fileFilters, setFileFilters] = useState<FileFilterOptions>({
+    all: true,
+    audio: false,
+    images: false,
+    text: false,
+    video: false,
+    directories: false
+  })
+
   const FILE_EXTENSIONS = {
     images: ['jpg', 'png'],
     text: ['txt', 'md'],
@@ -215,7 +227,6 @@ export function App() {
       className={`flex flex-col h-screen p-2.5 ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}
     >
       <div className="flex-shrink-0 ">
-        {/* <DirectoryPicker onDirectorySelected={(path: string[]) => handleDirectoryChange(path)} /> */}
         <div className="flex items-center space-x-2 mb-2">
           <Button onClick={() => setIsSettingsOpen(true)} variant="secondary" className="px-4 py-2">
             Settings
@@ -223,25 +234,23 @@ export function App() {
           <DirectoryView directoryPath={directoryPath} onDirectoryClick={handleDirectoryChange} />
         </div>
 
-        <SearchBar
-          searchQuery={searchQuery}
-          setSearchQuery={setSearchQuery}
-          onSearch={searchFiles}
-          setSearchResults={setSearchResults}
-        />
+        <div className="flex items-center gap-4 mb-4">
+          <SearchBar
+            searchQuery={searchQuery}
+            setSearchQuery={setSearchQuery}
+            onSearch={searchFiles}
+            setSearchResults={setSearchResults}
+          />
+          <FileFilter filters={fileFilters} onFilterChange={setFileFilters} />
+        </div>
       </div>
       <div className="flex-shrink-0">
-        <AudioPlayer
-          currentAudio={currentAudio}
-          volume={volume}
-          setVolume={setVolume}
-          shouldReplay
-        />
+        <AudioPlayer currentAudio={currentAudio} shouldReplay />
       </div>
 
       <div className="flex flex-grow justify-between items-start gap-2.5 max-w-7xl mx-auto h-full overflow-auto mb-24">
         <FileGrid
-          files={searchQuery.length > 0 ? searchResults : files}
+          files={filterFiles(searchQuery.length > 0 ? searchResults : files, fileFilters)}
           directoryPath={directoryPath}
           onDirectoryClick={handleDirectoryClick}
           onFileClick={handleFileClick}

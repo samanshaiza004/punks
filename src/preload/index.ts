@@ -5,7 +5,6 @@ import fs from 'fs'
 import path from 'path'
 import { FileInfo } from '../renderer/src/types/FileInfo'
 import * as musicMetadata from 'music-metadata'
-import { rejects } from 'assert'
 
 // Custom APIs for renderer
 

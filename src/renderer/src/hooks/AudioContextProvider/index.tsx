@@ -18,7 +18,7 @@ interface AudioContextProps {
 }
 
 interface AudioProviderProps {
-  children: ReactNode // Define children as a prop
+  children: ReactNode
 }
 
 const AudioContext = createContext<AudioContextProps | undefined>(undefined)
@@ -29,17 +29,9 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
+
   const waveSurferRef = useRef<WaveSurfer | null>(null)
   const { isDarkMode } = useTheme()
-  const playAudio = (filePath: string) => {
-    setCurrentAudio(filePath)
-    if (waveSurferRef.current) {
-      waveSurferRef.current?.load(filePath)
-      waveSurferRef.current.on('ready', () => {
-        waveSurferRef.current?.play()
-      })
-    }
-  }
 
   useEffect(() => {
     waveSurferRef.current = WaveSurfer.create({
@@ -64,7 +56,6 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
         setCurrentTime(waveSurferRef.current?.getCurrentTime() || 0)
       })
 
-      waveSurferRef.current.on('click', () => waveSurferRef.current?.play())
       waveSurferRef.current.on('play', () => setIsPlaying(true))
       waveSurferRef.current.on('pause', () => setIsPlaying(false))
       waveSurferRef.current.on('finish', () => setIsPlaying(false))
@@ -73,11 +64,21 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     return () => {
       waveSurferRef.current?.destroy()
     }
-  }, [])
+  }, [isDarkMode])
 
   useEffect(() => {
     waveSurferRef.current?.setVolume(volume)
   }, [volume])
+
+  const playAudio = (filePath: string) => {
+    setCurrentAudio(filePath)
+    if (waveSurferRef.current) {
+      waveSurferRef.current?.load(filePath)
+      waveSurferRef.current.on('ready', () => {
+        waveSurferRef.current?.play()
+      })
+    }
+  }
 
   const stopAudio = () => {
     waveSurferRef.current?.stop()
@@ -88,8 +89,10 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
 
   const togglePlayPause = () => {
     if (waveSurferRef.current) {
+      const currentTime = waveSurferRef.current.getCurrentTime()
       if (isPlaying) {
         waveSurferRef.current.pause()
+        waveSurferRef.current.seekTo(currentTime / duration)
       } else {
         waveSurferRef.current.play()
       }

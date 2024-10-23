@@ -43,7 +43,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     e.preventDefault()
     const key = e.key
 
-    const modifiers = []
+    const modifiers: string[] = []
     if (e.ctrlKey) modifiers.push('Ctrl')
     if (e.altKey) modifiers.push('Alt')
     if (e.shiftKey) modifiers.push('Shift')

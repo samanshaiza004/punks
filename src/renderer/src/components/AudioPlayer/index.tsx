@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 import { useAudio } from '../../hooks/AudioContextProvider'
 import { useTheme } from '@renderer/context/ThemeContext'
-import { Play, Pause, SkipBack, SkipForward } from '@phosphor-icons/react'
+import { Play, Pause } from '@phosphor-icons/react'
 
 interface AudioPlayerProps {
   currentAudio: string | null
@@ -18,8 +18,8 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
     currentTime,
     duration,
     togglePlayPause,
-    handleSkipBack,
-    handleSkipForward,
+    /* handleSkipBack,
+    handleSkipForward, */
     formatTime
   } = useAudio()
   const { isDarkMode } = useTheme()
@@ -41,14 +41,13 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
       <div id="waveform" className="mb-4" />
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-4">
-          {/*
-          <button
+          {/* <button
             onClick={handleSkipBack}
             className={`p-2 rounded-full ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
           >
             <SkipBack className="w-5 h-5" />
-          </button>
-          */}
+          </button> */}
+
           <button
             onClick={togglePlayPause}
             className={`p-2 rounded-full ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
