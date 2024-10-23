@@ -22,6 +22,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const [keyBindings, setKeyBindings] = useState<KeyBindingMap>(defaultKeyBindings)
   const [editingBinding, setEditingBinding] = useState<string | null>(null)
   const [tempKeys, setTempKeys] = useState<KeyCombo>([])
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const { isDarkMode, toggleDarkMode } = useTheme()
   useEffect(() => {
     const loadSavedBindings = async (): Promise<void> => {
@@ -34,6 +35,12 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         console.error('Failed to load key bindings:', error)
       }
     }
+
+    const loadAlwaysOnTop = async (): Promise<void> => {
+      const value = await window.api.getAlwaysOnTop()
+      setAlwaysOnTop(value)
+    }
+    loadAlwaysOnTop()
     loadSavedBindings()
   }, [])
 
@@ -98,6 +105,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleSave = async () => {
     try {
       await window.api.saveKeyBindings(keyBindings)
+      await window.api.setAlwaysOnTop(alwaysOnTop)
       onSave(keyBindings)
       onClose()
     } catch (error) {
@@ -124,7 +132,17 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             ×
           </button>
         </div>
-        {/* Directory Picker */}
+        <div className="mt-4 px-4">
+          <h4 className="text-lg font-semibold">Window Settings</h4>
+          <label>
+            <input
+              type="checkbox"
+              checked={alwaysOnTop}
+              onChange={(e) => setAlwaysOnTop(e.target.checked)}
+            />
+            Always on Top
+          </label>
+        </div>
         <div className="mt-4 px-4">
           <h4 className="text-lg font-semibold">Select Directory</h4>
           <DirectoryPicker onDirectorySelected={onDirectorySelected} />

@@ -199,7 +199,10 @@ export const api = {
 
   showSaveDialog: (): Promise<string | null> => {
     return ipcRenderer.invoke('show-save-dialog')
-  }
+  },
+  setAlwaysOnTop: (value: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('set-always-on-top', value),
+  getAlwaysOnTop: (): Promise<boolean> => ipcRenderer.invoke('get-always-on-top')
 }
 
 if (process.contextIsolated) {
