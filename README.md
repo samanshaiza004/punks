@@ -2,35 +2,37 @@
 
 progressive, user-friendly navigator for kits and samples
 
-An Electron application with React and TypeScript
+## core features
 
-## Recommended IDE Setup
+- Browse through audio sample libraries.
+- Search and filter samples by tags, categories, or keywords.
+- Preview samples quickly before deciding to use them.
+- Organize samples by marking favorites.
+- Drag and drop samples into a Digital Audio Workstation (DAW).
 
-- [VSCode](https://code.visualstudio.com/) + [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint) + [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode)
+## contribute
 
-## Project Setup
+I super open to contributions! it's really easy to spin up a dev enviroment:
 
-### Install
-
-```bash
-$ npm install
-```
-
-### Development
+1. fork
 
 ```bash
-$ npm run dev
+git clone https://github.com/samanshaiza004/punks.git
+cd punks
 ```
 
-### Build
+2. install dependencies
 
 ```bash
-# For windows
-$ npm run build:win
-
-# For macOS
-$ npm run build:mac
-
-# For Linux
-$ npm run build:linux
+npm install
 ```
+
+3. run in development mode
+
+```bash
+npm run dev
+```
+
+## License
+
+Punks is distributed under the MIT License. See the [LICENSE](LICENSE) for more information.
