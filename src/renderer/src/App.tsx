@@ -14,7 +14,6 @@ import SettingsModal from './components/settings/SettingsModal'
 import { KeyBindingStore } from './keybinds/store'
 import { useTheme } from './context/ThemeContext'
 import { Button } from './components/Button'
-import { type } from 'os'
 import { FileFilter, FileFilterOptions } from './components/FileFilter'
 import { filterFiles } from './utils/fileFilters'
 
