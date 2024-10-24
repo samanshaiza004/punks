@@ -34,7 +34,7 @@ const FileGrid: React.FC<FileGridProps> = ({
   // Calculate grid dimensions
   const columnsCount = Math.max(1, Math.floor(containerWidth / ITEM_WIDTH))
   const totalRows = Math.ceil(files.length / columnsCount)
-  const totalHeight = totalRows * ITEM_HEIGHT
+  // const totalHeight = totalRows * ITEM_HEIGHT
 
   // Calculate which items should be visible
   const calculateVisibleItems = useCallback(() => {
