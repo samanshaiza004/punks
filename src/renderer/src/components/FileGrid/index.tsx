@@ -1,5 +1,4 @@
-// Updated FileGrid component
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState, useRef } from 'react'
 import { FileItem } from '../FileItem'
 import { FileInfo } from '../../types/FileInfo'
 import { useKeyBindings } from '../../keybinds/hooks'
@@ -11,8 +10,13 @@ interface FileGridProps {
   directoryPath: string[]
   onDirectoryClick: (path: string[]) => void
   onFileClick: (file: FileInfo) => void
-  isSearching?: boolean // New prop to distinguish between empty directory and no search results
+  isSearching?: boolean
 }
+
+const ITEM_HEIGHT = 120 // Height of each grid item in pixels
+const ITEM_WIDTH = 120 // Width of each grid item in pixels
+const BUFFER_SIZE = 5 // Number of extra rows to render above and below viewport
+
 const FileGrid: React.FC<FileGridProps> = ({
   files,
   directoryPath,
@@ -20,9 +24,63 @@ const FileGrid: React.FC<FileGridProps> = ({
   onFileClick,
   isSearching = false
 }) => {
-  const [selectedIndex, setSelectedIndex] = useState(0)
-  const [gridColumns, setGridColumns] = useState(4)
   const { isDarkMode } = useTheme()
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [selectedIndex, setSelectedIndex] = useState(0)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [containerWidth, setContainerWidth] = useState(0)
+  const [visibleItems, setVisibleItems] = useState<FileInfo[]>([])
+
+  // Calculate grid dimensions
+  const columnsCount = Math.max(1, Math.floor(containerWidth / ITEM_WIDTH))
+  const totalRows = Math.ceil(files.length / columnsCount)
+  const totalHeight = totalRows * ITEM_HEIGHT
+
+  // Calculate which items should be visible
+  const calculateVisibleItems = useCallback(() => {
+    if (!containerRef.current) return
+
+    const visibleStart = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - BUFFER_SIZE)
+    const visibleEnd = Math.min(
+      totalRows,
+      Math.ceil((scrollTop + containerRef.current.clientHeight) / ITEM_HEIGHT) + BUFFER_SIZE
+    )
+
+    const startIndex = visibleStart * columnsCount
+    const endIndex = Math.min(files.length, visibleEnd * columnsCount)
+
+    const items = files.slice(startIndex, endIndex)
+    setVisibleItems(items)
+  }, [files, scrollTop, columnsCount, totalRows])
+
+  // Handle scroll events
+  const handleScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLDivElement
+    setScrollTop(target.scrollTop)
+  }, [])
+
+  // Handle resize events
+  useEffect(() => {
+    const updateContainerWidth = () => {
+      if (containerRef.current) {
+        setContainerWidth(containerRef.current.clientWidth)
+      }
+    }
+
+    updateContainerWidth()
+    const observer = new ResizeObserver(updateContainerWidth)
+    if (containerRef.current) {
+      observer.observe(containerRef.current)
+    }
+
+    return () => observer.disconnect()
+  }, [])
+
+  // Update visible items when necessary
+  useEffect(() => {
+    calculateVisibleItems()
+  }, [calculateVisibleItems, scrollTop, containerWidth])
+
   const handleFileClick = useCallback(
     (file: FileInfo, index: number) => {
       setSelectedIndex(index)
@@ -35,21 +93,6 @@ const FileGrid: React.FC<FileGridProps> = ({
     [directoryPath, onDirectoryClick, onFileClick]
   )
 
-  useEffect(() => {
-    const updateGridColumns = () => {
-      const gridElement = document.querySelector('.file-grid')
-      if (gridElement) {
-        const computedStyle = window.getComputedStyle(gridElement)
-        const columns = computedStyle.getPropertyValue('grid-template-columns').split(' ').length
-        setGridColumns(columns)
-      }
-    }
-
-    updateGridColumns()
-    window.addEventListener('resize', updateGridColumns)
-    return () => window.removeEventListener('resize', updateGridColumns)
-  }, [])
-
   const navigateFiles = useCallback(
     (direction: 'up' | 'down' | 'left' | 'right') => {
       setSelectedIndex((prevIndex) => {
@@ -58,18 +101,18 @@ const FileGrid: React.FC<FileGridProps> = ({
 
         switch (direction) {
           case 'up':
-            newIndex = prevIndex - gridColumns
+            newIndex = prevIndex - columnsCount
             break
           case 'down':
-            newIndex = prevIndex + gridColumns
+            newIndex = prevIndex + columnsCount
             break
           case 'left':
-            if (prevIndex % gridColumns !== 0) {
+            if (prevIndex % columnsCount !== 0) {
               newIndex = prevIndex - 1
             }
             break
           case 'right':
-            if ((prevIndex + 1) % gridColumns !== 0 && prevIndex < maxIndex) {
+            if ((prevIndex + 1) % columnsCount !== 0 && prevIndex < maxIndex) {
               newIndex = prevIndex + 1
             }
             break
@@ -79,17 +122,26 @@ const FileGrid: React.FC<FileGridProps> = ({
         if (newIndex < 0) newIndex = 0
         if (newIndex > maxIndex) newIndex = maxIndex
 
+        // Scroll selected item into view
+        const itemRow = Math.floor(newIndex / columnsCount)
+        const itemOffset = itemRow * ITEM_HEIGHT
+        if (containerRef.current) {
+          if (itemOffset < scrollTop) {
+            containerRef.current.scrollTop = itemOffset
+          } else if (itemOffset + ITEM_HEIGHT > scrollTop + containerRef.current.clientHeight) {
+            containerRef.current.scrollTop =
+              itemOffset - containerRef.current.clientHeight + ITEM_HEIGHT
+          }
+        }
+
         return newIndex
       })
     },
-    [gridColumns, files.length]
+    [columnsCount, files.length]
   )
 
   const handlers: KeyHandlerMap = {
-    NAVIGATE_UP: () => {
-      console.log('NAVIGATE_UP')
-      navigateFiles('up')
-    },
+    NAVIGATE_UP: () => navigateFiles('up'),
     NAVIGATE_DOWN: () => navigateFiles('down'),
     NAVIGATE_LEFT: () => navigateFiles('left'),
     NAVIGATE_RIGHT: () => navigateFiles('right'),
@@ -105,45 +157,70 @@ const FileGrid: React.FC<FileGridProps> = ({
   // Reset selection when files change
   useEffect(() => {
     setSelectedIndex(0)
+    setScrollTop(0)
+    if (containerRef.current) {
+      containerRef.current.scrollTop = 0
+    }
   }, [directoryPath])
+
+  if (files.length === 0) {
+    return (
+      <div
+        className={`col-span-full flex flex-col items-center justify-center p-8 rounded-lg ${
+          isDarkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-50 text-gray-600'
+        }`}
+      >
+        {isSearching ? (
+          <>
+            <p className="text-xl font-semibold mb-2">No search results found</p>
+            <p className="text-sm">Try adjusting your search terms</p>
+          </>
+        ) : (
+          <>
+            <p className="text-xl font-semibold mb-2">This folder is empty</p>
+            <p className="text-sm">Add some files to get started</p>
+          </>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div
-      className={`grid grid-cols-4 xs:grid-cols-2 gap-2 p-4 auto-rows-fr ${
-        isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'
-      }`}
+      ref={containerRef}
+      /* className={`h-full overflow-auto ${isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'}`} */
+      onScroll={handleScroll}
       tabIndex={0}
     >
-      {files.map((file, index) => (
-        <FileItem
-          key={file.name}
-          onClick={() => handleFileClick(file, index)}
-          fileName={file.name}
-          isDirectory={file.isDirectory}
-          location={window.api.renderPath([...directoryPath, file.name])}
-          isSelected={index === selectedIndex}
-          isDarkMode={isDarkMode}
-        />
-      ))}
-      {files.length === 0 && (
+      <div
+      /* style={{
+          height: totalHeight,
+          position: 'relative'
+        }} */
+      >
         <div
-          className={`col-span-full flex flex-col items-center justify-center p-8 rounded-lg ${
-            isDarkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-50 text-gray-600'
-          }`}
+          className="grid gap-2 p-4 absolute w-full"
+          /* style={{
+            gridTemplateColumns: `repeat(${columnsCount}, minmax(0, 1fr))`,
+            transform: `translateY(${Math.floor(scrollTop / ITEM_HEIGHT) * ITEM_HEIGHT}px)`
+          }} */
         >
-          {isSearching ? (
-            <>
-              <p className="text-xl font-semibold mb-2">No search results found</p>
-              <p className="text-sm">Try adjusting your search terms</p>
-            </>
-          ) : (
-            <>
-              <p className="text-xl font-semibold mb-2">This folder is empty</p>
-              <p className="text-sm">Add some files to get started</p>
-            </>
-          )}
+          {visibleItems.map((file, index) => {
+            const actualIndex = Math.floor(scrollTop / ITEM_HEIGHT) * columnsCount + index
+            return (
+              <FileItem
+                key={`${file.name}-${actualIndex}`}
+                onClick={() => handleFileClick(file, actualIndex)}
+                fileName={file.name}
+                isDirectory={file.isDirectory}
+                location={window.api.renderPath([...directoryPath, file.name])}
+                isSelected={actualIndex === selectedIndex}
+                isDarkMode={isDarkMode}
+              />
+            )
+          })}
         </div>
-      )}
+      </div>
     </div>
   )
 }

@@ -12,7 +12,7 @@ progressive, user-friendly navigator for kits and samples
 
 ## contribute
 
-I super open to contributions! it's really easy to spin up a dev enviroment:
+i'm open to contributions! it's really easy to spin up a dev enviroment:
 
 1. fork
 

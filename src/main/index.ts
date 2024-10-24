@@ -55,6 +55,7 @@ function createWindow(): void {
     height: 670,
     show: false,
     autoHideMenuBar: true,
+    backgroundColor: '#1f2937',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: true,
@@ -63,8 +64,9 @@ function createWindow(): void {
     }
   })
 
-  mainWindow.on('ready-to-show', () => {
+  mainWindow.once('ready-to-show', () => {
     mainWindow.show()
+    mainWindow.focus()
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -93,6 +95,20 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  /* let windowState = store?.get('windowState')
+
+  [('resize', 'move', 'close')].forEach((element) => {
+    mainWindow.on(element, () => {
+      windowState.isMaximized = mainWindow.isMaximized()
+
+      if (!windowState.isMaximized) {
+        windowState.bounds = mainWindow.getBounds()
+      }
+
+      store.set('windowState', windowState)
+    })
+  }) */
 }
 
 ipcMain.on('ondragstart', (event, filePath) => {
