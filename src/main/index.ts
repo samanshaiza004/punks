@@ -18,12 +18,10 @@ ipcMain.handle('save-key-bindings', (_, bindings) => {
   return true
 })
 
-// Helper function to resolve icon path
-function getIconPath() {
+function getIconPath(): string {
   if (is.dev) {
     return path.join(process.cwd(), 'resources', 'icon.png')
   } else {
-    // In production, resources are in the app.asar
     return path.join(__dirname, '../../resources/icon.png')
   }
 }
@@ -33,6 +31,13 @@ ipcMain.handle('show-save-dialog', async () => {
     properties: ['createDirectory']
   })
   return result.canceled ? null : result.filePath
+})
+
+ipcMain.handle('set-always-on-top', (_, value: boolean) => {
+  const windows = BrowserWindow.getAllWindows()
+  windows.forEach((window) => window.setAlwaysOnTop(value))
+  store.set('alwaysOnTop', value)
+  return true
 })
 
 protocol.registerSchemesAsPrivileged([
@@ -63,6 +68,9 @@ function createWindow(): void {
       sandbox: false
     }
   })
+
+  const alwaysOnTop = store?.get('alwaysOnTop', false) ?? false
+  mainWindow.setAlwaysOnTop(alwaysOnTop)
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show()
@@ -115,7 +123,6 @@ ipcMain.on('ondragstart', (event, filePath) => {
   const absolutePath = path.resolve(filePath)
   const iconPath = getIconPath()
 
-  // Verify that the icon exists
   try {
     if (require('fs').existsSync(iconPath)) {
       event.sender.startDrag({
@@ -127,7 +134,6 @@ ipcMain.on('ondragstart', (event, filePath) => {
     }
   } catch (error) {
     console.error('Error starting drag:', error)
-    // Fall back to dragging without an icon
   }
 })
 
