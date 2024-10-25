@@ -1,16 +1,12 @@
 import { clipboard, contextBridge } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { ipcRenderer } from 'electron/renderer'
-import fs from 'fs'
+import fs from 'fs/promises'
 import path from 'path'
 import { FileInfo } from '../renderer/src/types/FileInfo'
 import * as musicMetadata from 'music-metadata'
 
 // Custom APIs for renderer
-
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
 export const api = {
   sendMessage: (message: string): void => {
     ipcRenderer.send('message', message)
@@ -20,24 +16,38 @@ export const api = {
     return path.join(...pathParts)
   },
 
-  readDir: (pathParts: string[]): Promise<FileInfo[]> => {
-    return new Promise((resolve, reject) => {
+  readDir: async (
+    pathParts: string[],
+    offset = 0,
+    limit?: number
+  ): Promise<{
+    files: FileInfo[]
+    total: number
+    hasMore: boolean
+  }> => {
+    try {
       const directoryPath = path.join(...pathParts)
-      fs.readdir(directoryPath, { withFileTypes: true }, (err, files) => {
-        if (err) {
-          const errorMessage = `Error reading directory ${directoryPath}: ${err}`
-          api.sendMessage(errorMessage)
-          reject(new Error(errorMessage))
-        } else {
-          const fileInfoList = files.map((file) => ({
-            name: file.name,
-            location: directoryPath,
-            isDirectory: file.isDirectory()
-          }))
-          resolve(fileInfoList)
-        }
-      })
-    })
+      const allFiles = await fs.readdir(directoryPath, { withFileTypes: true })
+      const total = allFiles.length
+
+      const filesToProcess = limit ? allFiles.slice(offset, offset + limit) : allFiles
+
+      const fileInfoList = filesToProcess.map((file) => ({
+        name: file.name,
+        location: directoryPath,
+        isDirectory: file.isDirectory()
+      }))
+
+      return {
+        files: fileInfoList,
+        total,
+        hasMore: limit ? offset + limit < total : false
+      }
+    } catch (err) {
+      const errorMessage = `Error reading directory ${path.join(...pathParts)}: ${err}`
+      api.sendMessage(errorMessage)
+      throw new Error(errorMessage)
+    }
   },
 
   moveDirectory: async (currentPath: string[], newDirectory: string): Promise<string[]> => {
@@ -47,7 +57,7 @@ export const api = {
     } else {
       try {
         const directoryContents = await api.readDir(currentPath)
-        if (api.containsDirectory(directoryContents, newDirectory)) {
+        if (api.containsDirectory(directoryContents.files, newDirectory)) {
           currentPath.push(newDirectory)
         } else {
           api.sendMessage('directory not found: ' + newDirectory)
@@ -62,9 +72,11 @@ export const api = {
   getLastSelectedDirectory: (): Promise<string | null> => {
     return ipcRenderer.invoke('get-last-selected-directory')
   },
-  isDirectory: (fullPath: string): boolean => {
+
+  isDirectory: async (fullPath: string): Promise<boolean> => {
     try {
-      return fs.lstatSync(fullPath).isDirectory()
+      const stats = await fs.lstat(fullPath)
+      return stats.isDirectory()
     } catch (err) {
       api.sendMessage('error checking if path is directory: ' + err)
       return false
@@ -76,7 +88,7 @@ export const api = {
   },
 
   openDirectoryPicker: (): Promise<string | null> => {
-    api.sendMessage('opengin direictory')
+    api.sendMessage('opening directory')
     return ipcRenderer.invoke('open-directory-picker')
   },
 
@@ -85,23 +97,23 @@ export const api = {
     ipcRenderer.send('ondragstart', filename)
   },
 
-  doesFileExist: (filePath: string): boolean => {
+  doesFileExist: async (filePath: string): Promise<boolean> => {
     try {
-      return fs.existsSync(filePath)
-    } catch (err) {
-      ipcRenderer.send('message', 'Error checking if file exists: ' + err)
+      await fs.access(filePath)
+      return true
+    } catch {
       return false
     }
   },
 
-  search: (pathParts: string[], query: string): Promise<FileInfo[]> => {
+  search: async (pathParts: string[], query: string): Promise<FileInfo[]> => {
     const directoryPath = path.join(...pathParts)
 
-    const searchRecursively = (dir: string, query: string): FileInfo[] => {
+    const searchRecursively = async (dir: string, query: string): Promise<FileInfo[]> => {
       let results: FileInfo[] = []
       try {
-        const files = fs.readdirSync(dir, { withFileTypes: true })
-        files.forEach((file) => {
+        const files = await fs.readdir(dir, { withFileTypes: true })
+        for (const file of files) {
           const fullPath = path.join(dir, file.name)
           if (file.name.includes(query)) {
             results.push({
@@ -111,74 +123,55 @@ export const api = {
             })
           }
           if (file.isDirectory()) {
-            results = results.concat(searchRecursively(fullPath, query))
+            results = results.concat(await searchRecursively(fullPath, query))
           }
-        })
+        }
       } catch (err) {
         api.sendMessage(`Error searching directory ${dir}: ${err}`)
       }
       return results
     }
 
-    return new Promise((resolve, reject) => {
-      try {
-        const results = searchRecursively(directoryPath, query)
-        resolve(results)
-      } catch (err) {
-        reject(err)
-      }
-    })
+    return searchRecursively(directoryPath, query)
   },
+
   getAudioMetadata: async (filePath: string) => {
     try {
       const metadata = await musicMetadata.parseFile(filePath)
-
       return metadata
     } catch (err) {
       ipcRenderer.send('message', 'Error getting audio metadata: ' + err)
       return null
     }
   },
+
   getKeyBindings: () => ipcRenderer.invoke('get-key-bindings'),
   saveKeyBindings: (bindings) => ipcRenderer.invoke('save-key-bindings', bindings),
-  deleteFile: (filePath: string): Promise<boolean> => {
-    return new Promise((resolve, reject) => {
-      try {
-        fs.unlink(filePath, (err) => {
-          if (err) {
-            api.sendMessage(`Error deleting file ${filePath}: ${err}`)
-            reject(err)
-          } else {
-            resolve(true)
-          }
-        })
-      } catch (err) {
-        api.sendMessage(`Error in deleteFile: ${err}`)
-        reject(err)
-      }
-    })
+
+  deleteFile: async (filePath: string): Promise<boolean> => {
+    try {
+      await fs.unlink(filePath)
+      return true
+    } catch (err) {
+      api.sendMessage(`Error deleting file ${filePath}: ${err}`)
+      throw err
+    }
   },
-  copyFile: (source: string, destinationPath: string): Promise<boolean> => {
-    return new Promise((resolve, reject) => {
-      try {
-        fs.copyFile(source, destinationPath, (err) => {
-          if (err) {
-            api.sendMessage(`Error copying file ${source}: ${err}`)
-            reject(err)
-          } else {
-            resolve(true)
-          }
-        })
-      } catch (err) {
-        api.sendMessage(`Error in deleteFile: ${err}`)
-        reject(err)
-      }
-    })
+
+  copyFile: async (source: string, destinationPath: string): Promise<boolean> => {
+    try {
+      await fs.copyFile(source, destinationPath)
+      return true
+    } catch (err) {
+      api.sendMessage(`Error copying file ${source}: ${err}`)
+      throw err
+    }
   },
+
   copyFileToClipboard: (filePath: string): Promise<boolean> => {
     return new Promise((resolve, reject) => {
       try {
-        api.sendMessage('copied files heh')
+        api.sendMessage('copied file to clipboard')
         clipboard.writeBuffer('FileNameW', Buffer.from(filePath, 'utf8'))
         resolve(true)
       } catch (err) {
@@ -200,6 +193,7 @@ export const api = {
   showSaveDialog: (): Promise<string | null> => {
     return ipcRenderer.invoke('show-save-dialog')
   },
+
   setAlwaysOnTop: (value: boolean): Promise<boolean> =>
     ipcRenderer.invoke('set-always-on-top', value),
   getAlwaysOnTop: (): Promise<boolean> => ipcRenderer.invoke('get-always-on-top')

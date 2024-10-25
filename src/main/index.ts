@@ -40,6 +40,10 @@ ipcMain.handle('set-always-on-top', (_, value: boolean) => {
   return true
 })
 
+ipcMain.handle('get-always-on-top', () => {
+  return store.get('alwaysOnTop', false)
+})
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'sample',

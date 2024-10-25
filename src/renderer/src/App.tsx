@@ -59,7 +59,7 @@ export function App() {
   const { playAudio } = useAudio()
 
   /** Fetches files from the current directory and sets the sorted result */
-  const fetchFiles = () => {
+  /* const fetchFiles = () => {
     window.api
       .readDir(directoryPath)
       .then((result) => {
@@ -67,7 +67,7 @@ export function App() {
         setFiles(sortedFiles)
       })
       .catch((err) => window.api.sendMessage('App.tsx: ' + err))
-  }
+  } */
 
   /** Sorts files by directories first, then by name */
   const sortFiles = (files: FileInfo[]): FileInfo[] => {
@@ -82,14 +82,10 @@ export function App() {
     if (searchQuery.length > 0) {
       window.api
         .search(directoryPath, searchQuery)
-        .then((result: FileInfo[]) => {
-          // Ensure result is always an array, even if empty
-          const searchResults = Array.isArray(result) ? result : []
-          setSearchResults(searchResults)
-        })
-        .catch((err: any) => {
+        .then((result: FileInfo[]) => setSearchResults(result || []))
+        .catch((err) => {
           window.api.sendMessage('App.tsx: ' + err)
-          setSearchResults([]) // Reset results on error
+          setSearchResults([])
         })
     } else {
       setSearchResults([])
@@ -120,15 +116,9 @@ export function App() {
   }
 
   const handleDirectoryClick = (directory: string[]) => {
-    if (searchQuery.length > 0) {
-      setSearchQuery('')
-      let newDirectory = directory
-      window.api.sendMessage('App.tsx: newDirectory: ' + newDirectory)
-      setDirectoryPath(newDirectory)
-      setSearchResults([])
-    } else {
-      setDirectoryPath(directory)
-    }
+    setSearchQuery('')
+    setDirectoryPath(directory)
+    setSearchResults([])
   }
 
   /* // Handle going back in history
@@ -155,7 +145,6 @@ export function App() {
       // setCurrentHistoryIndex(0)
     }
     console.log(currentHistoryIndex)
-    fetchFiles()
   }, [directoryPath])
 
   useEffect(() => {
@@ -208,7 +197,7 @@ export function App() {
           audioPath = window.api.renderPath([...directoryPath, file.name])
           window.api.sendMessage('' + audioPath)
         }
-        if (window.api.doesFileExist(audioPath)) {
+        if (await window.api.doesFileExist(audioPath)) {
           const metadata = await window.api.getAudioMetadata(audioPath)
           setAudioMetadata(metadata)
           playAudio(`sample:///${audioPath}`)
@@ -249,11 +238,11 @@ export function App() {
 
       <div className="flex flex-grow justify-between items-start gap-2.5 max-w-7xl mx-auto h-full overflow-auto mb-24">
         <FileGrid
-          files={filterFiles(searchQuery.length > 0 ? searchResults : files, fileFilters)}
           directoryPath={directoryPath}
           onDirectoryClick={handleDirectoryClick}
           onFileClick={handleFileClick}
           isSearching={searchQuery.length > 0}
+          searchResults={searchResults}
         />
         {/* <div className="w-1/4 overflow-auto">
           <MetadataDisplay metadata={audioMetadata || null} />
