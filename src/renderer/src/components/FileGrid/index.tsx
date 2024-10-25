@@ -23,7 +23,6 @@ const FileGrid: React.FC<FileGridProps> = ({
 }) => {
   const { files, isLoading, hasMore, loadMoreFiles, totalFiles } = useBatchLoading(directoryPath)
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const [columnCount, setColumnCount] = useState(4)
 
   const [gridColumns, setGridColumns] = useState(4)
   const { isDarkMode } = useTheme()
@@ -125,9 +124,14 @@ const FileGrid: React.FC<FileGridProps> = ({
       NAVIGATE_DOWN: () => navigateFiles('down'),
       NAVIGATE_LEFT: () => navigateFiles('left'),
       NAVIGATE_RIGHT: () => navigateFiles('right'),
-      SELECT_ITEM: () => {
-        if (files[selectedIndex]) {
-          onFileClick(files[selectedIndex])
+      SELECT_ITEM: (): void => {
+        const selectedFile = displayedFiles[selectedIndex]
+        if (selectedFile) {
+          if (selectedFile.isDirectory) {
+            onDirectoryClick([...directoryPath, selectedFile.name])
+          } else {
+            onFileClick(selectedFile)
+          }
         }
       }
     }),
