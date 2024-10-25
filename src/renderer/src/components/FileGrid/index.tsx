@@ -1,4 +1,3 @@
-// src/components/FileGrid.tsx
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { FileItem } from '../FileItem'
 import { FileInfo } from '@renderer/types/FileInfo'
@@ -23,15 +22,40 @@ const FileGrid: React.FC<FileGridProps> = ({
   searchResults = []
 }) => {
   const { files, isLoading, hasMore, loadMoreFiles, totalFiles } = useBatchLoading(directoryPath)
-
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const [gridColumns, setGridColumns] = useState(4)
   const { isDarkMode } = useTheme()
   const observerRef = useRef<IntersectionObserver | null>(null)
   const loadingTriggerRef = useRef<HTMLDivElement>(null)
+  const gridRef = useRef<HTMLDivElement>(null)
 
-  // Set up intersection observer for infinite scrolling
+  const updateGridColumns = useCallback(() => {
+    if (gridRef.current) {
+      const computedStyle = window.getComputedStyle(gridRef.current)
+      const columnsText = computedStyle.getPropertyValue('grid-template-columns')
+      const columns = columnsText.split(' ').length
+      setGridColumns(columns)
+    }
+  }, [])
+
+  // Update grid columns on mount and resize
   useEffect(() => {
-    if (isSearching) return // Don't use infinite scroll for search results
+    updateGridColumns()
+    const resizeObserver = new ResizeObserver(updateGridColumns)
+    if (gridRef.current) {
+      resizeObserver.observe(gridRef.current)
+    }
+
+    window.addEventListener('resize', updateGridColumns)
+    return () => {
+      resizeObserver.disconnect()
+      window.removeEventListener('resize', updateGridColumns)
+    }
+  }, [updateGridColumns])
+
+  // Infinite scroll setup
+  useEffect(() => {
+    if (isSearching) return
 
     const options = {
       root: null,
@@ -49,66 +73,73 @@ const FileGrid: React.FC<FileGridProps> = ({
       observerRef.current.observe(loadingTriggerRef.current)
     }
 
-    return () => {
-      if (observerRef.current) {
-        observerRef.current.disconnect()
-      }
-    }
-  }, [hasMore, isLoading, isSearching])
+    return () => observerRef.current?.disconnect()
+  }, [hasMore, isLoading, isSearching, loadMoreFiles])
 
   const displayedFiles = isSearching ? searchResults : files
 
   const navigateFiles = useCallback(
-    (direction: 'up' | 'down' | 'left' | 'right', columnCount: number) => {
+    (direction: 'up' | 'down' | 'left' | 'right') => {
       setSelectedIndex((prevIndex) => {
         let newIndex = prevIndex
-        const maxIndex = files.length - 1
+        const maxIndex = displayedFiles.length - 1
 
         switch (direction) {
           case 'up':
-            newIndex = prevIndex - columnCount
+            newIndex = prevIndex - gridColumns
             break
           case 'down':
-            newIndex = prevIndex + columnCount
+            newIndex = prevIndex + gridColumns
             break
           case 'left':
-            if (prevIndex % columnCount !== 0) {
+            if (prevIndex % gridColumns !== 0) {
               newIndex = prevIndex - 1
             }
             break
           case 'right':
-            if ((prevIndex + 1) % columnCount !== 0 && prevIndex < maxIndex) {
+            if ((prevIndex + 1) % gridColumns !== 0 && prevIndex < maxIndex) {
               newIndex = prevIndex + 1
             }
             break
         }
 
+        // Ensure the new index stays within bounds
         if (newIndex < 0) newIndex = 0
         if (newIndex > maxIndex) newIndex = maxIndex
+
+        // Scroll the selected item into view
+        const selectedElement = document.querySelector(`[data-index="${newIndex}"]`)
+        selectedElement?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
 
         return newIndex
       })
     },
-    [files.length]
+    [gridColumns, displayedFiles.length]
   )
 
   const handlers: KeyHandlerMap = useMemo(
     () => ({
-      NAVIGATE_UP: (columnCount) => navigateFiles('up', columnCount),
-      NAVIGATE_DOWN: (columnCount) => navigateFiles('down', columnCount),
-      NAVIGATE_LEFT: (columnCount) => navigateFiles('left', columnCount),
-      NAVIGATE_RIGHT: (columnCount) => navigateFiles('right', columnCount),
+      NAVIGATE_UP: () => navigateFiles('up'),
+      NAVIGATE_DOWN: () => navigateFiles('down'),
+      NAVIGATE_LEFT: () => navigateFiles('left'),
+      NAVIGATE_RIGHT: () => navigateFiles('right'),
       SELECT_ITEM: () => {
-        if (files[selectedIndex]) {
-          onFileClick(files[selectedIndex], selectedIndex)
+        const selectedFile = displayedFiles[selectedIndex]
+        if (selectedFile) {
+          if (selectedFile.isDirectory) {
+            onDirectoryClick([...directoryPath, selectedFile.name])
+          } else {
+            onFileClick(selectedFile)
+          }
         }
       }
     }),
-    [files, selectedIndex, onFileClick, navigateFiles]
+    [navigateFiles, displayedFiles, selectedIndex, directoryPath, onDirectoryClick, onFileClick]
   )
 
   useKeyBindings(handlers)
 
+  // Reset selection when directory changes
   useEffect(() => {
     setSelectedIndex(0)
   }, [directoryPath])
@@ -137,12 +168,14 @@ const FileGrid: React.FC<FileGridProps> = ({
   return (
     <div className="relative w-full h-full overflow-auto">
       <div
-        className={`grid grid-cols-4 xs:grid-cols-2 gap-2 p-4 auto-rows-fr
+        ref={gridRef}
+        className={`grid grid-cols-4 xs:grid-cols-2 gap-2 p-4 auto-rows-fr file-grid
         ${isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'}`}
       >
-        {(isSearching ? searchResults : files).map((file, index) => (
+        {displayedFiles.map((file, index) => (
           <FileItem
             key={`${file.name}-${index}`}
+            data-index={index}
             onClick={() => {
               setSelectedIndex(index)
               if (file.isDirectory) {
