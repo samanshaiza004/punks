@@ -1,9 +1,11 @@
 // src/components/FileGrid.tsx
-import React, { useCallback, useEffect, useState, useRef } from 'react'
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { FileItem } from '../FileItem'
 import { FileInfo } from '@renderer/types/FileInfo'
 import { useTheme } from '@renderer/context/ThemeContext'
 import { useBatchLoading } from '@renderer/hooks/useBatchLoading'
+import { useKeyBindings } from '@renderer/keybinds/hooks'
+import { KeyHandlerMap } from '@renderer/types/types'
 
 interface FileGridProps {
   directoryPath: string[]
@@ -21,6 +23,7 @@ const FileGrid: React.FC<FileGridProps> = ({
   searchResults = []
 }) => {
   const { files, isLoading, hasMore, loadMoreFiles, totalFiles } = useBatchLoading(directoryPath)
+
   const [selectedIndex, setSelectedIndex] = useState(0)
   const { isDarkMode } = useTheme()
   const observerRef = useRef<IntersectionObserver | null>(null)
@@ -54,6 +57,61 @@ const FileGrid: React.FC<FileGridProps> = ({
   }, [hasMore, isLoading, isSearching])
 
   const displayedFiles = isSearching ? searchResults : files
+
+  const navigateFiles = useCallback(
+    (direction: 'up' | 'down' | 'left' | 'right', columnCount: number) => {
+      setSelectedIndex((prevIndex) => {
+        let newIndex = prevIndex
+        const maxIndex = files.length - 1
+
+        switch (direction) {
+          case 'up':
+            newIndex = prevIndex - columnCount
+            break
+          case 'down':
+            newIndex = prevIndex + columnCount
+            break
+          case 'left':
+            if (prevIndex % columnCount !== 0) {
+              newIndex = prevIndex - 1
+            }
+            break
+          case 'right':
+            if ((prevIndex + 1) % columnCount !== 0 && prevIndex < maxIndex) {
+              newIndex = prevIndex + 1
+            }
+            break
+        }
+
+        if (newIndex < 0) newIndex = 0
+        if (newIndex > maxIndex) newIndex = maxIndex
+
+        return newIndex
+      })
+    },
+    [files.length]
+  )
+
+  const handlers: KeyHandlerMap = useMemo(
+    () => ({
+      NAVIGATE_UP: (columnCount) => navigateFiles('up', columnCount),
+      NAVIGATE_DOWN: (columnCount) => navigateFiles('down', columnCount),
+      NAVIGATE_LEFT: (columnCount) => navigateFiles('left', columnCount),
+      NAVIGATE_RIGHT: (columnCount) => navigateFiles('right', columnCount),
+      SELECT_ITEM: () => {
+        if (files[selectedIndex]) {
+          onFileClick(files[selectedIndex], selectedIndex)
+        }
+      }
+    }),
+    [files, selectedIndex, onFileClick, navigateFiles]
+  )
+
+  useKeyBindings(handlers)
+
+  useEffect(() => {
+    setSelectedIndex(0)
+  }, [directoryPath])
 
   if (displayedFiles.length === 0 && !isLoading) {
     return (

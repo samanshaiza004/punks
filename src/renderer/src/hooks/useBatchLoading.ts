@@ -31,7 +31,6 @@ export function useBatchLoading(directoryPath: string[]) {
     } catch (err) {
       window.api.sendMessage('Error loading initial batch: ' + err)
     }
-    window.api.sendMessage(files as unknown as string)
     setIsLoading(false)
   }
 
