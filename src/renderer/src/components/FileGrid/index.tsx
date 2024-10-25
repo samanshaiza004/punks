@@ -5,6 +5,8 @@ import { useTheme } from '@renderer/context/ThemeContext'
 import { useBatchLoading } from '@renderer/hooks/useBatchLoading'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
 import { KeyHandlerMap } from '@renderer/types/types'
+import { filterFiles } from '@renderer/utils/fileFilters'
+import { FileFilterOptions } from '../FileFilter'
 
 interface FileGridProps {
   directoryPath: string[]
@@ -12,6 +14,7 @@ interface FileGridProps {
   onFileClick: (file: FileInfo) => void
   isSearching?: boolean
   searchResults?: FileInfo[]
+  fileFilters: FileFilterOptions
 }
 
 const FileGrid: React.FC<FileGridProps> = ({
@@ -19,7 +22,8 @@ const FileGrid: React.FC<FileGridProps> = ({
   onDirectoryClick,
   onFileClick,
   isSearching = false,
-  searchResults = []
+  searchResults = [],
+  fileFilters
 }) => {
   const { files, isLoading, hasMore, loadMoreFiles, totalFiles } = useBatchLoading(directoryPath)
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -38,6 +42,11 @@ const FileGrid: React.FC<FileGridProps> = ({
       setGridColumns(columns)
     }
   }, [])
+
+  const filteredFiles = useMemo(() => {
+    const sourceFiles = isSearching ? searchResults : files
+    return filterFiles(sourceFiles, fileFilters)
+  }, [isSearching, searchResults, files, fileFilters])
 
   // Update grid columns on mount and resize
   useEffect(() => {
@@ -173,7 +182,7 @@ const FileGrid: React.FC<FileGridProps> = ({
         className={`grid grid-cols-4 xs:grid-cols-2 gap-2 p-4 auto-rows-fr file-grid
         ${isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'}`}
       >
-        {displayedFiles.map((file, index) => (
+        {filteredFiles.map((file, index) => (
           <FileItem
             key={`${file.name}-${index}`}
             data-index={index}
@@ -199,7 +208,7 @@ const FileGrid: React.FC<FileGridProps> = ({
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-500" />
             ) : (
               <p className="text-sm text-gray-500">
-                Showing {files.length} of {totalFiles} items
+                Showing {filteredFiles.length} of {totalFiles} items
               </p>
             )}
           </div>

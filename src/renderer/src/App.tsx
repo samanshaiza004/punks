@@ -34,8 +34,6 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState<string>('')
   const [searchResults, setSearchResults] = useState<FileInfo[]>([])
 
-  const [files, setFiles] = useState<FileInfo[]>([])
-
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
 
   const [_audioMetadata, setAudioMetadata] = useState<any>(null)
@@ -57,26 +55,6 @@ export function App() {
   }
 
   const { playAudio } = useAudio()
-
-  /** Fetches files from the current directory and sets the sorted result */
-  /* const fetchFiles = () => {
-    window.api
-      .readDir(directoryPath)
-      .then((result) => {
-        const sortedFiles = sortFiles(result)
-        setFiles(sortedFiles)
-      })
-      .catch((err) => window.api.sendMessage('App.tsx: ' + err))
-  } */
-
-  /** Sorts files by directories first, then by name */
-  const sortFiles = (files: FileInfo[]): FileInfo[] => {
-    return files.sort((a, b) => {
-      if (a.isDirectory && !b.isDirectory) return -1
-      if (!a.isDirectory && b.isDirectory) return 1
-      return a.name.localeCompare(b.name)
-    })
-  }
 
   const searchFiles = () => {
     if (searchQuery.length > 0) {
@@ -120,24 +98,6 @@ export function App() {
     setDirectoryPath(directory)
     setSearchResults([])
   }
-
-  /* // Handle going back in history
-  const handleGoBack = () => {
-    if (currentHistoryIndex > 0) {
-      const previousEntry = directoryHistory[currentHistoryIndex - 1]
-      setDirectoryPath(previousEntry.path)
-      setCurrentHistoryIndex((prev: number) => prev - 1)
-    }
-  }
-
-  // Handle going forward in history
-  const handleGoForward = () => {
-    if (currentHistoryIndex < directoryHistory.length - 1) {
-      const nextEntry = directoryHistory[currentHistoryIndex + 1]
-      setDirectoryPath(nextEntry.path)
-      setCurrentHistoryIndex((prev: number) => prev + 1)
-    }
-  } */
 
   useEffect(() => {
     if (directoryPath.length > 0 && directoryHistory.length === 0) {
@@ -243,6 +203,7 @@ export function App() {
           onFileClick={handleFileClick}
           isSearching={searchQuery.length > 0}
           searchResults={searchResults}
+          fileFilters={fileFilters}
         />
         {/* <div className="w-1/4 overflow-auto">
           <MetadataDisplay metadata={audioMetadata || null} />
