@@ -48,7 +48,6 @@ const FileGrid: React.FC<FileGridProps> = ({
     return filterFiles(sourceFiles, fileFilters)
   }, [isSearching, searchResults, files, fileFilters])
 
-  // Update grid columns on mount and resize
   useEffect(() => {
     updateGridColumns()
     const resizeObserver = new ResizeObserver(updateGridColumns)
@@ -63,7 +62,6 @@ const FileGrid: React.FC<FileGridProps> = ({
     }
   }, [updateGridColumns])
 
-  // Infinite scroll setup
   useEffect(() => {
     if (isSearching) return
 
@@ -113,11 +111,9 @@ const FileGrid: React.FC<FileGridProps> = ({
             break
         }
 
-        // Ensure the new index stays within bounds
         if (newIndex < 0) newIndex = 0
         if (newIndex > maxIndex) newIndex = maxIndex
 
-        // Scroll the selected item into view
         const selectedElement = document.querySelector(`[data-index="${newIndex}"]`)
         selectedElement?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
 
@@ -149,7 +145,6 @@ const FileGrid: React.FC<FileGridProps> = ({
 
   useKeyBindings(handlers)
 
-  // Reset selection when directory changes
   useEffect(() => {
     setSelectedIndex(0)
   }, [directoryPath])

@@ -139,7 +139,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
               type="checkbox"
               checked={alwaysOnTop}
               onChange={(e) => setAlwaysOnTop(e.target.checked)}
-            />
+            />{' '}
             Always on Top
           </label>
         </div>
@@ -183,7 +183,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                           className={`px-2 py-1 border rounded w-40 ${
                             isDarkMode
                               ? 'bg-gray-700 border-gray-600 text-gray-100'
-                              : 'bg-white border-gray-300 text-gray-900'
+                              : 'bg-white border-gray-300 text-gray-90'
                           }`}
                         />
                         <button

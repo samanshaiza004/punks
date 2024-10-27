@@ -15,7 +15,6 @@ import { KeyBindingStore } from './keybinds/store'
 import { useTheme } from './context/ThemeContext'
 import { Button } from './components/Button'
 import { FileFilter, FileFilterOptions } from './components/FileFilter'
-import { filterFiles } from './utils/fileFilters'
 
 interface DirectoryHistoryEntry {
   path: string[]
@@ -102,7 +101,6 @@ export function App() {
   useEffect(() => {
     if (directoryPath.length > 0 && directoryHistory.length === 0) {
       setDirectoryHistory([{ path: directoryPath, timestamp: Date.now() }])
-      // setCurrentHistoryIndex(0)
     }
     console.log(currentHistoryIndex)
   }, [directoryPath])

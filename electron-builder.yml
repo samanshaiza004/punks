@@ -1,5 +1,11 @@
 appId: com.electron.app
 productName: punks
+publish:
+  - provider: github
+    owner: samanshaiza004
+    repo: punks
+    releaseType: release
+afterSign: electron-builder-notarize
 directories:
   buildResources: build
 extraResources:
@@ -17,11 +23,18 @@ asarUnpack:
 win:
   icon: build/icons/icon.ico
   executableName: punks
+  publisherName: samanshaiza
+  verifyUpdateCodeSignature: false # Set to true if you're code signing
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
+  # Added for auto-update support
+  oneClick: true
+  allowToChangeInstallationDirectory: false
+  differentialPackage: true
+
 mac:
   icon: build/icons/icon.icns # Set macOS icon here
   entitlementsInherit: build/entitlements.mac.plist
@@ -31,20 +44,19 @@ mac:
     - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
     - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
   notarize: false
+  target:
+    - target: dmg
+    - target: zip # Required for auto-updates on macOS
 dmg:
   artifactName: ${name}-${version}.${ext}
 linux:
   target:
     - AppImage
-    - snap
     - deb
   maintainer: electronjs.org
   category: Utility
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-publish:
-  provider: generic
-  url: https://example.com/auto-updates
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/

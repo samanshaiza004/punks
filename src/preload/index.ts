@@ -5,7 +5,6 @@ import fs from 'fs/promises'
 import path from 'path'
 import { FileInfo } from '../renderer/src/types/FileInfo'
 import * as musicMetadata from 'music-metadata'
-
 // Custom APIs for renderer
 export const api = {
   sendMessage: (message: string): void => {
