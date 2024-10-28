@@ -2,7 +2,7 @@ import { app, shell, BrowserWindow, ipcMain, dialog, protocol, net } from 'elect
 import path, { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
-// Use dynamic import for electron-store
+// this is a dynamic import silly
 let store
 ;(async () => {
   const Store = (await import('electron-store')).default

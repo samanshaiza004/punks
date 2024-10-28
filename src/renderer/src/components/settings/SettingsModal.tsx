@@ -1,6 +1,5 @@
-/* eslint-disable @typescript-eslint/explicit-function-return-type */
 import React, { useState, useEffect } from 'react'
-import { KeyBindingMap, KeyCombo } from '@renderer/types/types'
+import { KeyBindingMap, KeyBinding, KeyCombo, KeyAction } from '@renderer/types/types'
 import { defaultKeyBindings } from '@renderer/keybinds/defaults'
 import { Button } from '../Button'
 import { useTheme } from '@renderer/context/ThemeContext'
@@ -21,25 +20,35 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [keyBindings, setKeyBindings] = useState<KeyBindingMap>(defaultKeyBindings)
   const [editingBinding, setEditingBinding] = useState<string | null>(null)
-  const [tempKeys, setTempKeys] = useState<KeyCombo>([])
+  const [tempKeys, setTempKeys] = useState<string[]>([])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const { isDarkMode, toggleDarkMode } = useTheme()
+
   useEffect(() => {
-    const loadSavedBindings = async (): Promise<void> => {
+    const loadSavedBindings = async () => {
       try {
         const saved = await window.api.getKeyBindings()
         if (saved) {
-          setKeyBindings(saved)
+          const mergedBindings = {
+            ...saved
+          }
+          setKeyBindings(mergedBindings)
         }
       } catch (error) {
         console.error('Failed to load key bindings:', error)
+        setKeyBindings(defaultKeyBindings)
       }
     }
 
-    const loadAlwaysOnTop = async (): Promise<void> => {
-      const value = await window.api.getAlwaysOnTop()
-      setAlwaysOnTop(value)
+    const loadAlwaysOnTop = async () => {
+      try {
+        const value = await window.api.getAlwaysOnTop()
+        setAlwaysOnTop(value)
+      } catch (error) {
+        console.error('Failed to load always on top setting:', error)
+      }
     }
+
     loadAlwaysOnTop()
     loadSavedBindings()
   }, [])
@@ -49,14 +58,16 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 
     e.preventDefault()
     const key = e.key
-
     const modifiers: string[] = []
+
     if (e.ctrlKey) modifiers.push('Ctrl')
     if (e.altKey) modifiers.push('Alt')
     if (e.shiftKey) modifiers.push('Shift')
 
-    const keyCombo = [...modifiers, key].join('+')
-    setTempKeys((prev) => [...prev, keyCombo])
+    if (['Control', 'Alt', 'Shift'].includes(key)) return
+
+    const keyCombo = [...modifiers, key]
+    setTempKeys(keyCombo)
   }
 
   const startEditing = (bindingId: string) => {
@@ -67,39 +78,46 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const saveBinding = () => {
     if (!editingBinding || tempKeys.length === 0) return
 
-    setKeyBindings((prevBindings) => ({
-      ...prevBindings,
-      [editingBinding]: {
-        ...prevBindings[editingBinding],
-        currentKeys: [...prevBindings[editingBinding].currentKeys, tempKeys] // Adding the new key combination
-      }
-    }))
+    setKeyBindings((prevBindings) => {
+      const binding = prevBindings[editingBinding]
+      if (!binding) return prevBindings
 
-    setTempKeys([]) // Reset temporary keys
-    setEditingBinding(null) // End editing mode
+      return {
+        ...prevBindings,
+        [editingBinding]: {
+          ...binding,
+          currentKeys: [tempKeys]
+        }
+      }
+    })
+
+    setTempKeys([])
+    setEditingBinding(null)
   }
 
-  const formatKeyCombo = (combo: KeyCombo | string): string => {
+  const formatKeyCombo = (combo: string[]): string => {
     if (typeof combo === 'string') return combo
     if (Array.isArray(combo)) return combo.join('+')
     return ''
   }
 
-  const formatKeyBindingDisplay = (currentKeys: Array<KeyCombo | string>): string => {
-    return currentKeys
-      .map((combo) => formatKeyCombo(combo))
-      .filter(Boolean)
-      .join(' or ')
+  const formatKeyBindingDisplay = (currentKeys: string[][]): string => {
+    return currentKeys.map((combo) => formatKeyCombo(combo)).join(' or ')
   }
 
   const resetToDefault = (bindingId: string) => {
-    setKeyBindings((prev) => ({
-      ...prev,
-      [bindingId]: {
-        ...prev[bindingId],
-        currentKeys: [...prev[bindingId].defaultKeys]
+    setKeyBindings((prev) => {
+      const binding = prev[bindingId]
+      if (!binding) return prev
+
+      return {
+        ...prev,
+        [bindingId]: {
+          ...binding,
+          currentKeys: [...binding.defaultKeys]
+        }
       }
-    }))
+    })
   }
 
   const handleSave = async () => {

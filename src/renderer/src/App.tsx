@@ -156,8 +156,8 @@ export function App() {
           window.api.sendMessage('' + audioPath)
         }
         if (await window.api.doesFileExist(audioPath)) {
-          const metadata = await window.api.getAudioMetadata(audioPath)
-          setAudioMetadata(metadata)
+          /* const metadata = await window.api.getAudioMetadata(audioPath)
+          setAudioMetadata(metadata) */
           playAudio(`sample:///${audioPath}`)
         } else {
           throw new Error('File does not exist: ' + audioPath)

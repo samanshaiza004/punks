@@ -4,8 +4,7 @@ import { ipcRenderer } from 'electron/renderer'
 import fs from 'fs/promises'
 import path from 'path'
 import { FileInfo } from '../renderer/src/types/FileInfo'
-import * as musicMetadata from 'music-metadata'
-// Custom APIs for renderer
+import { parseFile } from 'music-metadata'
 export const api = {
   sendMessage: (message: string): void => {
     ipcRenderer.send('message', message)
@@ -136,7 +135,7 @@ export const api = {
 
   getAudioMetadata: async (filePath: string) => {
     try {
-      const metadata = await musicMetadata.parseFile(filePath)
+      const metadata = await parseFile(filePath)
       return metadata
     } catch (err) {
       ipcRenderer.send('message', 'Error getting audio metadata: ' + err)
