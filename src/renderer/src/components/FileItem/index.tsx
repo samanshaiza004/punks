@@ -1,6 +1,6 @@
-import React, { ButtonHTMLAttributes, useState } from 'react'
+import React, { ButtonHTMLAttributes } from 'react'
 import FileIcons from '../FileIcons'
-import ContextMenu from '../ContextMenu'
+import { useContextMenu } from '@renderer/context/ContextMenuContext'
 type FileItemProps = {
   fileName: string
   isDirectory: boolean
@@ -17,41 +17,22 @@ export function FileItem({
   isDarkMode,
   ...props
 }: FileItemProps) {
-  const [contextMenu, setContextMenu] = useState<{
-    x: number
-    y: number
-  } | null>(null)
+  const { openMenu } = useContextMenu()
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault()
-    setContextMenu({ x: e.clientX, y: e.clientY })
+    openMenu(e.clientX, e.clientY, {
+      name: fileName,
+      location,
+      isDirectory
+    })
   }
 
-  const handleDelete = async () => {
-    const confirmed = window.confirm(`Are you sure you want to delete ${fileName}?`)
-    if (confirmed) {
-      try {
-        await window.api.deleteFile(location)
-      } catch (err) {
-        console.error('Error deleting file:', err)
-      }
-    }
-    setContextMenu(null)
-  }
   const handleDragStart = (e: React.DragEvent<HTMLButtonElement>) => {
     e.preventDefault()
     window.api.startDrag(location)
   }
 
-  const handleCopy = async () => {
-    try {
-      window.api.sendMessage('hello')
-      await window.api.copyFileToClipboard(location)
-    } catch (err) {
-      console.error('Error copying file to clipboard:', err)
-    }
-    setContextMenu(null)
-  }
   return (
     <button
       className={`
@@ -89,16 +70,6 @@ export function FileItem({
       <span className="text-sm truncate" title={fileName}>
         {fileName}
       </span>
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          onClose={() => setContextMenu(null)}
-          onDelete={handleDelete}
-          onCopy={handleCopy}
-          isDirectory={isDirectory}
-        />
-      )}
     </button>
   )
 }
