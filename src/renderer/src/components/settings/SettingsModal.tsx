@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react'
-import { KeyBindingMap, KeyBinding, KeyCombo, KeyAction } from '@renderer/types/types'
+import { KeyBindingMap } from '@renderer/types/types'
 import { defaultKeyBindings } from '@renderer/keybinds/defaults'
 import { Button } from '../Button'
 import { useTheme } from '@renderer/context/ThemeContext'
 import { DirectoryPicker } from '../DirectoryPicker'
+import { useToast } from '@renderer/context/ToastContext'
 
 interface SettingsModalProps {
   isOpen: boolean
@@ -23,7 +24,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const [tempKeys, setTempKeys] = useState<string[]>([])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const { isDarkMode, toggleDarkMode } = useTheme()
-
+  const { showToast } = useToast()
   useEffect(() => {
     const loadSavedBindings = async () => {
       try {
@@ -35,7 +36,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
           setKeyBindings(mergedBindings)
         }
       } catch (error) {
-        console.error('Failed to load key bindings:', error)
+        showToast('Failed to load key bindings: ' + error, 'error')
         setKeyBindings(defaultKeyBindings)
       }
     }
@@ -45,7 +46,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         const value = await window.api.getAlwaysOnTop()
         setAlwaysOnTop(value)
       } catch (error) {
-        console.error('Failed to load always on top setting:', error)
+        showToast('an error occured: ' + error, 'error')
       }
     }
 
@@ -127,7 +128,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       onSave(keyBindings)
       onClose()
     } catch (error) {
-      console.error('Error saving key bindings:', error)
+      showToast('Failed to save key bindings: ' + error, 'error')
     }
   }
 

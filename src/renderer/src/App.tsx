@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react'
 
 import AudioPlayer from './components/AudioPlayer'
 
-import { useAudio } from './hooks/AudioContextProvider'
+import { useAudio } from './context/AudioContextProvider'
 
 import SettingsModal from './components/settings/SettingsModal'
 import { KeyBindingStore } from './keybinds/store'
@@ -14,7 +14,7 @@ import { Button } from './components/Button'
 
 import TabBar from './components/TabBar'
 
-import { useTabs } from './hooks/TabContext'
+import { useTabs } from './context/TabContext'
 import TabContainer from './components/TabContainer'
 
 interface DirectoryHistoryEntry {
@@ -29,7 +29,7 @@ export function App() {
   const [directoryHistory, setDirectoryHistory] = useState<DirectoryHistoryEntry[]>([])
   const [currentHistoryIndex, setCurrentHistoryIndex] = useState<number>(-1)
   const [lastSelectedDirectory, setLastSelectedDirectory] = useState<string[]>([])
-  const [currentAudio, setCurrentAudio] = useState<string | null>(null)
+  const [currentAudio, _setCurrentAudio] = useState<string | null>(null)
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
 
@@ -134,7 +134,7 @@ export function App() {
       </div>
 
       <div className="flex-grow overflow-hidden">
-        <TabContainer />
+        <TabContainer directory={lastSelectedDirectory} />
       </div>
 
       <SettingsModal

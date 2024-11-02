@@ -1,4 +1,4 @@
-import { useTabs } from '@renderer/hooks/TabContext'
+import { useTabs } from '@renderer/context/TabContext'
 import { useFileOperations } from '@renderer/hooks/useFileOperations'
 import DirectoryView from './DirectoryView'
 import { FileFilterOptions, FileFilter } from './FileFilter'
@@ -97,7 +97,7 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
         </div>
       </div>
 
-      <div className="flex-grow overflow-auto">
+      <div className="flex flex-grow justify-between items-start gap-2.5 max-w-7xl mx-auto h-full overflow-auto mb-24">
         <FileGrid
           directoryPath={tab.directoryPath}
           onDirectoryClick={handleDirectoryChange}

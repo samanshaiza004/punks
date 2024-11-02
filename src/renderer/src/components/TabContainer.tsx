@@ -1,7 +1,7 @@
-import { useTabs } from '@renderer/hooks/TabContext'
+import { useTabs } from '@renderer/context/TabContext'
 import TabContent from './TabContent'
 
-const TabContainer = () => {
+const TabContainer = ({ directory }) => {
   const { state, dispatch } = useTabs()
 
   if (!state.activeTabId) {
@@ -13,7 +13,7 @@ const TabContainer = () => {
             dispatch({
               type: 'ADD_TAB',
               payload: {
-                directoryPath: [],
+                directoryPath: directory,
                 searchQuery: '',
                 searchResults: [],
                 fileFilters: {

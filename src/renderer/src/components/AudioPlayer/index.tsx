@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import WaveSurfer from 'wavesurfer.js'
-import { useAudio } from '../../hooks/AudioContextProvider'
+import { useAudio } from '../../context/AudioContextProvider'
 import { useTheme } from '@renderer/context/ThemeContext'
 import { Play, Pause } from '@phosphor-icons/react'
 

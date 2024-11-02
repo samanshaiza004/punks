@@ -1,9 +1,11 @@
 import { FileInfo } from '@renderer/types/FileInfo'
-import { useAudio } from './AudioContextProvider'
+import { useAudio } from '../context/AudioContextProvider'
 import { FILE_EXTENSIONS } from '@renderer/utils/fileFilters'
+import { useToast } from '@renderer/context/ToastContext'
 
 export const useFileOperations = () => {
   const { playAudio } = useAudio()
+  const { showToast } = useToast()
 
   const handleFileClick = async (file: FileInfo, currentPath: string[]) => {
     const extension = file.name.split('.').pop()
@@ -23,7 +25,7 @@ export const useFileOperations = () => {
         }
       }
     } catch (err) {
-      window.api.sendMessage('FileOperations: ' + err)
+      showToast('FileOperations: ' + err, 'error')
     }
   }
 
