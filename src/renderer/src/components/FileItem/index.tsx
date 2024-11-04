@@ -30,7 +30,7 @@ export function FileItem({
 
   const handleDragStart = (e: React.DragEvent<HTMLButtonElement>) => {
     e.preventDefault()
-    window.api.startDrag(location)
+    window.api.startDrag(window.api.renderPath([location, fileName]))
   }
 
   return (
