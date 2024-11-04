@@ -198,6 +198,9 @@ export const api = {
   isAbsolute: (pathString: string): boolean => {
     return path.isAbsolute(pathString)
   },
+  sep: (): string => {
+    return path.sep
+  },
   path: {
     join: (...paths: string[]): string => {
       return path.join(...paths)

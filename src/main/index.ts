@@ -1,6 +1,7 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
 import path, { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { existsSync } from 'fs';
 
 // this is a dynamic import silly
 let store
@@ -52,32 +53,93 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 app.whenReady().then(() => {
-  protocol.handle('sample', (request) => {
+  protocol.handle('sample', async (request) => {
     try {
       // Get the raw URL string and remove the protocol prefix
       const rawPath = request.url.replace('sample:///', '')
 
-      // Convert any URL-encoded characters back to their original form
-      // but handle the conversion manually for problematic characters
+      // Handle special characters manually first
       const decodedPath = rawPath
-        .replace(/%23/g, '#') // Handle # symbol
-        .replace(/%25/g, '%') // Handle % symbol
-        .replace(/%20/g, ' ') // Handle spaces
+        .replace(/%23/g, '#')  // Handle # symbol
+        .replace(/%25/g, '%')  // Handle % symbol
+        .replace(/%20/g, ' ')  // Handle spaces
+        .replace(/%26/g, '&')  // Handle & symbol
+        .replace(/%3F/g, '?')  // Handle ? symbol
+        .replace(/%2B/g, '+')  // Handle + symbol
+        .replace(/%5B/g, '[')  // Handle [ symbol
+        .replace(/%5D/g, ']')  // Handle ] symbol
+        .replace(/%40/g, '@')  // Handle @ symbol
+        .replace(/%21/g, '!')  // Handle ! symbol
+        .replace(/%24/g, '$')  // Handle $ symbol
+        .replace(/%5C/g, '\\') // Handle backslashes
+        .replace(/%3A/g, ':')  // Handle colons
 
-      // Normalize the path to handle any remaining path separators
+      // Normalize the path for the current platform
       const normalizedPath = path.normalize(decodedPath)
 
-      // Create the file URL using the path module to ensure proper formatting
-      const fileUrl =
-        'file://' +
-        normalizedPath
-          .split(path.sep)
-          .map((segment) => encodeURIComponent(segment))
+      // Verify the file exists
+      if (!existsSync(normalizedPath)) {
+        console.error('File does not exist:', normalizedPath)
+        throw new Error('File not found')
+      }
+
+      // Create the file URL with proper encoding
+      const encodeSpecialChars = (str: string) => {
+        return str
+          .replace(/#/g, '%23')
+          .replace(/\s/g, '%20')
+          .replace(/\(/g, '%28')
+          .replace(/\)/g, '%29')
+          .replace(/!/g, '%21')
+          .replace(/\[/g, '%5B')
+          .replace(/\]/g, '%5D')
+          .replace(/@/g, '%40')
+          .replace(/\$/g, '%24')
+          .replace(/&/g, '%26')
+          .replace(/\+/g, '%2B')
+          .replace(/'/g, '%27')
+          .replace(/,/g, '%2C')
+          .replace(/;/g, '%3B')
+          .replace(/=/g, '%3D')
+          .replace(/\?/g, '%3F')
+      }
+
+      let fileUrl: string
+      if (process.platform === 'win32') {
+        // Windows path handling
+        // 1. Convert backslashes to forward slashes
+        const forwardSlashPath = normalizedPath.replace(/\\/g, '/')
+        // 2. Split the path to handle drive letter separately
+        const [drive, ...pathParts] = forwardSlashPath.split(':')
+        // 3. Encode each path segment while preserving slashes
+        const encodedPath = pathParts.join(':').split('/')
+          .map(segment => encodeSpecialChars(segment))
           .join('/')
+        // 4. Reconstruct the URL with drive letter
+        fileUrl = `file:///${drive}:${encodedPath}`
+      } else {
+        // Unix path handling
+        const segments = normalizedPath.split('/')
+        const encodedPath = segments
+          .map(segment => encodeSpecialChars(segment))
+          .join('/')
+        fileUrl = `file://${encodedPath}`
+      }
 
-      console.log('Attempting to fetch:', fileUrl) // For debugging
+      // Debug logging
+      console.log('Original URL:', request.url)
+      console.log('Decoded path:', decodedPath)
+      console.log('Normalized path:', normalizedPath)
+      console.log('Final file URL:', fileUrl)
+      console.log('File exists check:', existsSync(normalizedPath))
 
-      return net.fetch(fileUrl)
+      const response = await net.fetch(fileUrl)
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`)
+      }
+
+      return response
     } catch (error) {
       console.error('Protocol handler error:', error, 'for URL:', request.url)
       throw error
