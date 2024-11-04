@@ -37,8 +37,8 @@ export function FileItem({
     <button
       className={`
         w-full
-        px-2
-        py-3
+        px-1
+        py-1
         rounded-sm
         flex 
         items-center 
@@ -47,7 +47,8 @@ export function FileItem({
         transition-colors
         focus:outline-none 
         focus:ring-2
-        min-w-[200px] min-h-[50px] 
+        min-w-[200px] min-h-[40px] 
+        text-sm
         ${
           isSelected
             ? isDarkMode

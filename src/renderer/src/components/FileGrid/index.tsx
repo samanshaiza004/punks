@@ -191,7 +191,7 @@ const FileGrid: React.FC<FileGridProps> = ({
             }}
             fileName={file.name}
             isDirectory={file.isDirectory}
-            location={window.api.renderPath([...directoryPath, file.name])}
+            location={file.location}
             isSelected={index === selectedIndex}
             isDarkMode={isDarkMode}
           />

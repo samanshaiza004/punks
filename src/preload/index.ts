@@ -116,7 +116,7 @@ export const api = {
           if (file.name.includes(query)) {
             results.push({
               name: file.name,
-              location: fullPath,
+              location: dir,
               isDirectory: file.isDirectory()
             })
           }
@@ -194,7 +194,28 @@ export const api = {
 
   setAlwaysOnTop: (value: boolean): Promise<boolean> =>
     ipcRenderer.invoke('set-always-on-top', value),
-  getAlwaysOnTop: (): Promise<boolean> => ipcRenderer.invoke('get-always-on-top')
+  getAlwaysOnTop: (): Promise<boolean> => ipcRenderer.invoke('get-always-on-top'),
+  isAbsolute: (pathString: string): boolean => {
+    return path.isAbsolute(pathString)
+  },
+  path: {
+    join: (...paths: string[]): string => {
+      return path.join(...paths)
+    },
+
+    dirname: (pathString: string): string => {
+      return path.dirname(pathString)
+    },
+    basename: (pathString: string): string => {
+      return path.basename(pathString)
+    },
+    normalize: (pathString: string): string => {
+      return path.normalize(pathString)
+    },
+    relative: (from: string, to: string): string => {
+      return path.relative(from, to)
+    }
+  }
 }
 
 if (process.contextIsolated) {
