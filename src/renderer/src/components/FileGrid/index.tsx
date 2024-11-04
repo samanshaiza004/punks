@@ -27,7 +27,6 @@ const FileGrid: React.FC<FileGridProps> = ({
 }) => {
   const { files, isLoading, hasMore, loadMoreFiles, totalFiles } = useBatchLoading(directoryPath)
   const [selectedIndex, setSelectedIndex] = useState(0)
-
   const [gridColumns, setGridColumns] = useState(4)
   const { isDarkMode } = useTheme()
   const observerRef = useRef<IntersectionObserver | null>(null)
@@ -36,9 +35,13 @@ const FileGrid: React.FC<FileGridProps> = ({
 
   const updateGridColumns = useCallback(() => {
     if (gridRef.current) {
-      const computedStyle = window.getComputedStyle(gridRef.current)
-      const columnsText = computedStyle.getPropertyValue('grid-template-columns')
-      const columns = columnsText.split(' ').length
+      const gridWidth = gridRef.current.offsetWidth
+      // Calculate columns based on width
+      // Using breakpoints similar to Tailwind's default breakpoints
+      let columns = 4 // default max
+      if (gridWidth < 640) columns = 1 // xs
+      else if (gridWidth < 768) columns = 2 // sm
+      else if (gridWidth < 1024) columns = 3 // md
       setGridColumns(columns)
     }
   }, [])
@@ -55,10 +58,8 @@ const FileGrid: React.FC<FileGridProps> = ({
       resizeObserver.observe(gridRef.current)
     }
 
-    window.addEventListener('resize', updateGridColumns)
     return () => {
       resizeObserver.disconnect()
-      window.removeEventListener('resize', updateGridColumns)
     }
   }, [updateGridColumns])
 
@@ -174,8 +175,16 @@ const FileGrid: React.FC<FileGridProps> = ({
     <div className="relative w-full h-full overflow-auto">
       <div
         ref={gridRef}
-        className={`grid grid-cols-4 xs:grid-cols-2 gap-2 p-4 auto-rows-fr file-grid
-        ${isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'}`}
+        className={`
+          grid
+          grid-cols-1
+          sm:grid-cols-2
+          lg:grid-cols-3
+          xl:grid-cols-4
+          auto-rows-fr
+          file-grid
+          ${isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'}
+        `}
       >
         {filteredFiles.map((file, index) => (
           <FileItem

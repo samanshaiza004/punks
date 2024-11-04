@@ -40,62 +40,68 @@ const SearchBar: React.FC<SearchBarProps> = ({
   }, [searchQuery, onSearch, setSearchResults])
 
   return (
-    <div className={`relative max-w-xl w-full ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-      <div className="relative">
-        <input
-          id="search-bar"
-          ref={searchBarRef}
-          type="text"
-          value={searchQuery}
-          onChange={(e) => {
-            try {
-              setSearchQuery(e.target.value)
-            } catch (err) {
-              window.api.sendMessage('SearchBar.tsx: ' + err)
-            }
-          }}
-          placeholder="Search files or directories"
+    <div className={`relative w-full ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
+    <div className="relative">
+      <input
+        id="search-bar"
+        ref={searchBarRef}
+        type="text"
+        value={searchQuery}
+        onChange={(e) => {
+          try {
+            setSearchQuery(e.target.value)
+          } catch (err) {
+            window.api.sendMessage('SearchBar.tsx: ' + err)
+          }
+        }}
+        placeholder="Search files or directories"
+        className={`
+          w-full
+          h-10
+          py-1
+          px-2
+          rounded
+          border
+          outline-none
+          transition-colors
+          placeholder:transition-colors
+          text-sm
+          ${
+            isDarkMode
+              ? 'bg-gray-800 border-gray-700 placeholder:text-gray-500 focus:border-gray-600'
+              : 'bg-white border-gray-300 placeholder:text-gray-400 focus:border-gray-400'
+          }
+          ${isDarkMode ? 'focus:ring-2 focus:ring-gray-700' : 'focus:ring-2 focus:ring-gray-200'}
+        `}
+      />
+      {searchQuery && (
+        <button
+          onClick={() => setSearchQuery('')}
           className={`
-            w-full
-            py-1
-            px-2
-            rounded
-            border
-            outline-none
+            absolute
+            right-3
+            top-1/2
+            transform
+            -translate-y-1/2
+            w-6
+            h-6
+            flex
+            items-center
+            justify-center
+            rounded-full
             transition-colors
-            placeholder:transition-colors
             ${
               isDarkMode
-                ? 'bg-gray-800 border-gray-700 placeholder:text-gray-500 focus:border-gray-600'
-                : 'bg-white border-gray-300 placeholder:text-gray-400 focus:border-gray-400'
+                ? 'text-gray-400 hover:text-gray-300 hover:bg-gray-700'
+                : 'text-gray-500 hover:text-gray-600 hover:bg-gray-100'
             }
-            ${isDarkMode ? 'focus:ring-2 focus:ring-gray-700' : 'focus:ring-2 focus:ring-gray-200'}
           `}
-        />
-        {searchQuery && (
-          <button
-            onClick={() => setSearchQuery('')}
-            className={`
-              absolute
-              right-3
-              top-1/2
-              transform
-              -translate-y-1/2
-              px-1
-              rounded-full
-              transition-colors
-              ${
-                isDarkMode
-                  ? 'text-gray-400 hover:text-gray-300 hover:bg-gray-700'
-                  : 'text-gray-500 hover:text-gray-600 hover:bg-gray-100'
-              }
-            `}
-          >
-            ×
-          </button>
-        )}
-      </div>
+        >
+          ×
+        </button>
+      )}
     </div>
+  </div>
   )
 }
 

@@ -43,7 +43,8 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
       progressColor: isDarkMode ? '#60A5FA' : '#3B82F6',
       cursorColor: isDarkMode ? '#F3F4F6' : '#1F2937',
       height: 40,
-      barHeight: 1.5
+      barHeight: 1.5,
+      normalize: true
     })
     if (waveSurferRef.current) {
       waveSurferRef.current.setVolume(volume)

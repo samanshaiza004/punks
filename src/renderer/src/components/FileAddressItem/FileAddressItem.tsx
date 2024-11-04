@@ -10,7 +10,7 @@ export function FileAddressItem({ fileName, isDarkMode, ...props }: FileAddressI
     <button
       className={`
         h-8 
-        px-2 
+        px-2
         flex 
         items-center 
         rounded-sm

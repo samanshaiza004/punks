@@ -1,6 +1,5 @@
 // components/FileFilter.tsx
 import React from 'react'
-import { useTheme } from '@renderer/context/ThemeContext'
 import { FilterButton } from './FilterButton'
 
 export interface FileFilterOptions {
@@ -39,9 +38,9 @@ export const FileFilter: React.FC<FileFilterProps> = ({ filters, onFilterChange 
   }
 
   return (
-    <div className="flex gap-2 items-center">
+    <div className="flex gap-1 items-center">
       <span className="text-sm">Show:</span>
-      <div className="flex gap-2">
+      <div className="flex gap-1">
         {Object.keys(filters).map((filterKey) => (
           <FilterButton
             key={filterKey}

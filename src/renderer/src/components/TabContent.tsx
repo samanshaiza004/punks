@@ -76,9 +76,9 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex-shrink-0">
+      <div className="flex-shrink-0 p-1">
         <DirectoryView directoryPath={tab.directoryPath} onDirectoryClick={handleDirectoryChange} />
-        <div className="flex items-center gap-4 mb-4">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1 mb-1">
           <SearchBar
             searchQuery={tab.searchQuery}
             setSearchQuery={updateSearchQuery}
@@ -97,7 +97,7 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
         </div>
       </div>
 
-      <div className="flex flex-grow justify-between items-start gap-2.5 max-w-7xl mx-auto h-full overflow-auto mb-24">
+      <div className="flex flex-grow overflow-auto mb-32">
         <FileGrid
           directoryPath={tab.directoryPath}
           onDirectoryClick={handleDirectoryChange}
