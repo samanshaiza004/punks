@@ -53,8 +53,35 @@ protocol.registerSchemesAsPrivileged([
 
 app.whenReady().then(() => {
   protocol.handle('sample', (request) => {
-    const filePath = request.url.replace('sample:///', '')
-    return net.fetch('file://' + filePath)
+    try {
+      // Get the raw URL string and remove the protocol prefix
+      const rawPath = request.url.replace('sample:///', '')
+
+      // Convert any URL-encoded characters back to their original form
+      // but handle the conversion manually for problematic characters
+      const decodedPath = rawPath
+        .replace(/%23/g, '#') // Handle # symbol
+        .replace(/%25/g, '%') // Handle % symbol
+        .replace(/%20/g, ' ') // Handle spaces
+
+      // Normalize the path to handle any remaining path separators
+      const normalizedPath = path.normalize(decodedPath)
+
+      // Create the file URL using the path module to ensure proper formatting
+      const fileUrl =
+        'file://' +
+        normalizedPath
+          .split(path.sep)
+          .map((segment) => encodeURIComponent(segment))
+          .join('/')
+
+      console.log('Attempting to fetch:', fileUrl) // For debugging
+
+      return net.fetch(fileUrl)
+    } catch (error) {
+      console.error('Protocol handler error:', error, 'for URL:', request.url)
+      throw error
+    }
   })
 })
 
