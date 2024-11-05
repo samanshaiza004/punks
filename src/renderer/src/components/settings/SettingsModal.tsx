@@ -205,38 +205,38 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                               : 'bg-white border-gray-300 text-gray-90'
                           }`}
                         />
-                        <button
+                        <Button
                           onClick={saveBinding}
-                          className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                          className="bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
                         >
                           Save
-                        </button>
+                        </Button>
                       </div>
                     ) : (
-                      <button
+                      <Button
                         onClick={() => startEditing(binding.id)}
-                        className={`px-3 py-1 rounded min-w-[100px] text-left ${
+                        className={`rounded min-w-[100px] text-left ${
                           isDarkMode
                             ? 'bg-gray-700 hover:bg-gray-600 border-gray-600'
                             : 'bg-gray-100 hover:bg-gray-200 border-gray-300'
                         } border transition-colors`}
                       >
                         {formatKeyBindingDisplay(binding.currentKeys)}
-                      </button>
+                      </Button>
                     )}
                   </td>
                   <td className="p-3">{binding.description}</td>
                   <td className="p-3">
-                    <button
+                    <Button
                       onClick={() => resetToDefault(binding.id)}
-                      className={`px-2 py-1 rounded ${
+                      className={`rounded ${
                         isDarkMode
                           ? 'text-gray-300 hover:bg-gray-700'
                           : 'text-gray-600 hover:bg-gray-100'
                       } transition-colors`}
                     >
                       Reset
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -249,20 +249,20 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             isDarkMode ? 'border-gray-700' : 'border-gray-200'
           }`}
         >
-          <button
+          <Button
             onClick={onClose}
-            className={`px-4 py-2 rounded border transition-colors ${
-              isDarkMode ? 'border-gray-600 hover:bg-gray-700' : 'border-gray-300 hover:bg-gray-100'
+            className={` border transition-colors ${
+              isDarkMode ? 'border-gray-600 ' : 'border-gray-300 '
             }`}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={handleSave}
-            className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 transition-colors"
+            className=" bg-green-500 text-white  hover:bg-green-600 transition-colors"
           >
             Save Changes
-          </button>
+          </Button>
         </div>
       </div>
     </div>

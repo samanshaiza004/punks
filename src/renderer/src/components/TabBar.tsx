@@ -1,3 +1,4 @@
+import { useRef, useState, useEffect } from 'react'
 import { X, Plus, List } from '@phosphor-icons/react'
 import { useTabs } from '@renderer/context/TabContext'
 import { useTheme } from '@renderer/context/ThemeContext'
@@ -5,17 +6,77 @@ import { useTheme } from '@renderer/context/ThemeContext'
 const TabBar = ({ lastSelectedDirectory }) => {
   const { state, dispatch } = useTabs()
   const { isDarkMode } = useTheme()
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const [showLeftIndicator, setShowLeftIndicator] = useState(false)
+  const [showRightIndicator, setShowRightIndicator] = useState(false)
+
+  // Check if we need to show scroll indicators
+  const checkScroll = () => {
+    const el = scrollContainerRef.current
+    if (el) {
+      setShowLeftIndicator(el.scrollLeft > 0)
+      setShowRightIndicator(el.scrollLeft < el.scrollWidth - el.clientWidth)
+    }
+  }
+
+  // Add scroll event listener
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    if (el) {
+      el.addEventListener('scroll', checkScroll)
+      // Initial check
+      checkScroll()
+      // Check on window resize
+      window.addEventListener('resize', checkScroll)
+    }
+    return () => {
+      el?.removeEventListener('scroll', checkScroll)
+      window.removeEventListener('resize', checkScroll)
+    }
+  }, [])
+
+  // Scroll functions
+  const scrollLeft = () => {
+    const el = scrollContainerRef.current
+    if (el) {
+      el.scrollBy({ left: -200, behavior: 'smooth' })
+    }
+  }
+
+  const scrollRight = () => {
+    const el = scrollContainerRef.current
+    if (el) {
+      el.scrollBy({ left: 200, behavior: 'smooth' })
+    }
+  }
 
   return (
-    <div
-      className={`
-      flex items-center 
-      border-b
-      ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}
-      mb-2 relative
-    `}
-    >
-      <div className="flex-1 flex items-center overflow-x-auto hide-scrollbar">
+    <div className="relative flex items-center border-b mb-2">
+      {/* Left scroll indicator */}
+      {showLeftIndicator && (
+        <div
+          onClick={scrollLeft}
+          className={`absolute left-0 z-10 w-8 h-full flex items-center justify-center cursor-pointer ${
+            isDarkMode
+              ? 'bg-gradient-to-r from-gray-900 to-transparent'
+              : 'bg-gradient-to-r from-white to-transparent'
+          }`}
+        >
+          <div
+            className={`p-1 rounded-full ${
+              isDarkMode ? 'hover:bg-gray-800 text-gray-400' : 'hover:bg-gray-200 text-gray-600'
+            }`}
+          >
+            ◀
+          </div>
+        </div>
+      )}
+
+      {/* Tabs container */}
+      <div
+        ref={scrollContainerRef}
+        className="flex-1 flex items-center overflow-x-auto hide-scrollbar"
+      >
         {state.tabs.map((tab) => (
           <div
             key={tab.id}
@@ -78,6 +139,27 @@ const TabBar = ({ lastSelectedDirectory }) => {
         ))}
       </div>
 
+      {/* Right scroll indicator */}
+      {showRightIndicator && (
+        <div
+          onClick={scrollRight}
+          className={`absolute right-12 z-10 w-8 h-full flex items-center justify-center cursor-pointer ${
+            isDarkMode
+              ? 'bg-gradient-to-l from-gray-900 to-transparent'
+              : 'bg-gradient-to-l from-white to-transparent'
+          }`}
+        >
+          <div
+            className={`p-1 rounded-full ${
+              isDarkMode ? 'hover:bg-gray-800 text-gray-400' : 'hover:bg-gray-200 text-gray-600'
+            }`}
+          >
+            ▶
+          </div>
+        </div>
+      )}
+
+      {/* Actions section */}
       <div
         className={`
         flex items-center

@@ -5,11 +5,30 @@
 * {
   user-select: none;
 }
-.hide-scrollbar {
-  -ms-overflow-style: none;
+.show-scrollbar-on-hover {
+  -ms-overflow-style: -ms-autohiding-scrollbar;
   scrollbar-width: none;
 }
 
-.hide-scrollbar::-webkit-scrollbar {
+.show-scrollbar-on-hover:hover {
+  scrollbar-width: thin;
+}
+
+.show-scrollbar-on-hover::-webkit-scrollbar {
   display: none;
+}
+
+.show-scrollbar-on-hover:hover::-webkit-scrollbar {
+  display: block;
+  height: 8px;
+}
+
+.show-scrollbar-on-hover::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.show-scrollbar-on-hover::-webkit-scrollbar-thumb {
+  background-color: rgba(155, 155, 155, 0.5);
+  border-radius: 20px;
+  border: transparent;
 }
