@@ -16,7 +16,6 @@ export function useBatchLoading(directoryPath: string[]) {
   const { showToast } = useToast()
 
   useEffect(() => {
-    // Reset state when directory changes
     setFiles([])
     setOffset(0)
     setHasMore(true)

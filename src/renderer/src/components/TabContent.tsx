@@ -97,7 +97,7 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
         </div>
       </div>
 
-      <div className="flex flex-grow overflow-auto mb-32">
+      <div className="flex flex-grow overflow-auto mb-24">
         <FileGrid
           directoryPath={tab.directoryPath}
           onDirectoryClick={handleDirectoryChange}

@@ -129,7 +129,7 @@ export function App() {
         </div>
       </div>
       <TabBar lastSelectedDirectory={lastSelectedDirectory} />
-      <div className="flex-shrink-0">
+      <div className="flex-shrink-0 ">
         <AudioPlayer currentAudio={currentAudio} shouldReplay />
       </div>
 

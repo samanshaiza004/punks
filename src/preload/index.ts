@@ -106,31 +106,32 @@ export const api = {
 
   search: async (pathParts: string[], query: string): Promise<FileInfo[]> => {
     const directoryPath = path.join(...pathParts)
+    const queue: string[] = [directoryPath]
+    const results: FileInfo[] = []
 
-    const searchRecursively = async (dir: string, query: string): Promise<FileInfo[]> => {
-      let results: FileInfo[] = []
+    while (queue.length > 0) {
+      const currentDir = queue.shift()!
       try {
-        const files = await fs.readdir(dir, { withFileTypes: true })
+        const files = await fs.readdir(currentDir, { withFileTypes: true })
         for (const file of files) {
-          const fullPath = path.join(dir, file.name)
+          const fullPath = path.join(currentDir, file.name)
           if (file.name.includes(query)) {
             results.push({
               name: file.name,
-              location: dir,
+              location: currentDir,
               isDirectory: file.isDirectory()
             })
           }
           if (file.isDirectory()) {
-            results = results.concat(await searchRecursively(fullPath, query))
+            queue.push(fullPath)
           }
         }
       } catch (err) {
-        api.sendMessage(`Error searching directory ${dir}: ${err}`)
+        api.sendMessage(`Error searching directory ${currentDir}: ${err}`)
       }
-      return results
     }
 
-    return searchRecursively(directoryPath, query)
+    return results
   },
 
   getAudioMetadata: async (filePath: string) => {

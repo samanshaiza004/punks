@@ -36,12 +36,11 @@ const FileGrid: React.FC<FileGridProps> = ({
   const updateGridColumns = useCallback(() => {
     if (gridRef.current) {
       const gridWidth = gridRef.current.offsetWidth
-      // Calculate columns based on width
-      // Using breakpoints similar to Tailwind's default breakpoints
+
       let columns = 4 // default max
-      if (gridWidth < 640) columns = 1 // xs
-      else if (gridWidth < 768) columns = 2 // sm
-      else if (gridWidth < 1024) columns = 3 // md
+      if (gridWidth < 640) columns = 1
+      else if (gridWidth < 768) columns = 2
+      else if (gridWidth < 1024) columns = 3
       setGridColumns(columns)
     }
   }, [])

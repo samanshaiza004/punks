@@ -34,7 +34,7 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
 
   return (
     <div
-      className={`fixed bottom-0 left-0 w-full p-4 shadow-lg backdrop-blur-sm ring-1 ring-black/5 z-10 ${
+      className={`fixed bottom-0 left-0 w-full p-2 shadow-lg backdrop-blur-sm ring-1 ring-black/5 z-10 ${
         isDarkMode ? 'bg-gray-800/20 text-gray-200' : 'bg-white/20 text-gray-800'
       }`}
     >

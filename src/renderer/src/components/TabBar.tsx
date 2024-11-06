@@ -52,7 +52,6 @@ const TabBar = ({ lastSelectedDirectory }) => {
 
   return (
     <div className="relative flex items-center border-b mb-2">
-      {/* Left scroll indicator */}
       {showLeftIndicator && (
         <div
           onClick={scrollLeft}
@@ -75,7 +74,7 @@ const TabBar = ({ lastSelectedDirectory }) => {
       {/* Tabs container */}
       <div
         ref={scrollContainerRef}
-        className="flex-1 flex items-center overflow-x-auto hide-scrollbar"
+        className="flex-1 flex items-center overflow-x-auto show-scrollbar-on-hover"
       >
         {state.tabs.map((tab) => (
           <div
