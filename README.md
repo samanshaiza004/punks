@@ -10,6 +10,11 @@ progressive, user-friendly navigator for kits and samples
 - Organize samples by marking favorites.
 - Drag and drop samples into a Digital Audio Workstation (DAW).
 
+## screenshots
+
+![screenshot 1](screenshot1.png 'screenshot 1')
+![screenshot 3](screenshot3.png 'screenshot 3')
+
 ## contribute
 
 i'm open to contributions! it's really easy to spin up a dev enviroment:
