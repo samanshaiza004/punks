@@ -41,21 +41,21 @@ const SearchBar: React.FC<SearchBarProps> = ({
 
   return (
     <div className={`relative w-full ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-    <div className="relative">
-      <input
-        id="search-bar"
-        ref={searchBarRef}
-        type="text"
-        value={searchQuery}
-        onChange={(e) => {
-          try {
-            setSearchQuery(e.target.value)
-          } catch (err) {
-            window.api.sendMessage('SearchBar.tsx: ' + err)
-          }
-        }}
-        placeholder="Search files or directories"
-        className={`
+      <div className="relative">
+        <input
+          id="search-bar"
+          ref={searchBarRef}
+          type="text"
+          value={searchQuery}
+          onChange={(e) => {
+            try {
+              setSearchQuery(e.target.value)
+            } catch (err) {
+              window.api.sendMessage('SearchBar.tsx: ' + err)
+            }
+          }}
+          placeholder="Search files or directories"
+          className={`
           w-full
           h-10
           py-1
@@ -73,11 +73,11 @@ const SearchBar: React.FC<SearchBarProps> = ({
           }
           ${isDarkMode ? 'focus:ring-2 focus:ring-gray-700' : 'focus:ring-2 focus:ring-gray-200'}
         `}
-      />
-      {searchQuery && (
-        <button
-          onClick={() => setSearchQuery('')}
-          className={`
+        />
+        {searchQuery && (
+          <button
+            onClick={() => setSearchQuery('')}
+            className={`
             absolute
             right-3
             top-1/2
@@ -96,12 +96,12 @@ const SearchBar: React.FC<SearchBarProps> = ({
                 : 'text-gray-500 hover:text-gray-600 hover:bg-gray-100'
             }
           `}
-        >
-          ×
-        </button>
-      )}
+          >
+            ×
+          </button>
+        )}
+      </div>
     </div>
-  </div>
   )
 }
 

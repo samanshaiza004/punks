@@ -1,11 +1,11 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
 import path, { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { existsSync } from 'fs';
+import { existsSync } from 'fs'
 
 // this is a dynamic import silly
 let store
-;(async () => {
+;(async (): Promise<void> => {
   const Store = (await import('electron-store')).default
   store = new Store()
 })()
@@ -60,19 +60,19 @@ app.whenReady().then(() => {
 
       // Handle special characters manually first
       const decodedPath = rawPath
-        .replace(/%23/g, '#')  // Handle # symbol
-        .replace(/%25/g, '%')  // Handle % symbol
-        .replace(/%20/g, ' ')  // Handle spaces
-        .replace(/%26/g, '&')  // Handle & symbol
-        .replace(/%3F/g, '?')  // Handle ? symbol
-        .replace(/%2B/g, '+')  // Handle + symbol
-        .replace(/%5B/g, '[')  // Handle [ symbol
-        .replace(/%5D/g, ']')  // Handle ] symbol
-        .replace(/%40/g, '@')  // Handle @ symbol
-        .replace(/%21/g, '!')  // Handle ! symbol
-        .replace(/%24/g, '$')  // Handle $ symbol
+        .replace(/%23/g, '#') // Handle # symbol
+        .replace(/%25/g, '%') // Handle % symbol
+        .replace(/%20/g, ' ') // Handle spaces
+        .replace(/%26/g, '&') // Handle & symbol
+        .replace(/%3F/g, '?') // Handle ? symbol
+        .replace(/%2B/g, '+') // Handle + symbol
+        .replace(/%5B/g, '[') // Handle [ symbol
+        .replace(/%5D/g, ']') // Handle ] symbol
+        .replace(/%40/g, '@') // Handle @ symbol
+        .replace(/%21/g, '!') // Handle ! symbol
+        .replace(/%24/g, '$') // Handle $ symbol
         .replace(/%5C/g, '\\') // Handle backslashes
-        .replace(/%3A/g, ':')  // Handle colons
+        .replace(/%3A/g, ':') // Handle colons
 
       // Normalize the path for the current platform
       const normalizedPath = path.normalize(decodedPath)
@@ -84,7 +84,7 @@ app.whenReady().then(() => {
       }
 
       // Create the file URL with proper encoding
-      const encodeSpecialChars = (str: string) => {
+      const encodeSpecialChars = (str: string): string => {
         return str
           .replace(/#/g, '%23')
           .replace(/\s/g, '%20')
@@ -112,17 +112,17 @@ app.whenReady().then(() => {
         // 2. Split the path to handle drive letter separately
         const [drive, ...pathParts] = forwardSlashPath.split(':')
         // 3. Encode each path segment while preserving slashes
-        const encodedPath = pathParts.join(':').split('/')
-          .map(segment => encodeSpecialChars(segment))
+        const encodedPath = pathParts
+          .join(':')
+          .split('/')
+          .map((segment) => encodeSpecialChars(segment))
           .join('/')
         // 4. Reconstruct the URL with drive letter
         fileUrl = `file:///${drive}:${encodedPath}`
       } else {
         // Unix path handling
         const segments = normalizedPath.split('/')
-        const encodedPath = segments
-          .map(segment => encodeSpecialChars(segment))
-          .join('/')
+        const encodedPath = segments.map((segment) => encodeSpecialChars(segment)).join('/')
         fileUrl = `file://${encodedPath}`
       }
 
@@ -134,7 +134,7 @@ app.whenReady().then(() => {
       console.log('File exists check:', existsSync(normalizedPath))
 
       const response = await net.fetch(fileUrl)
-      
+
       if (!response.ok) {
         throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`)
       }
@@ -151,7 +151,7 @@ function createWindow(): void {
   const mainWindow = new BrowserWindow({
     width: 900,
     height: 670,
-    minWidth: 480, 
+    minWidth: 480,
     minHeight: 400,
     show: false,
     autoHideMenuBar: true,

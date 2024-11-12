@@ -26,7 +26,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const { isDarkMode, toggleDarkMode } = useTheme()
   const { showToast } = useToast()
   useEffect(() => {
-    const loadSavedBindings = async () => {
+    const loadSavedBindings = async (): Promise<void> => {
       try {
         const saved = await window.api.getKeyBindings()
         if (saved) {
@@ -41,7 +41,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     }
 
-    const loadAlwaysOnTop = async () => {
+    const loadAlwaysOnTop = async (): Promise<void> => {
       try {
         const value = await window.api.getAlwaysOnTop()
         setAlwaysOnTop(value)
@@ -54,7 +54,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     loadSavedBindings()
   }, [])
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent): void => {
     if (!editingBinding) return
 
     e.preventDefault()
@@ -71,12 +71,12 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     setTempKeys(keyCombo)
   }
 
-  const startEditing = (bindingId: string) => {
+  const startEditing = (bindingId: string): void => {
     setEditingBinding(bindingId)
     setTempKeys([])
   }
 
-  const saveBinding = () => {
+  const saveBinding = (): void => {
     if (!editingBinding || tempKeys.length === 0) return
 
     setKeyBindings((prevBindings) => {
@@ -106,7 +106,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     return currentKeys.map((combo) => formatKeyCombo(combo)).join(' or ')
   }
 
-  const resetToDefault = (bindingId: string) => {
+  const resetToDefault = (bindingId: string): void => {
     setKeyBindings((prev) => {
       const binding = prev[bindingId]
       if (!binding) return prev
@@ -121,7 +121,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     })
   }
 
-  const handleSave = async () => {
+  const handleSave = async (): Promise<void> => {
     try {
       await window.api.saveKeyBindings(keyBindings)
       await window.api.setAlwaysOnTop(alwaysOnTop)
@@ -146,7 +146,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             isDarkMode ? 'border-gray-700' : 'border-gray-200'
           }`}
         >
-          <h2 className="text-xl font-semibold">Keyboard Shortcuts</h2>
+          <h2 className="text-xl font-semibold">Settings</h2>
           <button onClick={onClose} className={`text-2xl hover:opacity-75 transition-opacity`}>
             ×
           </button>
@@ -201,13 +201,13 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                           readOnly
                           className={`px-2 py-1 border rounded w-40 ${
                             isDarkMode
-                              ? 'bg-gray-700 border-gray-600 text-gray-100'
-                              : 'bg-white border-gray-300 text-gray-90'
+                              ? 'bg-gray-700 border-gray-600 '
+                              : 'bg-white border-gray-300 '
                           }`}
                         />
                         <Button
                           onClick={saveBinding}
-                          className="bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                          className="bg-blue-500  rounded hover:bg-blue-600 transition-colors"
                         >
                           Save
                         </Button>
@@ -215,11 +215,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                     ) : (
                       <Button
                         onClick={() => startEditing(binding.id)}
-                        className={`rounded min-w-[100px] text-left ${
-                          isDarkMode
-                            ? 'bg-gray-700 hover:bg-gray-600 border-gray-600'
-                            : 'bg-gray-100 hover:bg-gray-200 border-gray-300'
-                        } border transition-colors`}
+                        className={`rounded min-w-[100px] text-left transition-colors`}
                       >
                         {formatKeyBindingDisplay(binding.currentKeys)}
                       </Button>
@@ -229,11 +225,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                   <td className="p-3">
                     <Button
                       onClick={() => resetToDefault(binding.id)}
-                      className={`rounded ${
-                        isDarkMode
-                          ? 'text-gray-300 hover:bg-gray-700'
-                          : 'text-gray-600 hover:bg-gray-100'
-                      } transition-colors`}
+                      className={`transition-colors`}
                     >
                       Reset
                     </Button>
@@ -244,22 +236,13 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
           </table>
         </div>
 
-        <div
-          className={`flex justify-end gap-2 p-4 border-t ${
-            isDarkMode ? 'border-gray-700' : 'border-gray-200'
-          }`}
-        >
-          <Button
-            onClick={onClose}
-            className={` border transition-colors ${
-              isDarkMode ? 'border-gray-600 ' : 'border-gray-300 '
-            }`}
-          >
+        <div className={`flex justify-end gap-2 p-4 border-t `}>
+          <Button onClick={onClose} className={` border transition-colors`}>
             Cancel
           </Button>
           <Button
             onClick={handleSave}
-            className=" bg-green-500 text-white  hover:bg-green-600 transition-colors"
+            className=" bg-green-500 hover:bg-green-600 transition-colors"
           >
             Save Changes
           </Button>

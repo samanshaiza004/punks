@@ -10,7 +10,7 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
   const { handleFileClick } = useFileOperations()
   const tab = state.tabs.find((t) => t.id === tabId)
 
-  if (!tab) return null
+  if (!tab) return null 
 
   const handleDirectoryChange = (newPath: string[]) => {
     dispatch({
@@ -22,7 +22,7 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
     })
   }
 
-  const handleSearch = async () => {
+  const handleSearch = async (): Promise<void> => {
     if (tab.searchQuery.length > 0) {
       try {
         const results = await window.api.search(tab.directoryPath, tab.searchQuery)
@@ -54,7 +54,7 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
     }
   }
 
-  const updateSearchQuery = (query: string) => {
+  const updateSearchQuery = (query: string): void => {
     dispatch({
       type: 'UPDATE_TAB',
       payload: {

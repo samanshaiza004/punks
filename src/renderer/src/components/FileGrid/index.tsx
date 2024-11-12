@@ -57,7 +57,7 @@ const FileGrid: React.FC<FileGridProps> = ({
       resizeObserver.observe(gridRef.current)
     }
 
-    return () => {
+    return (): void => {
       resizeObserver.disconnect()
     }
   }, [updateGridColumns])
@@ -81,7 +81,7 @@ const FileGrid: React.FC<FileGridProps> = ({
       observerRef.current.observe(loadingTriggerRef.current)
     }
 
-    return () => observerRef.current?.disconnect()
+    return (): void => observerRef.current?.disconnect()
   }, [hasMore, isLoading, isSearching, loadMoreFiles])
 
   const displayedFiles = isSearching ? searchResults : files

@@ -1,10 +1,11 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { clipboard, contextBridge } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { ipcRenderer } from 'electron/renderer'
 import fs from 'fs/promises'
 import path from 'path'
 import { FileInfo } from '../renderer/src/types/FileInfo'
-import { parseFile } from 'music-metadata'
+import { IAudioMetadata, parseFile } from 'music-metadata'
 export const api = {
   sendMessage: (message: string): void => {
     ipcRenderer.send('message', message)
@@ -90,7 +91,7 @@ export const api = {
     return ipcRenderer.invoke('open-directory-picker')
   },
 
-  startDrag: (filename: string) => {
+  startDrag: (filename: string): void => {
     ipcRenderer.send('message', 'Starting drag for file: ' + filename)
     ipcRenderer.send('ondragstart', filename)
   },
@@ -134,7 +135,7 @@ export const api = {
     return results
   },
 
-  getAudioMetadata: async (filePath: string) => {
+  getAudioMetadata: async (filePath: string): Promise<IAudioMetadata | null> => {
     try {
       const metadata = await parseFile(filePath)
       return metadata
@@ -144,8 +145,8 @@ export const api = {
     }
   },
 
-  getKeyBindings: () => ipcRenderer.invoke('get-key-bindings'),
-  saveKeyBindings: (bindings) => ipcRenderer.invoke('save-key-bindings', bindings),
+  getKeyBindings: (): Promise<any> => ipcRenderer.invoke('get-key-bindings'),
+  saveKeyBindings: (bindings): Promise<any> => ipcRenderer.invoke('save-key-bindings', bindings),
 
   deleteFile: async (filePath: string): Promise<boolean> => {
     try {
@@ -201,24 +202,6 @@ export const api = {
   },
   sep: (): string => {
     return path.sep
-  },
-  path: {
-    join: (...paths: string[]): string => {
-      return path.join(...paths)
-    },
-
-    dirname: (pathString: string): string => {
-      return path.dirname(pathString)
-    },
-    basename: (pathString: string): string => {
-      return path.basename(pathString)
-    },
-    normalize: (pathString: string): string => {
-      return path.normalize(pathString)
-    },
-    relative: (from: string, to: string): string => {
-      return path.relative(from, to)
-    }
   }
 }
 

@@ -10,16 +10,16 @@ export const useFileOperations = () => {
   const createSampleUrl = (filePath: string) => {
     // Split the path into segments using the platform-specific separator
     const segments = filePath.split(window.api.sep())
-    
+
     // Encode each segment individually (preserving separators)
-    const encodedSegments = segments.map(segment => 
+    const encodedSegments = segments.map((segment) =>
       // Don't encode the drive letter portion on Windows (e.g., "C:")
       segment.includes(':') ? segment : encodeURIComponent(segment)
     )
-    
+
     // Join with the original separator
     const encodedPath = encodedSegments.join(window.api.sep())
-    
+
     return `sample:///${encodedPath}`
   }
 
@@ -32,7 +32,7 @@ export const useFileOperations = () => {
 
         if (file.location) {
           audioPath = window.api.isAbsolute(file.location)
-            ? window.api.path.join(file.location, file.name)
+            ? window.api.renderPath([file.location, file.name])
             : window.api.renderPath([file.location, file.name])
         } else {
           audioPath = window.api.renderPath([...currentPath, file.name])
