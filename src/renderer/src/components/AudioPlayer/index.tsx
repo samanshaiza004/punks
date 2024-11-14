@@ -34,42 +34,31 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
 
   return (
     <div
-      className={`fixed bottom-0 left-0 w-full p-2 shadow-lg backdrop-blur-sm ring-1 ring-black/5 z-10 ${
+      className={`w-full shadow-lg backdrop-blur-sm ring-1 ring-black/5 ${
         isDarkMode ? 'bg-gray-800/20 text-gray-200' : 'bg-white/20 text-gray-800'
       }`}
     >
-      <div id="waveform" className="mb-4" />
-      <div className="flex items-center justify-between">
+      {/* Controls Section */}
+      <div className="px-4 py-2 flex items-center justify-between border-b border-gray-200/10">
         <div className="flex items-center space-x-4">
-          {/* <button
-            onClick={handleSkipBack}
-            className={`p-2 rounded-full ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
-          >
-            <SkipBack className="w-5 h-5" />
-          </button> */}
-
           <button
             onClick={togglePlayPause}
-            className={`p-2 rounded-full ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
+            className={`p-2 rounded-full transition-colors ${
+              isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'
+            }`}
           >
-            {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+            {isPlaying ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
           </button>
+          <div className="flex items-center space-x-2">
+            <span className="text-sm font-medium">{formatTime(currentTime)}</span>
+            <span className="text-sm text-gray-500">/</span>
+            <span className="text-sm text-gray-500">{formatTime(duration)}</span>
+          </div>
+        </div>
 
-          {/* <button
-            onClick={handleSkipForward}
-            className={`p-2 rounded-full ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
-          >
-            <SkipForward className="w-5 h-5" />
-          </button> */}
-        </div>
-        <div className="flex items-center space-x-2">
-          <span className="text-sm">{formatTime(currentTime)}</span>
-          <span className="text-sm text-gray-500">/</span>
-          <span className="text-sm">{formatTime(duration)}</span>
-        </div>
         <div className="flex items-center space-x-2">
           <input
-            className={`w-24 h-2 rounded-full appearance-none cursor-pointer ${
+            className={`w-24 h-2 rounded-full appearance-none cursor-pointer transition-colors ${
               isDarkMode ? 'bg-gray-600' : 'bg-gray-200'
             }`}
             type="range"
@@ -80,13 +69,17 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
             onChange={(e) => setVolume(Number(e.target.value))}
             style={{
               background: `linear-gradient(to right, 
-                ${isDarkMode ? '#60A5FA' : '#3B82F6'} 0%, 
-                ${isDarkMode ? '#60A5FA' : '#3B82F6'} ${volume * 100}%, 
-                ${isDarkMode ? '#4B5563' : '#D1D5DB'} ${volume * 100}%, 
-                ${isDarkMode ? '#4B5563' : '#D1D5DB'} 100%)`
+              ${isDarkMode ? '#60A5FA' : '#3B82F6'} 0%, 
+              ${isDarkMode ? '#60A5FA' : '#3B82F6'} ${volume * 100}%, 
+              ${isDarkMode ? '#4B5563' : '#D1D5DB'} ${volume * 100}%, 
+              ${isDarkMode ? '#4B5563' : '#D1D5DB'} 100%)`
             }}
           />
         </div>
+      </div>
+      {/* Waveform Section */}
+      <div className="w-full px-4 py-2">
+        <div id="waveform" className="w-full" style={{ minHeight: '40px' }} />
       </div>
     </div>
   )

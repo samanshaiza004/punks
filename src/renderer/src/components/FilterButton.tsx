@@ -16,7 +16,7 @@ export const FilterButton: React.FC<FilterButtonProps> = ({ type, label, isActiv
   return (
     <button
       onClick={() => onToggle(type)}
-      className={`px-3 py-1 rounded-sm text-sm font-medium transition-colors
+      className={`px-2 py-1 rounded-sm text-sm font-medium transition-colors
         ${
           isActive
             ? `${isDarkMode ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white'}`

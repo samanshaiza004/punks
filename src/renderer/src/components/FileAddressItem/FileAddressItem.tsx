@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/explicit-function-return-type */
 import { ButtonHTMLAttributes } from 'react'
 
 type FileAddressItemProps = {
@@ -9,14 +10,14 @@ export function FileAddressItem({ fileName, isDarkMode, ...props }: FileAddressI
   return (
     <button
       className={`
-        h-8 
-        px-2
+        h-4
+        text-sm
+        px-1
         flex 
         items-center 
         rounded-sm
         whitespace-nowrap 
         overflow-hidden 
-        font-medium 
         cursor-pointer 
         transition-colors
         focus:outline-none 

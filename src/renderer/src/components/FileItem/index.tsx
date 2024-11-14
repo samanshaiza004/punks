@@ -9,6 +9,7 @@ type FileItemProps = {
   isDarkMode: boolean
 } & ButtonHTMLAttributes<HTMLButtonElement>
 
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
 export function FileItem({
   fileName,
   isDirectory,
@@ -36,18 +37,16 @@ export function FileItem({
   return (
     <button
       className={`
-        w-full
         px-1
-        py-1
         rounded-sm
         flex 
         items-center 
         justify-start 
-        space-x-2 
+        space-x-2
         transition-colors
         focus:outline-none 
         focus:ring-2
-        min-w-[200px] min-h-[40px] 
+        min-w-[200px] min-h-[35px] 
         text-sm
         ${
           isSelected

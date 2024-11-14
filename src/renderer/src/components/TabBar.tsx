@@ -82,11 +82,11 @@ const TabBar = ({ lastSelectedDirectory }) => {
             className={`
               group
               flex items-center
-              min-w-[140px]
-              max-w-[200px]
-              px-3 py-2
+              min-w-[120px]
+              max-w-[180px]
+              px-2 py-1
               mr-1
-              rounded-t-md
+              rounded-t-sm
               transition-all
               duration-200
               select-none
