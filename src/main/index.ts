@@ -2,6 +2,11 @@ import { app, shell, BrowserWindow, ipcMain, dialog, protocol, net } from 'elect
 import path, { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { existsSync } from 'fs'
+import TagEngine from './TagEngine'
+import { setupTagEngineIPC } from './TagEngineIPC'
+
+const tagEngine = new TagEngine()
+setupTagEngineIPC(tagEngine)
 
 // this is a dynamic import silly
 let store
@@ -55,10 +60,8 @@ protocol.registerSchemesAsPrivileged([
 app.whenReady().then(() => {
   protocol.handle('sample', async (request) => {
     try {
-      // Get the raw URL string and remove the protocol prefix
       const rawPath = request.url.replace('sample:///', '')
 
-      // Handle special characters manually first
       const decodedPath = rawPath
         .replace(/%23/g, '#') // Handle # symbol
         .replace(/%25/g, '%') // Handle % symbol
@@ -83,7 +86,6 @@ app.whenReady().then(() => {
         throw new Error('File not found')
       }
 
-      // Create the file URL with proper encoding
       const encodeSpecialChars = (str: string): string => {
         return str
           .replace(/#/g, '%23')
@@ -106,18 +108,13 @@ app.whenReady().then(() => {
 
       let fileUrl: string
       if (process.platform === 'win32') {
-        // Windows path handling
-        // 1. Convert backslashes to forward slashes
         const forwardSlashPath = normalizedPath.replace(/\\/g, '/')
-        // 2. Split the path to handle drive letter separately
         const [drive, ...pathParts] = forwardSlashPath.split(':')
-        // 3. Encode each path segment while preserving slashes
         const encodedPath = pathParts
           .join(':')
           .split('/')
           .map((segment) => encodeSpecialChars(segment))
           .join('/')
-        // 4. Reconstruct the URL with drive letter
         fileUrl = `file:///${drive}:${encodedPath}`
       } else {
         // Unix path handling

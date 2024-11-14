@@ -6,6 +6,8 @@ import fs from 'fs/promises'
 import path from 'path'
 import { FileInfo } from '../renderer/src/types/FileInfo'
 import { IAudioMetadata, parseFile } from 'music-metadata'
+import { AudioFile, TagSearchOptions } from '../main/types'
+
 export const api = {
   sendMessage: (message: string): void => {
     ipcRenderer.send('message', message)
@@ -202,7 +204,57 @@ export const api = {
   },
   sep: (): string => {
     return path.sep
-  }
+  },
+
+  // TagEngine functionality
+  // File scanning and metadata
+  scanDirectory: (directoryPath: string): Promise<void> => {
+    return ipcRenderer.invoke('tag-engine:scan-directory', directoryPath)
+  },
+
+  getFileMetadata: async (filePath: string): Promise<AudioFile | null> => {
+    return ipcRenderer.invoke('tag-engine:get-file-metadata', filePath)
+  },
+
+  // Tag management
+  addTags: async (tags: string[]): Promise<void> => {
+    return ipcRenderer.invoke('tag-engine:add-tags', tags)
+  },
+
+  tagFiles: async (files: string[], tag: string): Promise<void> => {
+    return ipcRenderer.invoke('tag-engine:tag-files', files, tag)
+  },
+
+  untagFile: async (file: string, tag: string): Promise<void> => {
+    return ipcRenderer.invoke('tag-engine:untag-file', file, tag)
+  },
+
+  // Search operations
+  searchByTags: async (tags: string[], options: TagSearchOptions = {}): Promise<AudioFile[]> => {
+    return ipcRenderer.invoke('tag-engine:search-by-tags', tags, options)
+  },
+
+  // Statistics
+  getTagStats: async (): Promise<{
+    totalFiles: number
+    totalTags: number
+    tagCounts: { name: string; count: number }[]
+  }> => {
+    return ipcRenderer.invoke('tag-engine:get-stats')
+  },
+
+  // Event listeners
+  onFileAdded: (callback: (file: AudioFile) => void): void => {
+    ipcRenderer.on('tag-engine:file-added', (_event, file) => callback(file))
+  },
+
+  onFileChanged: (callback: (file: AudioFile) => void): void => {
+    ipcRenderer.on('tag-engine:file-changed', (_event, file) => callback(file))
+  },
+
+  onFileRemoved: (callback: (path: string) => void): void => {
+    ipcRenderer.on('tag-engine:file-removed', (_event, path) => callback(path))
+  },
 }
 
 if (process.contextIsolated) {

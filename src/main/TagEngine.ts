@@ -1,24 +1,50 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// Using better-sqlite3 for performance
-const Database = require('better-sqlite3')
-const crypto = require('crypto')
-const chokidar = require('chokidar')
-const { app } = require('electron')
-const path = require('path')
 
+import { app } from 'electron'
+import Database from 'better-sqlite3'
+import crypto from 'crypto'
+import chokidar from 'chokidar'
+import path from 'path'
 import fs from 'fs'
+import { getAudioDurationInSeconds } from 'get-audio-duration'
+import * as mm from 'music-metadata'
+
+interface AudioMetadata {
+  duration: number
+  sampleRate?: number
+  channels?: number
+  format?: string
+  bitrate?: number
+}
+
+interface AudioFile {
+  id: number
+  path: string
+  hash: string
+  lastModified: number
+  metadata: AudioMetadata
+  tags: string[]
+}
+
+interface TagSearchOptions {
+  matchAll?: boolean
+  sortBy?: 'path' | 'lastModified' | 'duration'
+  sortOrder?: 'asc' | 'desc'
+}
 
 class TagEngine {
-  db: any
-  addFileStmt: any
-  addTagStmt: any
-  tagFileStmt: any
-  untagFileStmt: any
+  private db: any
+  private addFileStmt: any
+  private addTagStmt: any
+  private tagFileStmt: any
+  private untagFileStmt: any
+  private addMetadataStmt: any
+
   constructor() {
     const dbPath = path.join(app.getPath('userData'), 'tags.db')
     this.db = new Database(dbPath)
 
-    // Initialize database
+    // Initialize database with enhanced schema
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS files (
         id INTEGER PRIMARY KEY,
@@ -40,8 +66,24 @@ class TagEngine {
         PRIMARY KEY(file_id, tag_id)
       );
 
-      -- Add default favorite tag
-      INSERT OR IGNORE INTO tags (name) VALUES ('favorite');
+      CREATE TABLE IF NOT EXISTS audio_metadata (
+        file_id INTEGER PRIMARY KEY,
+        duration REAL,
+        sample_rate INTEGER,
+        channels INTEGER,
+        format TEXT,
+        bitrate INTEGER,
+        FOREIGN KEY(file_id) REFERENCES files(id)
+      );
+
+      -- Add default tags
+      INSERT OR IGNORE INTO tags (name) VALUES 
+        ('favorite'),
+        ('loop'),
+        ('drum'),
+        ('bass'),
+        ('melody'),
+        ('fx');
     `)
 
     // Prepare statements
@@ -59,10 +101,15 @@ class TagEngine {
        WHERE file_id IN (SELECT id FROM files WHERE path = ?)
        AND tag_id IN (SELECT id FROM tags WHERE name = ?)`
     )
+    this.addMetadataStmt = this.db.prepare(
+      `INSERT OR REPLACE INTO audio_metadata 
+       (file_id, duration, sample_rate, channels, format, bitrate)
+       SELECT id, ?, ?, ?, ?, ? FROM files WHERE path = ?`
+    )
   }
 
   // Calculate file hash for tracking moves
-  async calculateFileHash(filePath): Promise<string> {
+  private async calculateFileHash(filePath: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const hash = crypto.createHash('sha1')
       const stream = fs.createReadStream(filePath)
@@ -72,76 +119,162 @@ class TagEngine {
     })
   }
 
-  // Add or update file in database
-  async addFile(filePath): Promise<void> {
-    const stats = await fs.promises.stat(filePath)
-    const hash = await this.calculateFileHash(filePath)
-    this.addFileStmt.run(filePath, hash, stats.mtimeMs)
+  // Extract audio metadata using music-metadata
+  private async extractAudioMetadata(filePath: string): Promise<AudioMetadata> {
+    try {
+      const metadata = await mm.parseFile(filePath)
+      const duration = await getAudioDurationInSeconds(filePath)
+      return {
+        duration,
+        sampleRate: metadata.format.sampleRate,
+        channels: metadata.format.numberOfChannels,
+        format: metadata.format.container,
+        bitrate: metadata.format.bitrate
+      }
+    } catch (error) {
+      console.error(`Error extracting metadata for ${filePath}:`, error)
+      return { duration: 0 }
+    }
   }
 
-  // Add a new tag type
-  addTag(tagName): void {
-    this.addTagStmt.run(tagName)
+  // Add or update file in database with metadata
+  async addFile(filePath: string): Promise<void> {
+    try {
+      const stats = await fs.promises.stat(filePath)
+      const hash = await this.calculateFileHash(filePath)
+      const metadata = await this.extractAudioMetadata(filePath)
+
+      this.db.transaction(() => {
+        this.addFileStmt.run(filePath, hash, stats.mtimeMs)
+        this.addMetadataStmt.run(
+          metadata.duration,
+          metadata.sampleRate,
+          metadata.channels,
+          metadata.format,
+          metadata.bitrate,
+          filePath
+        )
+      })()
+    } catch (error) {
+      console.error(`Error adding file ${filePath}:`, error)
+      throw error
+    }
   }
 
-  // Tag a file
-  tagFile(filePath, tagName): void {
-    this.tagFileStmt.run(filePath, tagName)
+  // Add multiple tags at once
+  async addTags(tagNames: string[]): Promise<void> {
+    this.db.transaction(() => {
+      tagNames.forEach((tag) => this.addTagStmt.run(tag))
+    })()
   }
 
-  // Remove a tag from a file
-  untagFile(filePath, tagName): void {
-    this.untagFileStmt.run(filePath, tagName)
+  // Tag multiple files at once
+  async tagFiles(filePaths: string[], tagName: string): Promise<void> {
+    this.db.transaction(() => {
+      filePaths.forEach((path) => this.tagFileStmt.run(path, tagName))
+    })()
   }
 
-  // Get all tags for a file
-  getFileTags(filePath): void {
+  async untagFile(filePath: string, tagName: string): Promise<void> {
+    this.db.transaction(() => {
+      this.untagFileStmt.run(filePath, tagName)
+    })()
+  }
+
+  // Get all metadata for a file
+  getFileMetadata(filePath: string): AudioFile | null {
     return this.db
       .prepare(
-        `SELECT t.name 
-       FROM tags t
-       JOIN file_tags ft ON ft.tag_id = t.id
-       JOIN files f ON f.id = ft.file_id
-       WHERE f.path = ?`
+        `SELECT f.*, 
+                am.duration, am.sample_rate, am.channels, am.format, am.bitrate,
+                GROUP_CONCAT(t.name) as tags
+         FROM files f
+         LEFT JOIN audio_metadata am ON am.file_id = f.id
+         LEFT JOIN file_tags ft ON ft.file_id = f.id
+         LEFT JOIN tags t ON t.id = ft.tag_id
+         WHERE f.path = ?
+         GROUP BY f.id`
       )
-      .all(filePath)
+      .get(filePath)
+  }
+
+  // Enhanced search with options
+  searchByTags(tags: string[], options: TagSearchOptions = {}): AudioFile[] {
+    const { matchAll = true, sortBy = 'path', sortOrder = 'asc' } = options
+    const operator = matchAll ? 'AND' : 'OR'
+    const placeholders = tags.map(() => '?').join(` ${operator} t.name = `)
+
+    return this.db
+      .prepare(
+        `SELECT DISTINCT f.*, 
+                        am.duration, am.sample_rate, am.channels, am.format, am.bitrate,
+                        GROUP_CONCAT(t2.name) as file_tags
+         FROM files f
+         JOIN file_tags ft ON ft.file_id = f.id
+         JOIN tags t ON t.id = ft.tag_id
+         LEFT JOIN audio_metadata am ON am.file_id = f.id
+         LEFT JOIN file_tags ft2 ON ft2.file_id = f.id
+         LEFT JOIN tags t2 ON t2.id = ft2.tag_id
+         WHERE t.name = ${placeholders}
+         GROUP BY f.id
+         ORDER BY ${sortBy} ${sortOrder}`
+      )
+      .all(tags)
   }
 
   // Watch for file system changes
-  watchDirectory(directory): void {
+  watchDirectory(directory: string): chokidar.FSWatcher {
     const watcher = chokidar.watch(directory, {
       persistent: true,
-      ignoreInitial: false
+      ignoreInitial: false,
+      ignored: /(^|[\\/\\])\../, // Ignore hidden files
+      awaitWriteFinish: true // Wait for writes to finish
     })
 
     watcher
-      .on('add', (path) => this.addFile(path))
-      .on('change', (path) => this.addFile(path))
+      .on('add', async (path) => {
+        if (this.isAudioFile(path)) {
+          await this.addFile(path)
+        }
+      })
+      .on('change', async (path) => {
+        if (this.isAudioFile(path)) {
+          await this.addFile(path)
+        }
+      })
       .on('unlink', (path) => {
-        // Handle file deletion
         this.db.prepare('DELETE FROM files WHERE path = ?').run(path)
       })
       .on('ready', () => {
         console.log('Initial scan complete')
       })
+      .on('error', (error) => {
+        console.error('Error watching directory:', error)
+      })
 
     return watcher
   }
 
-  // Search files by tags
-  searchByTags(tags): void {
-    const placeholders = tags.map(() => '?').join(',')
-    return this.db
-      .prepare(
-        `SELECT DISTINCT f.path 
-       FROM files f
-       JOIN file_tags ft ON ft.file_id = f.id
-       JOIN tags t ON t.id = ft.tag_id
-       WHERE t.name IN (${placeholders})
-       GROUP BY f.id
-       HAVING COUNT(DISTINCT t.id) = ?`
-      )
-      .all(...tags, tags.length)
+  // Helper to check if file is an audio file
+  private isAudioFile(filePath: string): boolean {
+    const audioExtensions = ['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aiff']
+    return audioExtensions.includes(path.extname(filePath).toLowerCase())
+  }
+
+  // Get statistics about the database
+  getStats(): any {
+    return {
+      totalFiles: this.db.prepare('SELECT COUNT(*) as count FROM files').get().count,
+      totalTags: this.db.prepare('SELECT COUNT(*) as count FROM tags').get().count,
+      tagCounts: this.db
+        .prepare(
+          `SELECT t.name, COUNT(ft.file_id) as count 
+         FROM tags t 
+         LEFT JOIN file_tags ft ON ft.tag_id = t.id 
+         GROUP BY t.id`
+        )
+        .all()
+    }
   }
 }
 
