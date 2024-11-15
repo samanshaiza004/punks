@@ -1,3 +1,4 @@
+// src/main/TagEngineIPC.ts
 import { ipcMain, IpcMainInvokeEvent } from 'electron'
 import TagEngine from './TagEngine'
 import { TagSearchOptions } from './types'
@@ -14,26 +15,26 @@ export function setupTagEngineIPC(tagEngine: TagEngine): void {
   ipcMain.handle(
     'tag-engine:get-file-metadata',
     async (_event: IpcMainInvokeEvent, filePath: string) => {
-      return tagEngine.getFileMetadata(filePath)
+      return await tagEngine.getFileMetadata(filePath)
     }
   )
 
   // Tag management
   ipcMain.handle('tag-engine:add-tags', async (_event: IpcMainInvokeEvent, tags: string[]) => {
-    return tagEngine.addTags(tags)
+    return await tagEngine.addTags(tags)
   })
 
   ipcMain.handle(
     'tag-engine:tag-files',
     async (_event: IpcMainInvokeEvent, files: string[], tag: string) => {
-      return tagEngine.tagFiles(files, tag)
+      return await tagEngine.tagFiles(files, tag)
     }
   )
 
   ipcMain.handle(
     'tag-engine:untag-file',
     async (_event: IpcMainInvokeEvent, file: string, tag: string) => {
-      return tagEngine.untagFile(file, tag)
+      return await tagEngine.untagFile(file, tag)
     }
   )
 
@@ -41,12 +42,17 @@ export function setupTagEngineIPC(tagEngine: TagEngine): void {
   ipcMain.handle(
     'tag-engine:search-by-tags',
     async (_event: IpcMainInvokeEvent, tags: string[], options: TagSearchOptions) => {
-      return tagEngine.searchByTags(tags, options)
+      return await tagEngine.searchByTags(tags, options)
     }
   )
 
   // Statistics
   ipcMain.handle('tag-engine:get-stats', async () => {
-    return tagEngine.getStats()
+    return await tagEngine.getStats()
+  })
+
+  // Cleanup on app quit
+  ipcMain.handle('tag-engine:close', async () => {
+    return await tagEngine.close()
   })
 }

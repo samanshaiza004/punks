@@ -1,3 +1,5 @@
+// src/preload/index.ts
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { clipboard, contextBridge } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
@@ -254,7 +256,7 @@ export const api = {
 
   onFileRemoved: (callback: (path: string) => void): void => {
     ipcRenderer.on('tag-engine:file-removed', (_event, path) => callback(path))
-  },
+  }
 }
 
 if (process.contextIsolated) {

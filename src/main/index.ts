@@ -1,3 +1,5 @@
+// src/main/index.ts
+
 import { app, shell, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
 import path, { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -5,8 +7,7 @@ import { existsSync } from 'fs'
 import TagEngine from './TagEngine'
 import { setupTagEngineIPC } from './TagEngineIPC'
 
-const tagEngine = new TagEngine()
-setupTagEngineIPC(tagEngine)
+let tagEngine: TagEngine
 
 // this is a dynamic import silly
 let store
@@ -58,6 +59,9 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 app.whenReady().then(() => {
+  tagEngine = new TagEngine()
+  setupTagEngineIPC(tagEngine)
+
   protocol.handle('sample', async (request) => {
     try {
       const rawPath = request.url.replace('sample:///', '')
