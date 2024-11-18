@@ -35,13 +35,9 @@ const FileGrid: React.FC<FileGridProps> = ({
 
   const updateGridColumns = useCallback(() => {
     if (gridRef.current) {
-      const gridWidth = gridRef.current.offsetWidth
-
-      let columns = 4 // default max
-      if (gridWidth < 640) columns = 1
-      else if (gridWidth < 768) columns = 2
-      else if (gridWidth < 1024) columns = 3
-      setGridColumns(columns)
+      const computedStyle = window.getComputedStyle(gridRef.current)
+      const columnsCount = computedStyle.getPropertyValue('grid-template-columns').split(' ').length
+      setGridColumns(columnsCount)
     }
   }, [])
 
@@ -90,37 +86,54 @@ const FileGrid: React.FC<FileGridProps> = ({
     (direction: 'up' | 'down' | 'left' | 'right') => {
       setSelectedIndex((prevIndex) => {
         let newIndex = prevIndex
-        const maxIndex = displayedFiles.length - 1
+        const maxIndex = filteredFiles.length - 1
+        const currentRow = Math.floor(prevIndex / gridColumns)
+        const currentCol = prevIndex % gridColumns
+        const totalRows = Math.ceil(filteredFiles.length / gridColumns)
 
         switch (direction) {
-          case 'up':
-            newIndex = prevIndex - gridColumns
+          case 'up': {
+            const newRow = currentRow - 1
+            if (newRow >= 0) {
+              newIndex = newRow * gridColumns + currentCol
+              if (newIndex > maxIndex) {
+                newIndex = maxIndex
+              }
+            }
             break
-          case 'down':
-            newIndex = prevIndex + gridColumns
+          }
+          case 'down': {
+            const newRow = currentRow + 1
+            if (newRow < totalRows) {
+              newIndex = Math.min(newRow * gridColumns + currentCol, maxIndex)
+            }
             break
-          case 'left':
-            if (prevIndex % gridColumns !== 0) {
+          }
+          case 'left': {
+            if (currentCol > 0) {
               newIndex = prevIndex - 1
             }
             break
-          case 'right':
-            if ((prevIndex + 1) % gridColumns !== 0 && prevIndex < maxIndex) {
+          }
+          case 'right': {
+            if (currentCol < gridColumns - 1 && prevIndex < maxIndex) {
               newIndex = prevIndex + 1
             }
             break
+          }
         }
 
-        if (newIndex < 0) newIndex = 0
-        if (newIndex > maxIndex) newIndex = maxIndex
+        newIndex = Math.max(0, Math.min(newIndex, maxIndex))
 
         const selectedElement = document.querySelector(`[data-index="${newIndex}"]`)
-        selectedElement?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+        if (selectedElement) {
+          selectedElement.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+        }
 
         return newIndex
       })
     },
-    [gridColumns, displayedFiles.length]
+    [gridColumns, filteredFiles.length]
   )
 
   const handlers: KeyHandlerMap = useMemo(
@@ -130,7 +143,7 @@ const FileGrid: React.FC<FileGridProps> = ({
       NAVIGATE_LEFT: () => navigateFiles('left'),
       NAVIGATE_RIGHT: () => navigateFiles('right'),
       SELECT_ITEM: (): void => {
-        const selectedFile = displayedFiles[selectedIndex]
+        const selectedFile = filteredFiles[selectedIndex]
         if (selectedFile) {
           if (selectedFile.isDirectory) {
             onDirectoryClick([...directoryPath, selectedFile.name])
@@ -140,7 +153,7 @@ const FileGrid: React.FC<FileGridProps> = ({
         }
       }
     }),
-    [navigateFiles, displayedFiles, selectedIndex, directoryPath, onDirectoryClick, onFileClick]
+    [navigateFiles, filteredFiles, selectedIndex, directoryPath, onDirectoryClick, onFileClick]
   )
 
   useKeyBindings(handlers)
