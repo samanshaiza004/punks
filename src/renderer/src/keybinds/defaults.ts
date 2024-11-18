@@ -1,5 +1,5 @@
-// src/keybinds/defaults.ts
-import { KeyBindingMap } from '../types/types'
+// src/renderer/src/keybinds/defaults.ts
+import { KeyBindingMap } from '../types/keybinds'
 
 export const defaultKeyBindings: KeyBindingMap = {
   NAVIGATE_UP: {
@@ -49,6 +49,34 @@ export const defaultKeyBindings: KeyBindingMap = {
       ['Alt', 'h']
     ],
     description: 'Navigate to parent directory'
+  },
+  CLOSE_TAB: {
+    id: 'CLOSE_TAB',
+    action: 'Close Tab',
+    defaultKeys: [['Control', 'w']],
+    currentKeys: [['Control', 'w']],
+    description: 'Close the current tab'
+  },
+  NEW_TAB: {
+    id: 'NEW_TAB',
+    action: 'New Tab',
+    defaultKeys: [['Control', 't']],
+    currentKeys: [['Control', 't']],
+    description: 'Create a new tab'
+  },
+  NEXT_TAB: {
+    id: 'NEXT_TAB',
+    action: 'Next Tab',
+    defaultKeys: [['Control', 'Tab']],
+    currentKeys: [['Control', 'Tab']],
+    description: 'Switch to the next tab'
+  },
+  PREVIOUS_TAB: {
+    id: 'PREVIOUS_TAB',
+    action: 'Previous Tab',
+    defaultKeys: [['Control', 'Shift', 'Tab']],
+    currentKeys: [['Control', 'Shift', 'Tab']],
+    description: 'Switch to the previous tab'
   },
   FOCUS_SEARCH: {
     id: 'FOCUS_SEARCH',

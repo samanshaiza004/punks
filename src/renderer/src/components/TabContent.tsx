@@ -1,7 +1,7 @@
 import { useTabs } from '@renderer/context/TabContext'
 import { useFileOperations } from '@renderer/hooks/useFileOperations'
 import DirectoryView from './DirectoryView'
-import { FileFilterOptions, FileFilter } from './FileFilter'
+import FileFilterButtons, { FileFilterOptions } from './FileFilters'
 import FileGrid from './FileGrid'
 import SearchBar from './SearchBar'
 
@@ -93,7 +93,7 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
               })
             }}
           />
-          <FileFilter filters={tab.fileFilters} onFilterChange={updateFileFilters} />
+          <FileFilterButtons filters={tab.fileFilters} onFilterChange={updateFileFilters} />
         </div>
       </div>
 

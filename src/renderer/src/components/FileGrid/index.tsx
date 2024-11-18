@@ -4,9 +4,9 @@ import { FileInfo } from '@renderer/types/FileInfo'
 import { useTheme } from '@renderer/context/ThemeContext'
 import { useBatchLoading } from '@renderer/hooks/useBatchLoading'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
-import { KeyHandlerMap } from '@renderer/types/types'
+import { KeyHandlerMap } from '@renderer/types/keybinds'
 import { filterFiles } from '@renderer/utils/fileFilters'
-import { FileFilterOptions } from '../FileFilter'
+import { FileFilterOptions } from '../FileFilters'
 
 interface FileGridProps {
   directoryPath: string[]
@@ -27,19 +27,10 @@ const FileGrid: React.FC<FileGridProps> = ({
 }) => {
   const { files, isLoading, hasMore, loadMoreFiles, totalFiles } = useBatchLoading(directoryPath)
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const [gridColumns, setGridColumns] = useState(4)
   const { isDarkMode } = useTheme()
   const observerRef = useRef<IntersectionObserver | null>(null)
   const loadingTriggerRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
-
-  const updateGridColumns = useCallback(() => {
-    if (gridRef.current) {
-      const computedStyle = window.getComputedStyle(gridRef.current)
-      const columnsCount = computedStyle.getPropertyValue('grid-template-columns').split(' ').length
-      setGridColumns(columnsCount)
-    }
-  }, [])
 
   const filteredFiles = useMemo(() => {
     const sourceFiles = isSearching ? searchResults : files
@@ -47,20 +38,6 @@ const FileGrid: React.FC<FileGridProps> = ({
   }, [isSearching, searchResults, files, fileFilters])
 
   useEffect(() => {
-    updateGridColumns()
-    const resizeObserver = new ResizeObserver(updateGridColumns)
-    if (gridRef.current) {
-      resizeObserver.observe(gridRef.current)
-    }
-
-    return (): void => {
-      resizeObserver.disconnect()
-    }
-  }, [updateGridColumns])
-
-  useEffect(() => {
-    if (isSearching) return
-
     const options = {
       root: null,
       rootMargin: '100px',
@@ -87,15 +64,15 @@ const FileGrid: React.FC<FileGridProps> = ({
       setSelectedIndex((prevIndex) => {
         let newIndex = prevIndex
         const maxIndex = filteredFiles.length - 1
-        const currentRow = Math.floor(prevIndex / gridColumns)
-        const currentCol = prevIndex % gridColumns
-        const totalRows = Math.ceil(filteredFiles.length / gridColumns)
+        const currentRow = Math.floor(prevIndex / 4)
+        const currentCol = prevIndex % 4
+        const totalRows = Math.ceil(filteredFiles.length / 4)
 
         switch (direction) {
           case 'up': {
             const newRow = currentRow - 1
             if (newRow >= 0) {
-              newIndex = newRow * gridColumns + currentCol
+              newIndex = newRow * 4 + currentCol
               if (newIndex > maxIndex) {
                 newIndex = maxIndex
               }
@@ -105,7 +82,7 @@ const FileGrid: React.FC<FileGridProps> = ({
           case 'down': {
             const newRow = currentRow + 1
             if (newRow < totalRows) {
-              newIndex = Math.min(newRow * gridColumns + currentCol, maxIndex)
+              newIndex = Math.min(newRow * 4 + currentCol, maxIndex)
             }
             break
           }
@@ -116,7 +93,7 @@ const FileGrid: React.FC<FileGridProps> = ({
             break
           }
           case 'right': {
-            if (currentCol < gridColumns - 1 && prevIndex < maxIndex) {
+            if (currentCol < 4 - 1 && prevIndex < maxIndex) {
               newIndex = prevIndex + 1
             }
             break
@@ -133,7 +110,7 @@ const FileGrid: React.FC<FileGridProps> = ({
         return newIndex
       })
     },
-    [gridColumns, filteredFiles.length]
+    [filteredFiles.length]
   )
 
   const handlers: KeyHandlerMap = useMemo(
@@ -183,53 +160,52 @@ const FileGrid: React.FC<FileGridProps> = ({
     )
   }
 
-  return (
-    <div className="relative w-full h-full overflow-auto">
-      <div
-        ref={gridRef}
-        className={`
-          grid
-          grid-cols-1
-          sm:grid-cols-2
-          lg:grid-cols-3
-          xl:grid-cols-4
-          auto-rows-fr
-          file-grid
-          ${isDarkMode ? 'bg-gray-900 text-gray-200' : 'bg-white text-gray-800'}
-        `}
-      >
-        {filteredFiles.map((file, index) => (
-          <FileItem
-            key={`${file.name}-${index}`}
-            data-index={index}
-            onClick={() => {
-              setSelectedIndex(index)
-              if (file.isDirectory) {
-                onDirectoryClick([...directoryPath, file.name])
-              } else {
-                onFileClick(file)
-              }
-            }}
-            fileName={file.name}
-            isDirectory={file.isDirectory}
-            location={file.location}
-            isSelected={index === selectedIndex}
-            isDarkMode={isDarkMode}
-          />
-        ))}
+  const handleFileClick = (file: FileInfo, index: number) => {
+    setSelectedIndex(index)
+    if (file.isDirectory) {
+      onDirectoryClick([...directoryPath, file.name])
+    } else {
+      onFileClick(file)
+    }
+  }
 
-        {!isSearching && hasMore && (
-          <div ref={loadingTriggerRef} className="col-span-full flex justify-center p-4">
-            {isLoading ? (
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-500" />
-            ) : (
-              <p className="text-sm text-gray-500">
-                Showing {filteredFiles.length} of {totalFiles} items
-              </p>
-            )}
-          </div>
-        )}
-      </div>
+  return (
+    <div
+      className={`
+        grid
+        gap-1
+        p-2
+        auto-rows-[35px]
+        grid-cols-1
+        sm:grid-cols-2
+        md:grid-cols-3
+        lg:grid-cols-4
+        h-full
+        w-full
+        overflow-auto
+        ${isDarkMode ? 'bg-gray-900' : 'bg-white'}
+      `}
+      role="grid"
+      tabIndex={0}
+      ref={gridRef}
+    >
+      {filteredFiles.map((file, index) => (
+        <FileItem
+          key={file.name + index}
+          data-index={index}
+          fileName={file.name}
+          isDirectory={file.isDirectory}
+          location={window.api.renderPath([...directoryPath, file.name])}
+          isSelected={index === selectedIndex}
+          isDarkMode={isDarkMode}
+          onClick={() => handleFileClick(file, index)}
+        />
+      ))}
+      {hasMore && !isSearching && (
+        <div ref={loadingTriggerRef} className="h-4">
+          {isLoading && <div className="text-center">Loading...</div>}
+        </div>
+      )}
     </div>
   )
 }

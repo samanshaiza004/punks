@@ -1,7 +1,9 @@
-import { useRef, useState, useEffect } from 'react'
+import { useRef, useState, useEffect, useCallback } from 'react'
 import { X, Plus, List } from '@phosphor-icons/react'
 import { useTabs } from '@renderer/context/TabContext'
 import { useTheme } from '@renderer/context/ThemeContext'
+import { useKeyBindings } from '@renderer/keybinds/hooks'
+import { KeyHandlerMap } from '@renderer/types/keybinds'
 
 const TabBar = ({ lastSelectedDirectory }) => {
   const { state, dispatch } = useTabs()
@@ -49,6 +51,50 @@ const TabBar = ({ lastSelectedDirectory }) => {
       el.scrollBy({ left: 200, behavior: 'smooth' })
     }
   }
+
+  const handleCloseTab = useCallback((tabId: string) => {
+    dispatch({ type: 'REMOVE_TAB', payload: tabId })
+  }, [dispatch])
+
+  const handleNewTab = useCallback(() => {
+    dispatch({
+      type: 'ADD_TAB',
+      payload: {
+        directoryPath: lastSelectedDirectory,
+        searchQuery: '',
+        searchResults: [],
+        fileFilters: {
+          all: true,
+          audio: false,
+          images: false,
+          text: false,
+          video: false,
+          directories: false
+        },
+        title: 'New Tab'
+      }
+    })
+  }, [dispatch, lastSelectedDirectory])
+
+  const handleNextTab = useCallback(() => {
+    if (state.tabs.length <= 1) return
+
+    const currentIndex = state.tabs.findIndex(tab => tab.id === state.activeTabId)
+    const nextIndex = (currentIndex + 1) % state.tabs.length
+    dispatch({ type: 'SET_ACTIVE_TAB', payload: state.tabs[nextIndex].id })
+  }, [dispatch, state.tabs, state.activeTabId])
+
+  const handlers: KeyHandlerMap = {
+    CLOSE_TAB: () => {
+      if (state.activeTabId) {
+        handleCloseTab(state.activeTabId)
+      }
+    },
+    NEW_TAB: handleNewTab,
+    NEXT_TAB: handleNextTab
+  }
+
+  useKeyBindings(handlers)
 
   return (
     <div className="relative flex items-center border-b mb-2">

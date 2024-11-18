@@ -20,6 +20,14 @@ export type KeyAction =
   | 'SELECT_ITEM'
   | 'GO_BACK'
   | 'FOCUS_SEARCH'
+  | 'CLOSE_TAB'
+  | 'NEW_TAB'
+  | 'NEXT_TAB'
+  | 'PREVIOUS_TAB'
+  | 'MOVE_TAB_LEFT'
+  | 'MOVE_TAB_RIGHT'
+  | 'DUPLICATE_TAB'
+  | 'CLOSE_OTHER_TABS'
 
 export type KeyHandler = () => void
 

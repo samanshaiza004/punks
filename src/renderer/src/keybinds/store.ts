@@ -1,5 +1,5 @@
 // src/keybinds/store.ts
-import { KeyBindingMap, KeyCombo, KeyBinding } from '../types/types'
+import { KeyBindingMap, KeyCombo, KeyBinding } from '../types/keybinds'
 import { defaultKeyBindings } from './defaults'
 
 export class KeyBindingStore {
@@ -21,16 +21,26 @@ export class KeyBindingStore {
     try {
       const saved = await window.api.getKeyBindings()
       if (saved) {
-        // Ensure saved bindings are in the correct format
+        // Merge saved bindings with defaults to ensure all actions are available
+        const mergedBindings: KeyBindingMap = { ...defaultKeyBindings }
         Object.keys(saved).forEach((key) => {
-          if (saved[key].currentKeys && !Array.isArray(saved[key].currentKeys)) {
-            saved[key].currentKeys = [saved[key].currentKeys]
+          if (mergedBindings[key]) {
+            mergedBindings[key] = {
+              ...mergedBindings[key],
+              currentKeys: saved[key].currentKeys
+            }
           }
         })
-        this.bindings = saved
+        this.bindings = mergedBindings
+      } else {
+        // If no saved bindings, use defaults
+        this.bindings = { ...defaultKeyBindings }
       }
+      console.log('Initialized key bindings:', this.bindings)
     } catch (error) {
       console.error('Failed to load key bindings:', error)
+      // Fall back to defaults on error
+      this.bindings = { ...defaultKeyBindings }
     }
   }
 

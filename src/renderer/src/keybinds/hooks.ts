@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
-// src/keybinds/hooks.ts
+// src/renderer/src/keybinds/hooks.ts
 import { useEffect, useRef } from 'react'
-import { KeyHandlerMap } from '../types/types'
+import { KeyHandlerMap } from '../types/keybinds'
 import { KeyBindingStore } from './store'
 
 // src/renderer/src/hooks/useKeyBindings.ts
@@ -24,31 +24,47 @@ export function useKeyBindings(handlers: KeyHandlerMap, enabled = true) {
       }
 
       const currentKeys: string[] = []
+
+      // Add modifier keys in a consistent order
       if (event.ctrlKey) currentKeys.push('Control')
       if (event.altKey) currentKeys.push('Alt')
       if (event.shiftKey) currentKeys.push('Shift')
       if (event.metaKey) currentKeys.push('Command')
-      currentKeys.push(event.key)
+
+      // Special handling for Tab and other special keys
+      let key = event.key
+      if (key === 'Tab') key = 'Tab'
+      else if (key === ' ') key = 'Space'
+      else if (key.length === 1) key = key.toLowerCase()
+      currentKeys.push(key)
 
       const keyCombo = currentKeys.join('+')
+      let handled = false
 
-      Object.entries(store.getAllBindings()).forEach(([action, binding]) => {
-        // Check if binding.currentKeys is an array and handle accordingly
-        const matchingCombo = Array.isArray(binding.currentKeys)
-          ? binding.currentKeys.some((combo) => {
-              // Ensure combo is an array before calling join
-              return Array.isArray(combo) ? combo.join('+') === keyCombo : combo === keyCombo
-            })
-          : binding.currentKeys === keyCombo
+      // Check for matching keybinds
+      const bindings = store.getAllBindings()
+      Object.entries(bindings).forEach(([action, binding]) => {
+        const matchingCombo = binding.currentKeys.some((combo) => {
+          if (!Array.isArray(combo)) return false
+          const comboStr = combo.join('+')
+          return comboStr === keyCombo
+        })
 
-        if (matchingCombo) {
-          handlersRef.current[action]?.()
+        if (matchingCombo && handlersRef.current[action]) {
+          event.preventDefault()
+          event.stopPropagation()
+          handled = true
+          handlersRef.current[action]()
         }
       })
+
+      if (handled) {
+        return false
+      }
     }
 
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
   }, [enabled, store])
 
   return null

@@ -1,66 +1,61 @@
+import React, { createContext, useContext, useState, ReactNode } from 'react'
+import ContextMenu from '@renderer/components/ContextMenu'
 import { FileInfo } from '@renderer/types/FileInfo'
-import { createContext, useContext, useEffect, useState } from 'react'
-import { useTheme } from './ThemeContext'
-
-interface ContextMenuState {
-  isOpen: boolean
-  x: number
-  y: number
-  file: FileInfo | null
-}
 
 interface ContextMenuContextType {
-  menuState: ContextMenuState
-  openMenu: (x: number, y: number, file: FileInfo) => void
-  closeMenu: () => void
+  showContextMenu: (file: FileInfo, event: React.MouseEvent) => void
+  hideContextMenu: () => void
 }
 
 const ContextMenuContext = createContext<ContextMenuContextType | undefined>(undefined)
 
-export function ContextMenuProvider({ children }: { children: React.ReactNode }) {
-  const [menuState, setMenuState] = useState<ContextMenuState>({
-    isOpen: false,
+export function ContextMenuProvider({ children }: { children: ReactNode }) {
+  const [menuState, setMenuState] = useState<{
+    x: number
+    y: number
+    file?: FileInfo
+    isVisible: boolean
+  }>({
     x: 0,
     y: 0,
-    file: null
+    isVisible: false
   })
 
-  const openMenu = (x: number, y: number, file: FileInfo) => {
-    const viewportHeight = window.innerHeight
-    const viewportWidth = window.innerWidth
-
-    const menuHeight = 100
-    const menuWidth = 100
-
-    const adjustedY = y + menuHeight > viewportHeight ? viewportHeight - menuHeight : y
-    const adjustedX = x + menuWidth > viewportWidth ? viewportWidth - menuWidth : x
-
+  const showContextMenu = (file: FileInfo, event: React.MouseEvent) => {
+    event.preventDefault()
     setMenuState({
-      isOpen: true,
-      x: adjustedX,
-      y: adjustedY,
-      file
+      x: event.clientX,
+      y: event.clientY,
+      file,
+      isVisible: true
     })
   }
 
-  const closeMenu = () => {
-    setMenuState({
-      isOpen: false,
-      x: 0,
-      y: 0,
-      file: null
-    })
+  const hideContextMenu = () => {
+    setMenuState(prev => ({ ...prev, isVisible: false }))
+  }
+
+  const handleCopy = () => {
+    // Implement file copy logic
+    hideContextMenu()
+  }
+
+  const handleDelete = () => {
+    // Implement file delete logic
+    hideContextMenu()
   }
 
   return (
-    <ContextMenuContext.Provider value={{ menuState, openMenu, closeMenu }}>
+    <ContextMenuContext.Provider value={{ showContextMenu, hideContextMenu }}>
       {children}
-      {menuState.isOpen && menuState.file && (
-        <GlobalContextMenu
+      {menuState.isVisible && menuState.file && (
+        <ContextMenu
           x={menuState.x}
           y={menuState.y}
-          file={menuState.file}
-          onClose={closeMenu}
+          onClose={hideContextMenu}
+          onCopy={handleCopy}
+          onDelete={handleDelete}
+          isDirectory={menuState.file.isDirectory}
         />
       )}
     </ContextMenuContext.Provider>
@@ -69,79 +64,8 @@ export function ContextMenuProvider({ children }: { children: React.ReactNode })
 
 export function useContextMenu() {
   const context = useContext(ContextMenuContext)
-  if (context === undefined) {
-    throw new Error('useContextMenu must be used within a ContextMenuProvider, duh')
+  if (!context) {
+    throw new Error('useContextMenu must be used within a ContextMenuProvider')
   }
   return context
-}
-
-function GlobalContextMenu({
-  x,
-  y,
-  file,
-  onClose
-}: {
-  x: number
-  y: number
-  file: { name: string; location: string; isDirectory: boolean }
-  onClose: () => void
-}) {
-  const { isDarkMode } = useTheme()
-
-  const handleDelete = async () => {
-    const confirmed = window.confirm(`Are you sure you want to delete ${file.name}?`)
-    if (confirmed) {
-      try {
-        await window.api.deleteFile(file.location)
-      } catch (err) {
-        console.error('Error deleting file:', err)
-      }
-    }
-    onClose()
-  }
-
-  const handleCopy = async () => {
-    try {
-      await window.api.copyFileToClipboard(file.location)
-    } catch (err) {
-      console.error('Error copying file to clipboard:', err)
-    }
-    onClose()
-  }
-
-  useEffect(() => {
-    const handleClick = () => onClose()
-    window.addEventListener('click', handleClick)
-    return () => window.removeEventListener('click', handleClick)
-  }, [onClose])
-
-  return (
-    <div
-      className={`fixed z-50 min-w-[160px] py-1 rounded-md shadow-lg ${
-        isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'
-      }`}
-      style={{ top: y, left: x }}
-      onClick={(e) => e.stopPropagation()}
-    >
-      {!file.isDirectory && (
-        <button
-          className={`text-xs font-semibold w-full px-2 py-1 text-left hover:${
-            isDarkMode ? 'bg-gray-700' : 'bg-gray-100'
-          } flex items-center gap-2`}
-          onClick={handleCopy}
-        >
-          <span>Copy</span>
-          <span className="text-xs text-gray-500 ml-auto">Ctrl+C</span>
-        </button>
-      )}
-      <button
-        className={`text-xs font-semibold w-full px-2 py-1 text-left hover:${
-          isDarkMode ? 'bg-gray-700' : 'bg-gray-100'
-        } flex items-center gap-2`}
-        onClick={handleDelete}
-      >
-        Delete
-      </button>
-    </div>
-  )
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import { FileInfo } from '../../types/FileInfo'
-import { KeyHandlerMap } from '@renderer/types/types'
+import { KeyHandlerMap } from '@renderer/types/keybinds'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
 import { useTheme } from '@renderer/context/ThemeContext'
 
