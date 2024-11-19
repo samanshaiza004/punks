@@ -1,4 +1,4 @@
-import React, { Key, useState } from 'react'
+import React, { useState } from 'react'
 import { KeyBindingMap, KeyCombo } from '@renderer/types/keybinds'
 import { Button } from '../Button'
 import { useTheme } from '@renderer/context/ThemeContext'

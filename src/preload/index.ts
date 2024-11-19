@@ -9,6 +9,7 @@ import path from 'path'
 import { FileInfo } from '../renderer/src/types/FileInfo'
 import { IAudioMetadata, parseFile } from 'music-metadata'
 import { AudioFile, TagSearchOptions } from '../main/types'
+import { IPC_CHANNELS } from '../renderer/src/types'
 
 export const api = {
   sendMessage: (message: string): void => {
@@ -208,41 +209,73 @@ export const api = {
     return path.sep
   },
 
+  // Directory navigation
+  getDirectoryContents: async (directoryPath: string[]): Promise<{
+    directories: Array<{ path: string; name: string; lastModified: number; type: 'directory' }>;
+    files: any[];
+    currentPath: string;
+  }> => {
+    return await ipcRenderer.invoke(IPC_CHANNELS.GET_DIRECTORY_CONTENTS, directoryPath)
+  },
+
+  getParentDirectory: async (currentPath: string): Promise<string | null> => {
+    return await ipcRenderer.invoke(IPC_CHANNELS.GET_PARENT_DIRECTORY, currentPath)
+  },
+
   // TagEngine functionality
-  // File scanning and metadata
-  scanDirectory: (directoryPath: string): Promise<void> => {
-    return ipcRenderer.invoke('tag-engine:scan-directory', directoryPath)
-  },
-
-  getFileMetadata: async (filePath: string): Promise<AudioFile | null> => {
-    return ipcRenderer.invoke('tag-engine:get-file-metadata', filePath)
-  },
-
-  // Tag management
-  addTags: async (tags: string[]): Promise<void> => {
-    return ipcRenderer.invoke('tag-engine:add-tags', tags)
-  },
-
-  tagFiles: async (files: string[], tag: string): Promise<void> => {
-    return ipcRenderer.invoke('tag-engine:tag-files', files, tag)
-  },
-
-  untagFile: async (file: string, tag: string): Promise<void> => {
-    return ipcRenderer.invoke('tag-engine:untag-file', file, tag)
-  },
-
-  // Search operations
-  searchByTags: async (tags: string[], options: TagSearchOptions = {}): Promise<AudioFile[]> => {
-    return ipcRenderer.invoke('tag-engine:search-by-tags', tags, options)
-  },
-
-  // Statistics
+  // Stats and initialization
   getTagStats: async (): Promise<{
     totalFiles: number
     totalTags: number
     tagCounts: { name: string; count: number }[]
   }> => {
-    return ipcRenderer.invoke('tag-engine:get-stats')
+    return await ipcRenderer.invoke('tag-engine:get-stats')
+  },
+
+  // File scanning and metadata
+  scanDirectory: async (directoryPath: string): Promise<boolean> => {
+    return await ipcRenderer.invoke('tag-engine:scan-directory', directoryPath)
+  },
+
+  onScanProgress: (callback: (progress: { 
+    total: number
+    processed: number
+    percentComplete: number 
+  }) => void): void => {
+    ipcRenderer.on('tag-engine:scan-progress', (_event, progress) => callback(progress))
+  },
+
+  onScanComplete: (callback: (stats: {
+    totalFiles: number
+    directory: string
+  }) => void): void => {
+    ipcRenderer.on('tag-engine:scan-complete', (_event, stats) => callback(stats))
+  },
+
+  onScanError: (callback: (error: string) => void): void => {
+    ipcRenderer.on('tag-engine:error', (_event, error) => callback(error))
+  },
+
+  getFileMetadata: async (filePath: string): Promise<AudioFile | null> => {
+    return await ipcRenderer.invoke('tag-engine:get-file-metadata', filePath)
+  },
+
+  // Tag management
+  addTags: async (tags: string[]): Promise<void> => {
+    await ipcRenderer.invoke('tag-engine:add-tags', tags)
+  },
+
+  tagFiles: async (files: string[], tag: string): Promise<void> => {
+    await ipcRenderer.invoke('tag-engine:tag-files', files, tag)
+  },
+
+  untagFile: async (file: string, tag: string): Promise<void> => {
+    await ipcRenderer.invoke('tag-engine:untag-file', file, tag)
+  },
+
+  // Search operations
+  searchByTags: async (tags: string[], options: TagSearchOptions = {}): Promise<AudioFile[]> => {
+    return await ipcRenderer.invoke('tag-engine:search-by-tags', tags, options)
   },
 
   // Event listeners
@@ -259,12 +292,13 @@ export const api = {
   }
 }
 
+// Context bridge setup
 if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', electronAPI)
     contextBridge.exposeInMainWorld('api', api)
   } catch (error) {
-    console.error(error)
+    console.error('Error setting up context bridge:', error)
   }
 } else {
   // @ts-ignore (define in dts)

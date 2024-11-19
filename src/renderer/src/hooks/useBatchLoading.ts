@@ -6,7 +6,13 @@ import { useToast } from '@renderer/context/ToastContext'
 const BATCH_SIZE = 50
 const INITIAL_LOAD_SIZE = 100
 
-export function useBatchLoading(directoryPath: string[]): [FileInfo[], boolean, () => void] {
+export function useBatchLoading(directoryPath: string[]): { 
+  files: FileInfo[], 
+  isLoading: boolean, 
+  hasMore: boolean, 
+  loadMoreFiles: () => void,
+  totalFiles: number 
+} {
   const [files, setFiles] = useState<FileInfo[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [hasMore, setHasMore] = useState(true)

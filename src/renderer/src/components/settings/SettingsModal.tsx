@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react'
+import * as Dialog from '@radix-ui/react-dialog'
 import { KeyBindingMap } from '@renderer/types/keybinds'
 import { defaultKeyBindings } from '@renderer/keybinds/defaults'
 import { useTheme } from '@renderer/context/ThemeContext'
 import { useToast } from '@renderer/context/ToastContext'
+import { X } from '@phosphor-icons/react'
 import TabButton from './TabButton'
 import WindowSettings from './WindowSettings'
 import KeybindSettings from './KeybindSettings'
@@ -33,7 +35,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       try {
         const saved = await window.api.getKeyBindings()
         if (saved) {
-          // Merge with defaults to ensure all actions are available
           const mergedBindings: KeyBindingMap = { ...defaultKeyBindings }
           Object.keys(saved).forEach((key) => {
             if (mergedBindings[key]) {
@@ -77,80 +78,119 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }
 
-  if (!isOpen) return null
-
   return (
-    <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
-      <div
-        className={`w-11/12 max-w-5xl max-h-[90vh] rounded-lg flex overflow-hidden ${
-          isDarkMode ? 'bg-gray-800 text-gray-100' : 'bg-white text-gray-900'
-        }`}
-      >
-        {/* Sidebar */}
-        <div
-          className={`w-64 flex-shrink-0 border-r ${
-            isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
-          }`}
+    <Dialog.Root open={isOpen} onOpenChange={(open) => !open && onClose()}>
+      <Dialog.Portal>
+        <Dialog.Overlay
+          className="fixed inset-0 bg-black/50 data-[state=open]:animate-overlayShow"
+        />
+        <Dialog.Content
+          className={`
+            fixed top-[50%] left-[50%] translate-x-[-50%] translate-y-[-50%]
+            w-11/12 max-w-5xl max-h-[90vh]
+            rounded-lg flex overflow-hidden
+            data-[state=open]:animate-contentShow
+            focus:outline-none
+            ${isDarkMode ? 'bg-gray-800 text-gray-100' : 'bg-white text-gray-900'}
+          `}
         >
-          <div className="p-4">
-            <h2 className="text-xl font-semibold">Settings</h2>
-          </div>
-          <nav>
-            <TabButton
-              isActive={activeTab === 'window'}
-              onClick={() => setActiveTab('window')}
-              icon="🖥️"
-              label="Window"
-            />
-            <TabButton
-              isActive={activeTab === 'keybinds'}
-              onClick={() => setActiveTab('keybinds')}
-              icon="⌨️"
-              label="Keyboard"
-            />
-          </nav>
-        </div>
-
-        {/* Content */}
-        <div className="flex-1 flex flex-col max-h-[90vh]">
-          <div className="flex-1 overflow-y-auto p-6">
-            {activeTab === 'window' ? (
-              <WindowSettings
-                alwaysOnTop={alwaysOnTop}
-                setAlwaysOnTop={setAlwaysOnTop}
-                onDirectorySelected={onDirectorySelected}
-              />
-            ) : (
-              <KeybindSettings
-                keyBindings={keyBindings}
-                onUpdateBindings={setKeyBindings}
-              />
-            )}
-          </div>
-
+          {/* Sidebar */}
           <div
-            className={`flex justify-end gap-2 p-4 border-t ${
-              isDarkMode ? 'border-gray-700' : 'border-gray-200'
+            className={`w-64 flex-shrink-0 border-r ${
+              isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
             }`}
           >
-            <button
-              onClick={onClose}
-              className={`px-4 py-2 rounded transition-colors ${
-                isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'
-              }`}
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleSave}
-              className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
-            >
-              Save Changes
-            </button>
+            <div className="p-4 flex justify-between items-center">
+              <Dialog.Title className="text-xl font-semibold">
+                Settings
+              </Dialog.Title>
+              <Dialog.Close asChild>
+                <button
+                  className={`
+                    rounded-full p-1.5
+                    hover:bg-gray-700
+                    focus:outline-none focus:ring-2 focus:ring-gray-400
+                    transition-colors
+                  `}
+                  aria-label="Close"
+                >
+                  <X />
+                </button>
+              </Dialog.Close>
+            </div>
+            <nav>
+              <TabButton
+                isActive={activeTab === 'window'}
+                onClick={() => setActiveTab('window')}
+                icon={null}
+                label="Window"
+              />
+              <TabButton
+                isActive={activeTab === 'keybinds'}
+                onClick={() => setActiveTab('keybinds')}
+                icon={null}
+                label="Keyboard Shortcuts"
+              />
+            </nav>
           </div>
-        </div>
-      </div>
-    </div>
+
+          {/* Content */}
+          <div className="flex-1 overflow-auto">
+            <div className="p-6">
+              {activeTab === 'window' ? (
+                <WindowSettings
+                  alwaysOnTop={alwaysOnTop}
+                  setAlwaysOnTop={setAlwaysOnTop}
+                  onDirectorySelected={onDirectorySelected}
+                />
+              ) : (
+                <KeybindSettings
+                    keyBindings={keyBindings}
+                    onUpdateBindings={(newBindings) => setKeyBindings(newBindings)}
+                  />
+              )}
+            </div>
+
+            {/* Footer */}
+            <div
+              className={`
+                sticky bottom-0 left-0 right-0
+                p-4 mt-auto
+                border-t
+                flex justify-end gap-2
+                ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}
+              `}
+            >
+              <Dialog.Close asChild>
+                <button
+                  className={`
+                    px-4 py-2 rounded
+                    ${
+                      isDarkMode
+                        ? 'hover:bg-gray-700 text-gray-300'
+                        : 'hover:bg-gray-100 text-gray-700'
+                    }
+                  `}
+                >
+                  Cancel
+                </button>
+              </Dialog.Close>
+              <button
+                onClick={handleSave}
+                className={`
+                  px-4 py-2 rounded
+                  bg-blue-500 text-white
+                  hover:bg-blue-600
+                  transition-colors
+                `}
+              >
+                Save Changes
+              </button>
+            </div>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }
 

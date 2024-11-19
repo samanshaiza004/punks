@@ -1,58 +1,61 @@
 // src/main/TagEngineIPC.ts
-import { ipcMain, IpcMainInvokeEvent } from 'electron'
+import { ipcMain } from 'electron'
 import TagEngine from './TagEngine'
-import { TagSearchOptions } from './types'
+import { IPC_CHANNELS } from '../renderer/src/types'
 
 export function setupTagEngineIPC(tagEngine: TagEngine): void {
-  // File scanning and metadata
-  ipcMain.handle(
-    'tag-engine:scan-directory',
-    async (_event: IpcMainInvokeEvent, directoryPath: string) => {
-      return tagEngine.watchDirectory(directoryPath)
-    }
-  )
-
-  ipcMain.handle(
-    'tag-engine:get-file-metadata',
-    async (_event: IpcMainInvokeEvent, filePath: string) => {
-      return await tagEngine.getFileMetadata(filePath)
-    }
-  )
-
-  // Tag management
-  ipcMain.handle('tag-engine:add-tags', async (_event: IpcMainInvokeEvent, tags: string[]) => {
-    return await tagEngine.addTags(tags)
+  // Scan directory
+  ipcMain.handle(IPC_CHANNELS.SCAN_DIRECTORY, async (_, directoryPath: string) => {
+    return await tagEngine.scanDirectory(directoryPath)
   })
 
-  ipcMain.handle(
-    'tag-engine:tag-files',
-    async (_event: IpcMainInvokeEvent, files: string[], tag: string) => {
-      return await tagEngine.tagFiles(files, tag)
-    }
-  )
+  // Get directory contents
+  ipcMain.handle(IPC_CHANNELS.GET_DIRECTORY_CONTENTS, async (_, directoryPath: string) => {
+    return await tagEngine.getDirectoryContents(directoryPath)
+  })
 
-  ipcMain.handle(
-    'tag-engine:untag-file',
-    async (_event: IpcMainInvokeEvent, file: string, tag: string) => {
-      return await tagEngine.untagFile(file, tag)
-    }
-  )
+  // Get parent directory
+  ipcMain.handle(IPC_CHANNELS.GET_PARENT_DIRECTORY, async (_, currentPath: string) => {
+    return await tagEngine.getParentDirectory(currentPath)
+  })
 
-  // Search operations
-  ipcMain.handle(
-    'tag-engine:search-by-tags',
-    async (_event: IpcMainInvokeEvent, tags: string[], options: TagSearchOptions) => {
-      return await tagEngine.searchByTags(tags, options)
-    }
-  )
+  // Search by tags
+  ipcMain.handle(IPC_CHANNELS.SEARCH_BY_TAGS, async (_, tags: string[], options = {}) => {
+    return await tagEngine.searchByTags(tags, options)
+  })
 
-  // Statistics
-  ipcMain.handle('tag-engine:get-stats', async () => {
+  // Add tag to file
+  ipcMain.handle(IPC_CHANNELS.ADD_TAG, async (_, filePath: string, tag: string) => {
+    return await tagEngine.addTag(filePath, tag)
+  })
+
+  // Remove tag from file
+  ipcMain.handle(IPC_CHANNELS.REMOVE_TAG, async (_, filePath: string, tag: string) => {
+    return await tagEngine.removeTag(filePath, tag)
+  })
+
+  // Get all tags
+  ipcMain.handle(IPC_CHANNELS.GET_ALL_TAGS, async () => {
+    return await tagEngine.getAllTags()
+  })
+
+  // Get stats
+  ipcMain.handle(IPC_CHANNELS.GET_STATS, async () => {
     return await tagEngine.getStats()
   })
 
-  // Cleanup on app quit
-  ipcMain.handle('tag-engine:close', async () => {
-    return await tagEngine.close()
+  // Forward progress events
+  tagEngine.on('scanProgress', (progress) => {
+    ipcMain.emit(IPC_CHANNELS.SCAN_PROGRESS, progress)
+  })
+
+  // Forward completion events
+  tagEngine.on('scanComplete', (result) => {
+    ipcMain.emit(IPC_CHANNELS.SCAN_COMPLETE, result)
+  })
+
+  // Forward error events
+  tagEngine.on('error', (error) => {
+    ipcMain.emit(IPC_CHANNELS.ERROR, error)
   })
 }

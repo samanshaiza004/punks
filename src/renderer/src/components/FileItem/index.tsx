@@ -1,31 +1,27 @@
-import React, { ButtonHTMLAttributes } from 'react'
-import FileIcons from '../FileIcons'
+import React from 'react'
+import FileIcons from '@renderer/components/FileIcons'
 import { useContextMenu } from '@renderer/context/ContextMenuContext'
 
-type FileItemProps = {
+interface FileItemProps {
   fileName: string
   isDirectory: boolean
   location: string
   isSelected: boolean
   isDarkMode: boolean
-} & ButtonHTMLAttributes<HTMLButtonElement>
+  onClick: () => void
+}
 
-export function FileItem({
+export const FileItem: React.FC<FileItemProps> = ({
   fileName,
   isDirectory,
   location,
   isSelected,
   isDarkMode,
-  ...props
-}: FileItemProps) {
+  onClick
+}) => {
   const { showContextMenu } = useContextMenu()
 
-  const handleDragStart = (e: React.DragEvent<HTMLButtonElement>) => {
-    e.preventDefault()
-    window.api.startDrag(window.api.renderPath([location, fileName]))
-  }
-
-  const handleContextMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+  const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     showContextMenu(
       {
         name: fileName,
@@ -36,46 +32,41 @@ export function FileItem({
     )
   }
 
+  const handleDragStart = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    window.api.startDrag(window.api.renderPath([location, fileName]))
+  }
+
   return (
-    <button
+    <div
       className={`
-        min-w-[200px]
-        h-[35px]
-        px-2
-        rounded-sm
-        flex 
-        items-center 
+        flex
+        items-center
         gap-2
+        px-2
+        py-1
+        cursor-pointer
+        truncate
         transition-colors
-        focus:outline-none 
-        focus:ring-2
-        text-sm
-        whitespace-nowrap
+        duration-100
         ${
           isSelected
-            ? isDarkMode
-              ? 'bg-blue-600 text-white'
-              : 'bg-blue-500 text-white'
+            ? 'bg-blue-500 text-white'
             : isDarkMode
-            ? 'text-gray-300 hover:bg-gray-700'
-            : 'text-gray-700 hover:bg-gray-100'
-        }
-        ${
-          isDarkMode
-            ? 'focus:ring-blue-500 focus:ring-offset-gray-800'
-            : 'focus:ring-blue-400 focus:ring-offset-white'
+            ? 'hover:bg-gray-700 text-gray-200'
+            : 'hover:bg-gray-100 text-gray-800'
         }
       `}
+      title={`${fileName}\n${location}`}
+      onClick={onClick}
+      onContextMenu={handleContextMenu}
       draggable
       onDragStart={handleDragStart}
-      onContextMenu={handleContextMenu}
-      title={fileName}
-      {...props}
     >
-      <div className="flex-shrink-0">
+      <div className={`flex-shrink-0 ${isSelected ? 'text-white' : isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
         <FileIcons fileName={fileName} isDirectory={isDirectory} />
       </div>
       <span className="truncate">{fileName}</span>
-    </button>
+    </div>
   )
 }

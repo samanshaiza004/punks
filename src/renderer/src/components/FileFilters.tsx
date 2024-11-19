@@ -67,7 +67,7 @@ const FileFilterButtons: React.FC<FileFilterProps> = ({ filters, onFilterChange 
           <ToggleGroup.Item
             key={filterKey}
             value={filterKey}
-            pressed={filters[filterKey as keyof FileFilterOptions]}
+            aria-pressed={filters[filterKey as keyof FileFilterOptions]}
             onClick={() => handleToggle(filterKey as keyof FileFilterOptions)}
             className={buttonClass(filters[filterKey as keyof FileFilterOptions])}
           >

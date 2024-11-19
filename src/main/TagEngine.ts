@@ -5,130 +5,108 @@ import crypto from 'crypto'
 import chokidar from 'chokidar'
 import path from 'path'
 import fs from 'fs'
-import { getAudioDurationInSeconds } from 'get-audio-duration'
-import * as mm from 'music-metadata'
+import { EventEmitter } from 'events'
+import { AudioFile, TagSearchOptions } from './types'
 
-// Enable verbose mode for debugging if needed
+// Enable verbose logging for SQLite
 sqlite3.verbose()
 
-interface AudioMetadata {
-  duration: number
-  sampleRate?: number
-  channels?: number
-  format?: string
-  bitrate?: number
-}
+// SQL Statements for table creation
+const CREATE_TABLES_SQL = `
+  -- Directories table to store folder structure
+  CREATE TABLE IF NOT EXISTS directories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT UNIQUE NOT NULL,
+    parent_path TEXT,
+    name TEXT NOT NULL,
+    last_modified INTEGER NOT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+  );
 
-interface AudioFile {
-  id: number
-  path: string
-  hash: string
-  lastModified: number
-  metadata: AudioMetadata
-  tags: string[]
-}
+  -- Files table with directory reference
+  CREATE TABLE IF NOT EXISTS files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT UNIQUE NOT NULL,
+    directory_path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    last_modified INTEGER NOT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY (directory_path) REFERENCES directories(path) ON DELETE CASCADE
+  );
 
-interface TagSearchOptions {
-  matchAll?: boolean
-  sortBy?: 'path' | 'lastModified' | 'duration'
-  sortOrder?: 'asc' | 'desc'
-}
+  -- Tags table
+  CREATE TABLE IF NOT EXISTS tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+  );
 
-class TagEngine {
+  -- File tags junction table
+  CREATE TABLE IF NOT EXISTS file_tags (
+    file_id INTEGER,
+    tag_id INTEGER,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    PRIMARY KEY (file_id, tag_id),
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+  );
+
+  -- Create indexes
+  CREATE INDEX IF NOT EXISTS idx_directories_path ON directories(path);
+  CREATE INDEX IF NOT EXISTS idx_directories_parent_path ON directories(parent_path);
+  CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+  CREATE INDEX IF NOT EXISTS idx_files_directory_path ON files(directory_path);
+  CREATE INDEX IF NOT EXISTS idx_files_type ON files(type);
+  CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
+  CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
+`;
+
+class TagEngine extends EventEmitter {
+  removeTag(filePath: string, tag: string): any {
+    throw new Error('Method not implemented.')
+  }
+  getAllTags(): any {
+    throw new Error('Method not implemented.')
+  }
   private db: sqlite3.Database
+  private logger: Console
 
   constructor() {
+    super()
+    this.logger = console
     const dbPath = path.join(app.getPath('userData'), 'tags.db')
-    this.db = new sqlite3.Database(dbPath, (err) => {
-      if (err) {
-        console.error('Database creation error:', err)
-      } else {
-        console.log('Connected to the database.')
-        this.initializeDatabase().catch(console.error)
-      }
-    })
-  }
-
-  private initializeDatabase(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const schema = `
-        CREATE TABLE IF NOT EXISTS files (
-          id INTEGER PRIMARY KEY,
-          path TEXT UNIQUE,
-          hash TEXT,
-          last_modified INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS tags (
-          id INTEGER PRIMARY KEY,
-          name TEXT UNIQUE
-        );
-
-        CREATE TABLE IF NOT EXISTS file_tags (
-          file_id INTEGER,
-          tag_id INTEGER,
-          FOREIGN KEY(file_id) REFERENCES files(id),
-          FOREIGN KEY(tag_id) REFERENCES tags(id),
-          PRIMARY KEY(file_id, tag_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS audio_metadata (
-          file_id INTEGER PRIMARY KEY,
-          duration REAL,
-          sample_rate INTEGER,
-          channels INTEGER,
-          format TEXT,
-          bitrate INTEGER,
-          FOREIGN KEY(file_id) REFERENCES files(id)
-        );
-      `
-
-      this.db.exec(schema, async (err) => {
+    
+    this.logger.info('Initializing TagEngine with database at:', dbPath)
+    
+    try {
+      this.db = new sqlite3.Database(dbPath, (err) => {
         if (err) {
-          reject(err)
-          return
+          this.logger.error('Database creation error:', err)
+          throw err
         }
+        this.logger.info('Successfully connected to database')
+        this.initializeDatabase()
+      })
+    } catch (error) {
+      this.logger.error('Failed to create database:', error)
+      throw error
+    }
+  }
 
-        try {
-          // Add default tags
-          const defaultTags = ['favorite', 'loop', 'drum', 'bass', 'melody', 'fx']
-          for (const tag of defaultTags) {
-            await this.runQuery('INSERT OR IGNORE INTO tags (name) VALUES (?)', [tag])
-          }
-          resolve()
-        } catch (error) {
-          reject(error)
+  private initializeDatabase(): void {
+    this.logger.info('Initializing database tables...')
+    
+    this.db.serialize(() => {
+      this.db.exec(CREATE_TABLES_SQL, (err) => {
+        if (err) {
+          this.logger.error('Failed to create database tables:', err)
+          throw err
         }
-      })
-    })
-  }
-
-  // Helper function to wrap db.run in a Promise
-  private runQuery(sql: string, params: any[] = []): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.db.run(sql, params, function (err) {
-        if (err) reject(err)
-        else resolve()
-      })
-    })
-  }
-
-  // Helper function to wrap db.get in a Promise
-  private getQuery<T>(sql: string, params: any[] = []): Promise<T> {
-    return new Promise((resolve, reject) => {
-      this.db.get(sql, params, (err, row) => {
-        if (err) reject(err)
-        else resolve(row as T)
-      })
-    })
-  }
-
-  // Helper function to wrap db.all in a Promise
-  private allQuery<T>(sql: string, params: any[] = []): Promise<T[]> {
-    return new Promise((resolve, reject) => {
-      this.db.all(sql, params, (err, rows) => {
-        if (err) reject(err)
-        else resolve(rows as T[])
+        this.logger.info('Database tables initialized successfully')
       })
     })
   }
@@ -143,59 +121,19 @@ class TagEngine {
     })
   }
 
-  private async extractAudioMetadata(filePath: string): Promise<AudioMetadata> {
-    try {
-      const metadata = await mm.parseFile(filePath)
-      const duration = await getAudioDurationInSeconds(filePath)
-      return {
-        duration,
-        sampleRate: metadata.format.sampleRate,
-        channels: metadata.format.numberOfChannels,
-        format: metadata.format.container,
-        bitrate: metadata.format.bitrate
-      }
-    } catch (error) {
-      console.error(`Error extracting metadata for ${filePath}:`, error)
-      return { duration: 0 }
-    }
-  }
-
   async addFile(filePath: string): Promise<void> {
     try {
       const stats = await fs.promises.stat(filePath)
       const hash = await this.calculateFileHash(filePath)
-      const metadata = await this.extractAudioMetadata(filePath)
 
       await this.db.serialize(async () => {
         await this.runQuery(
-          'INSERT OR REPLACE INTO files (path, hash, last_modified) VALUES (?, ?, ?)',
-          [filePath, hash, stats.mtimeMs]
+          'INSERT OR REPLACE INTO files (path, directory_path, name, type, hash, last_modified) VALUES (?, ?, ?, ?, ?, ?)',
+          [filePath, path.dirname(filePath), path.basename(filePath), this.getFileType(filePath), hash, stats.mtimeMs]
         )
-
-        const file = await this.getQuery<{ id: number }>('SELECT id FROM files WHERE path = ?', [
-          filePath
-        ])
-
-        if (file) {
-          await this.runQuery(
-            `
-            INSERT OR REPLACE INTO audio_metadata 
-            (file_id, duration, sample_rate, channels, format, bitrate)
-            VALUES (?, ?, ?, ?, ?, ?)
-          `,
-            [
-              file.id,
-              metadata.duration,
-              metadata.sampleRate,
-              metadata.channels,
-              metadata.format,
-              metadata.bitrate
-            ]
-          )
-        }
       })
     } catch (error) {
-      console.error(`Error adding file ${filePath}:`, error)
+      this.logger.error(`Error adding file ${filePath}:`, error)
       throw error
     }
   }
@@ -230,14 +168,12 @@ class TagEngine {
     )
   }
 
-  async getFileMetadata(filePath: string): Promise<AudioFile | null> {
-    return this.getQuery<AudioFile>(
+  async getFileMetadata(filePath: string): Promise<any | null> {
+    return this.getQuery<any>(
       `
       SELECT f.*, 
-             am.duration, am.sample_rate, am.channels, am.format, am.bitrate,
              GROUP_CONCAT(t.name) as tags
       FROM files f
-      LEFT JOIN audio_metadata am ON am.file_id = f.id
       LEFT JOIN file_tags ft ON ft.file_id = f.id
       LEFT JOIN tags t ON t.id = ft.tag_id
       WHERE f.path = ?
@@ -247,84 +183,280 @@ class TagEngine {
     )
   }
 
-  async searchByTags(tags: string[], options: TagSearchOptions = {}): Promise<AudioFile[]> {
-    const { matchAll = true, sortBy = 'path', sortOrder = 'asc' } = options
+  async searchByTags(tags: string[], options: TagSearchOptions = {}): Promise<any[]> {
+    const { matchAll = false, sortBy = 'path', sortOrder = 'asc' } = options
+    
+    // If no tags provided, return all files
+    if (tags.length === 0) {
+      return this.allQuery<any>(
+        `
+        SELECT DISTINCT f.*, 
+                       GROUP_CONCAT(t.name) as tags
+        FROM files f
+        LEFT JOIN file_tags ft ON ft.file_id = f.id
+        LEFT JOIN tags t ON t.id = ft.tag_id
+        GROUP BY f.id
+        ORDER BY ${sortBy} ${sortOrder}
+        `
+      )
+    }
+
     const operator = matchAll ? 'AND' : 'OR'
     const placeholders = tags.map(() => '?').join(` ${operator} t.name = `)
 
-    return this.allQuery<AudioFile>(
+    return this.allQuery<any>(
       `
       SELECT DISTINCT f.*, 
-                     am.duration, am.sample_rate, am.channels, am.format, am.bitrate,
-                     GROUP_CONCAT(t2.name) as file_tags
+                     GROUP_CONCAT(t2.name) as tags
       FROM files f
       JOIN file_tags ft ON ft.file_id = f.id
       JOIN tags t ON t.id = ft.tag_id
-      LEFT JOIN audio_metadata am ON am.file_id = f.id
       LEFT JOIN file_tags ft2 ON ft2.file_id = f.id
       LEFT JOIN tags t2 ON t2.id = ft2.tag_id
       WHERE t.name = ${placeholders}
       GROUP BY f.id
       ORDER BY ${sortBy} ${sortOrder}
-    `,
+      `,
       tags
     )
   }
 
-  watchDirectory(directory: string): chokidar.FSWatcher {
-    const watcher = chokidar.watch(directory, {
-      persistent: true,
-      ignoreInitial: false,
-      ignored: /(^|[\\/\\])\../,
-      awaitWriteFinish: true
+  async scanDirectory(directoryPath: string): Promise<void> {
+    this.logger.info('Starting directory scan:', directoryPath)
+    
+    try {
+      const watcher = chokidar.watch(directoryPath, {
+        ignored: /(^|[\/\\])\../, // ignore dotfiles
+        persistent: false,
+        depth: Infinity
+      })
+
+      let processedFiles = 0
+      let totalFiles = 0
+
+      // Process directories first
+      const processDirectory = async (dirPath: string) => {
+        const stats = fs.statSync(dirPath)
+        const name = path.basename(dirPath)
+        const parentPath = path.dirname(dirPath)
+
+        await this.db.run(
+          `INSERT OR REPLACE INTO directories 
+           (path, parent_path, name, last_modified) 
+           VALUES (?, ?, ?, ?)`,
+          [dirPath, parentPath === dirPath ? null : parentPath, name, stats.mtimeMs]
+        )
+      }
+
+      watcher.on('addDir', async (dirPath) => {
+        try {
+          await processDirectory(dirPath)
+        } catch (error) {
+          this.logger.error(`Error processing directory ${dirPath}:`, error)
+        }
+      })
+
+      watcher.on('add', async (filePath) => {
+        totalFiles++
+        this.emit('scanProgress', {
+          total: totalFiles,
+          processed: processedFiles,
+          percentComplete: totalFiles > 0 ? Math.round((processedFiles / totalFiles) * 100) : 0
+        })
+
+        try {
+          await this.processFile(filePath)
+          processedFiles++
+          this.logger.debug(`Processed file ${processedFiles}/${totalFiles}: ${filePath}`)
+        } catch (error) {
+          this.logger.error(`Error processing file ${filePath}:`, error)
+        }
+      })
+
+      await new Promise<void>((resolve, reject) => {
+        watcher.on('ready', () => {
+          watcher.close()
+          this.logger.info(`Scan complete. Processed ${processedFiles}/${totalFiles} files`)
+          this.emit('scanComplete', { 
+            totalFiles: processedFiles,
+            directory: directoryPath
+          })
+          resolve()
+        })
+
+        watcher.on('error', (error) => {
+          this.logger.error('Watcher error:', error)
+          this.emit('error', error)
+          reject(error)
+        })
+      })
+    } catch (error) {
+      this.logger.error('Scan error:', error)
+      this.emit('error', error)
+      throw error
+    }
+  }
+
+  private async processFile(filePath: string): Promise<void> {
+    this.logger.debug('Processing file:', filePath)
+    
+    try {
+      const hash = await this.calculateFileHash(filePath)
+      const stats = fs.statSync(filePath)
+      const name = path.basename(filePath)
+      const directoryPath = path.dirname(filePath)
+
+      const insertQuery = `
+        INSERT OR REPLACE INTO files 
+        (path, directory_path, name, type, hash, last_modified) 
+        VALUES (?, ?, ?, ?, ?, ?)
+      `
+      
+      await new Promise<void>((resolve, reject) => {
+        this.db.run(insertQuery, [
+          filePath,
+          directoryPath,
+          name,
+          this.getFileType(filePath),
+          hash,
+          stats.mtime.getTime()
+        ], (err) => {
+          if (err) {
+            this.logger.error('Error inserting file:', err)
+            reject(err)
+          } else {
+            resolve()
+          }
+        })
+      })
+
+      this.logger.debug('Successfully processed file:', filePath)
+    } catch (error) {
+      this.logger.error('Error processing file:', filePath, error)
+      throw error
+    }
+  }
+
+  // Get contents of a directory
+  async getDirectoryContents(directoryPath: string[]): Promise<{
+    directories: Array<{ path: string; name: string; lastModified: number; type: 'directory' }>;
+    files: any[];
+    currentPath: string;
+  }> {
+    const fullPath = path.join(...directoryPath)
+    
+    try {
+      // Get directories
+      const directoriesQuery = `
+        SELECT path, name, last_modified as lastModified
+        FROM directories
+        WHERE parent_path = ?
+        ORDER BY name COLLATE NOCASE ASC
+      `
+      const directories = await this.allQuery(directoriesQuery, [fullPath])
+      
+      // Get files
+      const filesQuery = `
+        SELECT f.id, f.path, f.directory_path, f.name, f.type, f.hash, f.last_modified,
+               f.created_at, f.updated_at,
+               GROUP_CONCAT(t.name) as tags
+        FROM files f
+        LEFT JOIN file_tags ft ON f.id = ft.file_id
+        LEFT JOIN tags t ON ft.tag_id = t.id
+        WHERE f.directory_path = ?
+        GROUP BY f.id
+        ORDER BY f.name COLLATE NOCASE ASC
+      `
+      const files = await this.allQuery(filesQuery, [fullPath])
+      
+      // Process files to convert tags from string to array
+      const processedFiles = files.map(file => ({
+        ...file,
+        tags: file.tags ? file.tags.split(',') : []
+      }))
+
+      return {
+        directories: directories.map(dir => ({ ...dir, type: 'directory' as const })),
+        files: processedFiles,
+        currentPath: fullPath
+      }
+    } catch (error) {
+      this.logger.error('Error getting directory contents:', error)
+      throw error
+    }
+  }
+
+  // Get parent directory
+  async getParentDirectory(currentPath: string): Promise<string | null> {
+    try {
+      const result = await this.getQuery<{ parent_path: string | null }>(
+        'SELECT parent_path FROM directories WHERE path = ?',
+        [currentPath]
+      )
+      return result?.parent_path || null
+    } catch (error) {
+      this.logger.error('Error getting parent directory:', error)
+      throw error
+    }
+  }
+
+  private getFileType(filePath: string): string {
+    return path.extname(filePath).toLowerCase()
+  }
+
+  private runQuery(sql: string, params: any[] = []): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.db.run(sql, params, function (err) {
+        if (err) reject(err)
+        else resolve()
+      })
     })
-
-    watcher
-      .on('add', async (path) => {
-        if (this.isAudioFile(path)) {
-          await this.addFile(path)
-        }
-      })
-      .on('change', async (path) => {
-        if (this.isAudioFile(path)) {
-          await this.addFile(path)
-        }
-      })
-      .on('unlink', async (path) => {
-        await this.runQuery('DELETE FROM files WHERE path = ?', [path])
-      })
-      .on('ready', () => {
-        console.log('Initial scan complete')
-      })
-      .on('error', (error) => {
-        console.error('Error watching directory:', error)
-      })
-
-    return watcher
   }
 
-  private isAudioFile(filePath: string): boolean {
-    const audioExtensions = ['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aiff']
-    return audioExtensions.includes(path.extname(filePath).toLowerCase())
+  private getQuery<T>(sql: string, params: any[] = []): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.db.get(sql, params, (err, row) => {
+        if (err) reject(err)
+        else resolve(row as T)
+      })
+    })
   }
 
-  async getStats(): Promise<any> {
-    const stats: any = {}
+  private allQuery<T>(sql: string, params: any[] = []): Promise<T[]> {
+    return new Promise((resolve, reject) => {
+      this.db.all(sql, params, (err, rows) => {
+        if (err) reject(err)
+        else resolve(rows as T[])
+      })
+    })
+  }
 
-    const fileCount = await this.getQuery<{ count: number }>('SELECT COUNT(*) as count FROM files')
-    stats.totalFiles = fileCount.count
-
-    const tagCount = await this.getQuery<{ count: number }>('SELECT COUNT(*) as count FROM tags')
-    stats.totalTags = tagCount.count
-
-    stats.tagCounts = await this.allQuery(`
-      SELECT t.name, COUNT(ft.file_id) as count 
-      FROM tags t 
-      LEFT JOIN file_tags ft ON ft.tag_id = t.id 
+  async getStats(): Promise<{
+    totalFiles: number
+    totalTags: number
+    tagCounts: { name: string; count: number }[]
+  }> {
+    const [{ totalFiles }] = await this.allQuery<{ totalFiles: number }>(
+      'SELECT COUNT(*) as totalFiles FROM files'
+    )
+    const [{ totalTags }] = await this.allQuery<{ totalTags: number }>(
+      'SELECT COUNT(*) as totalTags FROM tags'
+    )
+    const tagCounts = await this.allQuery<{ name: string; count: number }>(
+      `
+      SELECT t.name, COUNT(ft.file_id) as count
+      FROM tags t
+      LEFT JOIN file_tags ft ON ft.tag_id = t.id
       GROUP BY t.id
-    `)
+      ORDER BY count DESC
+      `
+    )
 
-    return stats
+    return {
+      totalFiles,
+      totalTags,
+      tagCounts
+    }
   }
 
   async close(): Promise<void> {
@@ -334,6 +466,72 @@ class TagEngine {
         else resolve()
       })
     })
+  }
+
+  watchDirectory(directory: string): chokidar.FSWatcher {
+    const watcher = chokidar.watch(directory, {
+      persistent: true,
+      ignoreInitial: false,
+      ignored: /(^|[/\\])\../,
+      awaitWriteFinish: true,
+      depth: undefined, // Allow unlimited depth for recursive scanning
+      followSymlinks: false
+    })
+
+    let initialScanComplete = false
+    let filesProcessed = 0
+    const totalFiles = new Set<string>()
+
+    watcher
+      .on('add', async (path) => {
+        totalFiles.add(path)
+        try {
+          await this.addFile(path)
+          filesProcessed++
+          
+          // Emit progress during initial scan
+          if (!initialScanComplete) {
+            const progress = (filesProcessed / totalFiles.size) * 100
+            this.emit('scanProgress', {
+              total: totalFiles.size,
+              processed: filesProcessed,
+              percentComplete: Math.round(progress)
+            })
+          }
+        } catch (error) {
+          this.logger.error(`Error processing file ${path}:`, error)
+        }
+      })
+      .on('change', async (path) => {
+        try {
+          await this.addFile(path)
+          this.emit('fileChanged', path)
+        } catch (error) {
+          this.logger.error(`Error updating file ${path}:`, error)
+        }
+      })
+      .on('unlink', async (path) => {
+        try {
+          await this.runQuery('DELETE FROM files WHERE path = ?', [path])
+          this.emit('fileRemoved', path)
+        } catch (error) {
+          this.logger.error(`Error removing file ${path}:`, error)
+        }
+      })
+      .on('ready', () => {
+        console.log(`Initial scan complete. Processed ${filesProcessed} files.`)
+        initialScanComplete = true
+        this.emit('scanComplete', {
+          totalFiles: filesProcessed,
+          directory
+        })
+      })
+      .on('error', (error) => {
+        this.logger.error('Error watching directory:', error)
+        this.emit('error', error)
+      })
+
+    return watcher
   }
 }
 
