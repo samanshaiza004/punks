@@ -6,8 +6,10 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { existsSync } from 'fs'
 import TagEngine from './TagEngine'
 import { setupTagEngineIPC } from './TagEngineIPC'
+import { UpdateHandler } from './updateHandler'
 
 let tagEngine: TagEngine
+let updateHandler: UpdateHandler
 
 // this is a dynamic import silly
 let store
@@ -199,6 +201,8 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  updateHandler = new UpdateHandler(mainWindow)
 
   /* let windowState = store?.get('windowState')
 

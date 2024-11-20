@@ -5,11 +5,10 @@ import { clipboard, contextBridge } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { ipcRenderer } from 'electron/renderer'
 import fs from 'fs/promises'
+import fs2 from 'fs'
 import path from 'path'
-import { FileInfo } from '../renderer/src/types/FileInfo'
+import { FileNode, AudioFile, TagSearchOptions, IPC_CHANNELS } from '../types'
 import { IAudioMetadata, parseFile } from 'music-metadata'
-import { AudioFile, TagSearchOptions } from '../main/types'
-import { IPC_CHANNELS } from '../renderer/src/types'
 
 export const api = {
   sendMessage: (message: string): void => {
@@ -25,7 +24,7 @@ export const api = {
     offset = 0,
     limit?: number
   ): Promise<{
-    files: FileInfo[]
+    files: FileNode[]
     total: number
     hasMore: boolean
   }> => {
@@ -36,14 +35,20 @@ export const api = {
 
       const filesToProcess = limit ? allFiles.slice(offset, offset + limit) : allFiles
 
-      const fileInfoList = filesToProcess.map((file) => ({
+      const FileNodeList = filesToProcess.map((file) => ({
         name: file.name,
-        location: directoryPath,
+        path: path.join(directoryPath, file.name),
+        type: 'file' as const,
+        directory_path: directoryPath,
+        last_modified: fs2.statSync(path.join(directoryPath, file.name)).mtimeMs,
+        hash: '', // You might want to generate a hash for the file
+        tags: [], // Default to empty tags
+        id: 0, // You might want to generate a unique ID
         isDirectory: file.isDirectory()
       }))
 
       return {
-        files: fileInfoList,
+        files: FileNodeList,
         total,
         hasMore: limit ? offset + limit < total : false
       }
@@ -87,8 +92,8 @@ export const api = {
     }
   },
 
-  containsDirectory: (files: FileInfo[], directoryName: string): boolean => {
-    return files.some((file) => file.name === directoryName && file.isDirectory)
+  containsDirectory: (files: FileNode[], directoryName: string): boolean => {
+    return files.some((file) => file.name === directoryName)
   },
 
   openDirectoryPicker: (): Promise<string | null> => {
@@ -110,10 +115,10 @@ export const api = {
     }
   },
 
-  search: async (pathParts: string[], query: string): Promise<FileInfo[]> => {
+  search: async (pathParts: string[], query: string): Promise<FileNode[]> => {
     const directoryPath = path.join(...pathParts)
     const queue: string[] = [directoryPath]
-    const results: FileInfo[] = []
+    const results: FileNode[] = []
 
     while (queue.length > 0) {
       const currentDir = queue.shift()!
@@ -124,8 +129,13 @@ export const api = {
           if (file.name.includes(query)) {
             results.push({
               name: file.name,
-              location: currentDir,
-              isDirectory: file.isDirectory()
+              path: currentDir,
+              type: 'file' as const,
+              directory_path: directoryPath,
+              last_modified: fs2.statSync(fullPath).mtimeMs,
+              hash: '', // You might want to generate a hash for the file
+              tags: [], // Default to empty tags
+              id: 0 // You might want to generate a unique ID
             })
           }
           if (file.isDirectory()) {
@@ -210,10 +220,12 @@ export const api = {
   },
 
   // Directory navigation
-  getDirectoryContents: async (directoryPath: string[]): Promise<{
-    directories: Array<{ path: string; name: string; lastModified: number; type: 'directory' }>;
-    files: any[];
-    currentPath: string;
+  getDirectoryContents: async (
+    directoryPath: string[]
+  ): Promise<{
+    directories: Array<{ path: string; name: string; lastModified: number; type: 'directory' }>
+    files: any[]
+    currentPath: string
   }> => {
     return await ipcRenderer.invoke(IPC_CHANNELS.GET_DIRECTORY_CONTENTS, directoryPath)
   },
@@ -237,18 +249,13 @@ export const api = {
     return await ipcRenderer.invoke('tag-engine:scan-directory', directoryPath)
   },
 
-  onScanProgress: (callback: (progress: { 
-    total: number
-    processed: number
-    percentComplete: number 
-  }) => void): void => {
+  onScanProgress: (
+    callback: (progress: { total: number; processed: number; percentComplete: number }) => void
+  ): void => {
     ipcRenderer.on('tag-engine:scan-progress', (_event, progress) => callback(progress))
   },
 
-  onScanComplete: (callback: (stats: {
-    totalFiles: number
-    directory: string
-  }) => void): void => {
+  onScanComplete: (callback: (stats: { totalFiles: number; directory: string }) => void): void => {
     ipcRenderer.on('tag-engine:scan-complete', (_event, stats) => callback(stats))
   },
 

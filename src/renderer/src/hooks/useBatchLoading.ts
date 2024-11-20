@@ -1,19 +1,19 @@
 // src/hooks/useBatchLoading.ts
 import { useState, useEffect } from 'react'
-import { FileInfo } from '../types/FileInfo'
+import { FileNode } from '../../../types'
 import { useToast } from '@renderer/context/ToastContext'
 
 const BATCH_SIZE = 50
 const INITIAL_LOAD_SIZE = 100
 
-export function useBatchLoading(directoryPath: string[]): { 
-  files: FileInfo[], 
-  isLoading: boolean, 
-  hasMore: boolean, 
-  loadMoreFiles: () => void,
-  totalFiles: number 
+export function useBatchLoading(directoryPath: string[]): {
+  files: FileNode[]
+  isLoading: boolean
+  hasMore: boolean
+  loadMoreFiles: () => void
+  totalFiles: number
 } {
-  const [files, setFiles] = useState<FileInfo[]>([])
+  const [files, setFiles] = useState<FileNode[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [hasMore, setHasMore] = useState(true)
   const [offset, setOffset] = useState(0)
@@ -57,7 +57,7 @@ export function useBatchLoading(directoryPath: string[]): {
     setIsLoading(false)
   }
 
-  const sortFiles = (files: FileInfo[]): FileInfo[] => {
+  const sortFiles = (files: FileNode[]): FileNode[] => {
     return files.sort((a, b) => {
       if (a.isDirectory && !b.isDirectory) return -1
       if (!a.isDirectory && b.isDirectory) return 1

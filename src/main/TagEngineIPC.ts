@@ -1,7 +1,8 @@
 // src/main/TagEngineIPC.ts
-import { ipcMain } from 'electron'
+import { ipcMain, BrowserWindow } from 'electron'
 import TagEngine from './TagEngine'
-import { IPC_CHANNELS } from '../renderer/src/types'
+import { IPC_CHANNELS, TagSearchOptions } from '../types'
+import * as path from 'path'
 
 export function setupTagEngineIPC(tagEngine: TagEngine): void {
   // Scan directory
@@ -9,19 +10,22 @@ export function setupTagEngineIPC(tagEngine: TagEngine): void {
     return await tagEngine.scanDirectory(directoryPath)
   })
 
+  // Search by tags
+  ipcMain.handle(
+    IPC_CHANNELS.SEARCH_BY_TAGS,
+    async (_, tags: string[], options: TagSearchOptions = {}) => {
+      return await tagEngine.searchByTags(tags, options)
+    }
+  )
+
   // Get directory contents
-  ipcMain.handle(IPC_CHANNELS.GET_DIRECTORY_CONTENTS, async (_, directoryPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.GET_DIRECTORY_CONTENTS, async (_, directoryPath: string[]) => {
     return await tagEngine.getDirectoryContents(directoryPath)
   })
 
   // Get parent directory
   ipcMain.handle(IPC_CHANNELS.GET_PARENT_DIRECTORY, async (_, currentPath: string) => {
     return await tagEngine.getParentDirectory(currentPath)
-  })
-
-  // Search by tags
-  ipcMain.handle(IPC_CHANNELS.SEARCH_BY_TAGS, async (_, tags: string[], options = {}) => {
-    return await tagEngine.searchByTags(tags, options)
   })
 
   // Add tag to file
@@ -31,7 +35,7 @@ export function setupTagEngineIPC(tagEngine: TagEngine): void {
 
   // Remove tag from file
   ipcMain.handle(IPC_CHANNELS.REMOVE_TAG, async (_, filePath: string, tag: string) => {
-    return await tagEngine.removeTag(filePath, tag)
+    return await tagEngine.removeTag()
   })
 
   // Get all tags
@@ -46,16 +50,22 @@ export function setupTagEngineIPC(tagEngine: TagEngine): void {
 
   // Forward progress events
   tagEngine.on('scanProgress', (progress) => {
-    ipcMain.emit(IPC_CHANNELS.SCAN_PROGRESS, progress)
+    BrowserWindow.getAllWindows().forEach((window) => {
+      window.webContents.send(IPC_CHANNELS.ON_SCAN_PROGRESS, progress)
+    })
   })
 
-  // Forward completion events
-  tagEngine.on('scanComplete', (result) => {
-    ipcMain.emit(IPC_CHANNELS.SCAN_COMPLETE, result)
+  // Forward scan complete event
+  tagEngine.on('scanComplete', (stats) => {
+    BrowserWindow.getAllWindows().forEach((window) => {
+      window.webContents.send(IPC_CHANNELS.ON_SCAN_COMPLETE, stats)
+    })
   })
 
-  // Forward error events
+  // Forward scan error event
   tagEngine.on('error', (error) => {
-    ipcMain.emit(IPC_CHANNELS.ERROR, error)
+    BrowserWindow.getAllWindows().forEach((window) => {
+      window.webContents.send(IPC_CHANNELS.ON_SCAN_ERROR, error)
+    })
   })
 }

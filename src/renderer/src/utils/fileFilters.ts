@@ -1,5 +1,5 @@
 import { FileFilterOptions } from '@renderer/components/FileFilter'
-import { FileInfo } from '@renderer/types/FileInfo'
+import { FileNode } from '@renderer/types/FileNode'
 
 export const FILE_EXTENSIONS = {
   audio: ['mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'wma'],
@@ -8,7 +8,7 @@ export const FILE_EXTENSIONS = {
   video: ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv']
 }
 
-export const filterFiles = (files: FileInfo[], filters: FileFilterOptions): FileInfo[] => {
+export const filterFiles = (files: FileNode[], filters: FileFilterOptions): FileNode[] => {
   // If "all" is selected, return all files
   if (filters.all) {
     return files

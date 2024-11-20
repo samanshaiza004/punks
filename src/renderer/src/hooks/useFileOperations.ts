@@ -1,4 +1,4 @@
-import { FileInfo } from '@renderer/types/FileInfo'
+import { FileNode } from '@renderer/types/FileNode'
 import { useAudio } from '../context/AudioContextProvider'
 import { FILE_EXTENSIONS } from '@renderer/utils/fileFilters'
 import { useToast } from '@renderer/context/ToastContext'
@@ -23,7 +23,7 @@ export const useFileOperations = () => {
     return `sample:///${encodedPath}`
   }
 
-  const handleFileClick = async (file: FileInfo, currentPath: string[]) => {
+  const handleFileClick = async (file: FileNode, currentPath: string[]) => {
     const extension = file.name.split('.').pop()?.toLowerCase()
 
     try {

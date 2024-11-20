@@ -18,8 +18,12 @@ export function useKeyBindings(handlers: KeyHandlerMap, enabled = true) {
     if (!enabled) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      // Debug logging
+      console.log('Key event:', event.key)
+
       // Ignore key events when typing in input fields
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+        console.log('Ignoring key event in input field')
         return
       }
 
@@ -39,10 +43,12 @@ export function useKeyBindings(handlers: KeyHandlerMap, enabled = true) {
       currentKeys.push(key)
 
       const keyCombo = currentKeys.join('+')
+      
       let handled = false
 
       // Check for matching keybinds
       const bindings = store.getAllBindings()
+      
       Object.entries(bindings).forEach(([action, binding]) => {
         const matchingCombo = binding.currentKeys.some((combo) => {
           if (!Array.isArray(combo)) return false
@@ -59,7 +65,10 @@ export function useKeyBindings(handlers: KeyHandlerMap, enabled = true) {
       })
 
       if (handled) {
+        console.log('Key event was handled')
         return false
+      } else {
+        console.log('No matching keybind found')
       }
     }
 

@@ -1,4 +1,5 @@
 import React from 'react'
+import * as Progress from '@radix-ui/react-progress'
 import { useTheme } from '@renderer/context/ThemeContext'
 
 interface ScanProgressProps {
@@ -19,32 +20,37 @@ const ScanProgress: React.FC<ScanProgressProps> = ({ total, processed, percentCo
           rounded-lg
           max-w-md
           w-full
+          ${isDarkMode ? 'bg-gray-800/50' : 'bg-gray-50'}
         `}
       >
-        <div className="mb-4">
-          <div
-            className={`
-              h-2
-              w-full
-              rounded-full
-              ${isDarkMode ? 'bg-gray-700' : 'bg-gray-200'}
-              overflow-hidden
-            `}
-          >
-            <div
-              className="h-full bg-blue-500 transition-all duration-300"
-              style={{ width: `${percentComplete}%` }}
-            />
-          </div>
-        </div>
-        <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+        <h3 className={`text-lg font-semibold mb-4 ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+          Scanning Directory
+        </h3>
+        
+        <Progress.Root
+          className={`relative overflow-hidden bg-gray-200 rounded-full w-full h-2 ${
+            isDarkMode ? 'bg-gray-700' : 'bg-gray-200'
+          }`}
+          style={{
+            transform: 'translateZ(0)'
+          }}
+          value={percentComplete}
+        >
+          <Progress.Indicator
+            className="bg-blue-500 w-full h-full transition-transform duration-[660ms] ease-[cubic-bezier(0.65, 0, 0.35, 1)]"
+            style={{ transform: `translateX(-${100 - percentComplete}%)` }}
+          />
+        </Progress.Root>
+
+        <div className={`text-sm mt-4 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
           <span className="font-medium">
             {processed.toLocaleString()} / {total.toLocaleString()}
           </span>{' '}
           files processed
         </div>
+        
         <div className={`text-xs mt-1 ${isDarkMode ? 'text-gray-500' : 'text-gray-500'}`}>
-          {percentComplete}% complete
+          {Math.round(percentComplete)}% complete
         </div>
       </div>
     </div>

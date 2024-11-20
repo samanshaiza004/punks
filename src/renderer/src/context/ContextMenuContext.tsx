@@ -1,9 +1,9 @@
 import React, { createContext, useContext, useState, ReactNode } from 'react'
 import ContextMenu from '@renderer/components/ContextMenu'
-import { FileInfo } from '@renderer/types/FileInfo'
+import { FileNode } from '@renderer/types/FileNode'
 
 interface ContextMenuContextType {
-  showContextMenu: (file: FileInfo, event: React.MouseEvent) => void
+  showContextMenu: (file: FileNode, event: React.MouseEvent) => void
   hideContextMenu: () => void
 }
 
@@ -13,7 +13,7 @@ export function ContextMenuProvider({ children }: { children: ReactNode }) {
   const [menuState, setMenuState] = useState<{
     x: number
     y: number
-    file?: FileInfo
+    file?: FileNode
     isVisible: boolean
   }>({
     x: 0,
@@ -21,7 +21,7 @@ export function ContextMenuProvider({ children }: { children: ReactNode }) {
     isVisible: false
   })
 
-  const showContextMenu = (file: FileInfo, event: React.MouseEvent) => {
+  const showContextMenu = (file: FileNode, event: React.MouseEvent) => {
     event.preventDefault()
     setMenuState({
       x: event.clientX,

@@ -1,11 +1,11 @@
 import React from 'react'
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { useTheme } from '@renderer/context/ThemeContext'
-import { FileInfo } from '@renderer/types/FileInfo'
+import { FileNode } from '@renderer/types/FileNode'
 
 interface FileContextMenuProps {
   children: React.ReactNode
-  file: FileInfo
+  file: FileNode
   onCopy?: () => void
   onDelete?: () => void
 }

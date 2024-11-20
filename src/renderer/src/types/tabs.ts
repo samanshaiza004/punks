@@ -1,11 +1,11 @@
-import { FileFilterOptions } from '@renderer/components/FileFilter'
-import { FileInfo } from './FileInfo'
+import { FileFilterOptions } from '@renderer/components/FileFilters'
+import { FileNode } from './'
 
 export interface Tab {
   id: string
   directoryPath: string[]
   searchQuery: string
-  searchResults: FileInfo[]
+  searchResults: FileNode[]
   fileFilters: FileFilterOptions
   title: string
 }

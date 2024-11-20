@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
+import * as Tabs from '@radix-ui/react-tabs'
 import { KeyBindingMap } from '@renderer/types/keybinds'
 import { defaultKeyBindings } from '@renderer/keybinds/defaults'
 import { useTheme } from '@renderer/context/ThemeContext'
 import { useToast } from '@renderer/context/ToastContext'
-import { X } from '@phosphor-icons/react'
-import TabButton from './TabButton'
+import { X, Gear, Keyboard } from '@phosphor-icons/react'
 import WindowSettings from './WindowSettings'
 import KeybindSettings from './KeybindSettings'
 
@@ -16,8 +16,6 @@ interface SettingsModalProps {
   onDirectorySelected: (directory: string[]) => void
 }
 
-type SettingsTab = 'window' | 'keybinds'
-
 const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
@@ -26,7 +24,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [keyBindings, setKeyBindings] = useState<KeyBindingMap>(defaultKeyBindings)
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
-  const [activeTab, setActiveTab] = useState<SettingsTab>('window')
   const { isDarkMode } = useTheme()
   const { showToast } = useToast()
 
@@ -87,107 +84,121 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         <Dialog.Content
           className={`
             fixed top-[50%] left-[50%] translate-x-[-50%] translate-y-[-50%]
-            w-11/12 max-w-5xl max-h-[90vh]
+            w-[800px] h-[600px]
             rounded-lg flex overflow-hidden
             data-[state=open]:animate-contentShow
             focus:outline-none
             ${isDarkMode ? 'bg-gray-800 text-gray-100' : 'bg-white text-gray-900'}
           `}
         >
-          {/* Sidebar */}
-          <div
-            className={`w-64 flex-shrink-0 border-r ${
-              isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
-            }`}
+          <Tabs.Root
+            defaultValue="window"
+            orientation="vertical"
+            className="flex w-full h-full"
           >
-            <div className="p-4 flex justify-between items-center">
-              <Dialog.Title className="text-xl font-semibold">
-                Settings
-              </Dialog.Title>
-              <Dialog.Close asChild>
-                <button
+            {/* Sidebar */}
+            <div
+              className={`w-64 flex-shrink-0 border-r flex flex-col ${
+                isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
+              }`}
+            >
+              <div className="p-4 flex justify-between items-center border-b border-inherit">
+                <Dialog.Title className="text-xl font-semibold">
+                  Settings
+                </Dialog.Title>
+                <Dialog.Close asChild>
+                  <button
+                    className={`
+                      rounded-full p-1.5
+                      hover:bg-gray-700
+                      focus:outline-none focus:ring-2 focus:ring-gray-400
+                      transition-colors
+                    `}
+                    aria-label="Close"
+                  >
+                    <X />
+                  </button>
+                </Dialog.Close>
+              </div>
+              <Tabs.List
+                className="flex flex-col flex-1"
+                aria-label="Settings sections"
+              >
+                <Tabs.Trigger
+                  value="window"
                   className={`
-                    rounded-full p-1.5
-                    hover:bg-gray-700
-                    focus:outline-none focus:ring-2 focus:ring-gray-400
+                    flex items-center gap-2 px-4 py-2 text-left
+                    focus:outline-none focus:bg-gray-700/10
+                    data-[state=active]:bg-gray-700/20
+                    hover:bg-gray-700/10
                     transition-colors
                   `}
-                  aria-label="Close"
                 >
-                  <X />
-                </button>
-              </Dialog.Close>
+                  <Gear size={20} />
+                  Window
+                </Tabs.Trigger>
+                <Tabs.Trigger
+                  value="keybinds"
+                  className={`
+                    flex items-center gap-2 px-4 py-2 text-left
+                    focus:outline-none focus:bg-gray-700/10
+                    data-[state=active]:bg-gray-700/20
+                    hover:bg-gray-700/10
+                    transition-colors
+                  `}
+                >
+                  <Keyboard size={20} />
+                  Keyboard Shortcuts
+                </Tabs.Trigger>
+              </Tabs.List>
             </div>
-            <nav>
-              <TabButton
-                isActive={activeTab === 'window'}
-                onClick={() => setActiveTab('window')}
-                icon={null}
-                label="Window"
-              />
-              <TabButton
-                isActive={activeTab === 'keybinds'}
-                onClick={() => setActiveTab('keybinds')}
-                icon={null}
-                label="Keyboard Shortcuts"
-              />
-            </nav>
-          </div>
 
-          {/* Content */}
-          <div className="flex-1 overflow-auto">
-            <div className="p-6">
-              {activeTab === 'window' ? (
-                <WindowSettings
-                  alwaysOnTop={alwaysOnTop}
-                  setAlwaysOnTop={setAlwaysOnTop}
-                  onDirectorySelected={onDirectorySelected}
-                />
-              ) : (
-                <KeybindSettings
+            {/* Content */}
+            <div className="flex-1 flex flex-col h-full">
+              <div className="flex-1 overflow-y-auto p-6">
+                <Tabs.Content value="window" className="outline-none h-full">
+                  <WindowSettings
+                    alwaysOnTop={alwaysOnTop}
+                    setAlwaysOnTop={setAlwaysOnTop}
+                    onDirectorySelected={onDirectorySelected}
+                  />
+                </Tabs.Content>
+                <Tabs.Content value="keybinds" className="outline-none h-full">
+                  <KeybindSettings
                     keyBindings={keyBindings}
                     onUpdateBindings={(newBindings) => setKeyBindings(newBindings)}
                   />
-              )}
-            </div>
+                </Tabs.Content>
+              </div>
 
-            {/* Footer */}
-            <div
-              className={`
-                sticky bottom-0 left-0 right-0
-                p-4 mt-auto
-                border-t
-                flex justify-end gap-2
-                ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}
-              `}
-            >
-              <Dialog.Close asChild>
+              <div
+                className={`
+                  p-4 border-t flex justify-end gap-2 flex-shrink-0
+                  ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}
+                `}
+              >
                 <button
+                  onClick={onClose}
                   className={`
                     px-4 py-2 rounded
                     ${
                       isDarkMode
                         ? 'hover:bg-gray-700 text-gray-300'
-                        : 'hover:bg-gray-100 text-gray-700'
+                        : 'hover:bg-gray-100 text-gray-600'
                     }
                   `}
                 >
                   Cancel
                 </button>
-              </Dialog.Close>
-              <button
-                onClick={handleSave}
-                className={`
-                  px-4 py-2 rounded
-                  bg-blue-500 text-white
-                  hover:bg-blue-600
-                  transition-colors
-                `}
-              >
-                Save Changes
-              </button>
+                <button
+                  onClick={handleSave}
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                >
+                  Save Changes
+                </button>
+              </div>
             </div>
-          </div>
+          </Tabs.Root>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

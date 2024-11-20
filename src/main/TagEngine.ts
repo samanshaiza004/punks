@@ -1,12 +1,13 @@
 // src/main/TagEngine.ts
 import { app } from 'electron'
-import sqlite3 from 'sqlite3'
+import * as sqlite3 from 'sqlite3'
+
+import fs from 'fs'
+import path from 'path'
+import { TagSearchOptions, TagEngineEvents } from '../types'
 import crypto from 'crypto'
 import chokidar from 'chokidar'
-import path from 'path'
-import fs from 'fs'
 import { EventEmitter } from 'events'
-import { AudioFile, TagSearchOptions } from './types'
 
 // Enable verbose logging for SQLite
 sqlite3.verbose()
@@ -65,12 +66,62 @@ const CREATE_TABLES_SQL = `
   CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
 `;
 
-class TagEngine extends EventEmitter {
-  removeTag(filePath: string, tag: string): any {
+class TagEngine extends EventEmitter<TagEngineEvents> {
+  removeTag(): any {
     throw new Error('Method not implemented.')
   }
   getAllTags(): any {
     throw new Error('Method not implemented.')
+  }
+  async addTag(filePath: string, tag: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        // First, ensure the file exists in the database
+        this.db.get('SELECT id FROM files WHERE path = ?', [filePath], (err, fileRow: any) => {
+          if (err) {
+            this.logger.error('Error checking file:', err)
+            return reject(err)
+          }
+
+          if (!fileRow) {
+            this.logger.error('File not found in database:', filePath)
+            return reject(new Error('File not found'))
+          }
+
+          // Ensure the tag exists, insert if it doesn't
+          this.db.run('INSERT OR IGNORE INTO tags (name) VALUES (?)', [tag], (tagErr) => {
+            if (tagErr) {
+              this.logger.error('Error inserting tag:', tagErr)
+              return reject(tagErr)
+            }
+
+            // Get the tag ID
+            this.db.get('SELECT id FROM tags WHERE name = ?', [tag], (getTagErr, tagRow: any) => {
+              if (getTagErr) {
+                this.logger.error('Error retrieving tag:', getTagErr)
+                return reject(getTagErr)
+              }
+
+              // Insert the file-tag relationship
+              this.db.run(
+                'INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)', 
+                [fileRow.id, tagRow.id], 
+                (insertErr) => {
+                  if (insertErr) {
+                    this.logger.error('Error adding tag to file:', insertErr)
+                    return reject(insertErr)
+                  }
+                  resolve()
+                }
+              )
+            })
+          })
+        })
+      } catch (error) {
+        this.logger.error('Unexpected error in addTag:', error)
+        reject(error)
+      }
+    })
   }
   private db: sqlite3.Database
   private logger: Console
@@ -276,7 +327,7 @@ class TagEngine extends EventEmitter {
       await new Promise<void>((resolve, reject) => {
         watcher.on('ready', () => {
           watcher.close()
-          this.logger.info(`Scan complete. Processed ${processedFiles}/${totalFiles} files`)
+          this.logger.info(`Scan complete. Processed $ {processedFiles}/${totalFiles} files`)
           this.emit('scanComplete', { 
             totalFiles: processedFiles,
             directory: directoryPath
@@ -284,7 +335,7 @@ class TagEngine extends EventEmitter {
           resolve()
         })
 
-        watcher.on('error', (error) => {
+        watcher.on('error', (error: any) => {
           this.logger.error('Watcher error:', error)
           this.emit('error', error)
           reject(error)
@@ -292,7 +343,8 @@ class TagEngine extends EventEmitter {
       })
     } catch (error) {
       this.logger.error('Scan error:', error)
-      this.emit('error', error)
+      this.emit('error', error as Error)
+
       throw error
     }
   }
@@ -343,7 +395,11 @@ class TagEngine extends EventEmitter {
     files: any[];
     currentPath: string;
   }> {
-    const fullPath = path.join(...directoryPath)
+    if (!Array.isArray(directoryPath)) {
+      throw new Error('directoryPath must be an array of path segments')
+    }
+    
+    const fullPath = directoryPath.length > 0 ? path.join(...directoryPath) : '/'
     
     try {
       // Get directories
@@ -354,6 +410,14 @@ class TagEngine extends EventEmitter {
         ORDER BY name COLLATE NOCASE ASC
       `
       const directories = await this.allQuery(directoriesQuery, [fullPath])
+      
+      // Ensure directories have the correct structure
+      const processedDirectories = directories.map((dir: any) => ({
+        path: dir.path || '',
+        name: dir.name || '',
+        lastModified: dir.lastModified || Date.now(),
+        type: 'directory' as const
+      }))
       
       // Get files
       const filesQuery = `
@@ -370,13 +434,19 @@ class TagEngine extends EventEmitter {
       const files = await this.allQuery(filesQuery, [fullPath])
       
       // Process files to convert tags from string to array
-      const processedFiles = files.map(file => ({
-        ...file,
+      const processedFiles = files.map((file: any) => ({
+        id: file.id,
+        path: file.directory_path,
+        name: file.name,
+        last_modified: file.last_modified,
+        type: 'file',
+        directory_path: file.directory_path,
+        hash: '', // You might need to generate or fetch this
         tags: file.tags ? file.tags.split(',') : []
       }))
 
       return {
-        directories: directories.map(dir => ({ ...dir, type: 'directory' as const })),
+        directories: processedDirectories,
         files: processedFiles,
         currentPath: fullPath
       }

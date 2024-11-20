@@ -16,6 +16,8 @@ import TabBar from './components/TabBar'
 
 import { useTabs } from './context/TabContext'
 import TabContainer from './components/TabContainer'
+import { UpdateNotification } from './components/UpdateNotification'
+import { Gear } from '@phosphor-icons/react/dist/ssr'
 
 interface DirectoryHistoryEntry {
   path: string[]
@@ -119,16 +121,18 @@ export function App() {
 
   return (
     <div
-      className={`flex flex-col h-screen p-2.5 ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}
+      className={`h-screen flex flex-col ${
+        isDarkMode ? 'dark bg-gray-900 text-white' : 'bg-white text-gray-900'
+      }`}
     >
       <div className="flex-shrink-0 ">
         <div className="flex items-center space-x-2 mb-2">
           <Button onClick={() => setIsSettingsOpen(true)} variant="secondary">
-            Settings
+            <Gear size={20} weight="fill" />
           </Button>
         </div>
       </div>
-      <TabBar lastSelectedDirectory={lastSelectedDirectory} />
+        <TabBar lastSelectedDirectory={lastSelectedDirectory} />
       <div className="flex-shrink-0 mb-2">
         <AudioPlayer currentAudio={currentAudio} shouldReplay />
       </div>
@@ -136,7 +140,6 @@ export function App() {
       <div className="flex-grow overflow-hidden">
         <TabContainer directory={lastSelectedDirectory} />
       </div>
-
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
@@ -146,6 +149,7 @@ export function App() {
           setIsSettingsOpen(false)
         }}
       />
+      <UpdateNotification />
     </div>
   )
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react'
-import { FileInfo } from '../../types/FileInfo'
+import { FileNode } from '../../types/FileNode'
 import { KeyHandlerMap } from '@renderer/types/keybinds'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
 import { useTheme } from '@renderer/context/ThemeContext'
@@ -8,7 +8,7 @@ interface SearchBarProps {
   searchQuery: string
   setSearchQuery: (query: string) => void
   onSearch: () => void
-  setSearchResults: (results: FileInfo[]) => void
+  setSearchResults: (results: FileNode[]) => void
 }
 
 const SearchBar: React.FC<SearchBarProps> = ({
