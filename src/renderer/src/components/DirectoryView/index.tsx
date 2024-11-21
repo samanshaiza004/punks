@@ -24,7 +24,6 @@ const DirectoryView: React.FC<DirectoryViewProps> = ({ directoryPath, onDirector
 
   const handlers: KeyHandlerMap = {
     GO_BACK: () => {
-      // event.preventDefault()
       goBack()
     }
   }

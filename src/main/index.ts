@@ -129,8 +129,6 @@ app.whenReady().then(() => {
 
       // Debug logging
       console.log('Original URL:', request.url)
-      console.log('Decoded path:', decodedPath)
-      console.log('Normalized path:', normalizedPath)
       console.log('Final file URL:', fileUrl)
       console.log('File exists check:', existsSync(normalizedPath))
 

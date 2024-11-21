@@ -27,7 +27,6 @@ const KeybindSettings: React.FC<KeybindSettingsProps> = ({ keyBindings, onUpdate
 
     if (['Control', 'Alt', 'Shift', 'Meta'].includes(key)) return
 
-    // Handle special keys
     let finalKey = key
     if (key === ' ') finalKey = 'Space'
     else if (key.length === 1) finalKey = key.toLowerCase()
@@ -48,7 +47,7 @@ const KeybindSettings: React.FC<KeybindSettingsProps> = ({ keyBindings, onUpdate
       ...keyBindings,
       [editingBinding]: {
         ...keyBindings[editingBinding],
-        currentKeys: [tempKeys] // Wrap tempKeys in an array since currentKeys is KeyCombo[]
+        currentKeys: [tempKeys]
       }
     }
 

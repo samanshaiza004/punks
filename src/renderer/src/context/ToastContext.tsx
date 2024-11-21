@@ -63,5 +63,3 @@ export const ToastProvider = ({ children }: { children: ReactNode }) => {
     </Toast.Provider>
   )
 }
-
-// Add these styles to your global CSS or tailwind.config.js

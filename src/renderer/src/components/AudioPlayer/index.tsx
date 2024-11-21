@@ -38,7 +38,6 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
         isDarkMode ? 'bg-gray-800/20 text-gray-200' : 'bg-white/20 text-gray-800'
       }`}
     >
-      {/* Controls Section */}
       <div className="px-4 py-2 flex items-center justify-between border-b border-gray-200/10">
         <div className="flex items-center space-x-4">
           <button

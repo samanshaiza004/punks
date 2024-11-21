@@ -101,7 +101,7 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
         <FileGrid
           directoryPath={tab.directoryPath}
           onDirectoryClick={handleDirectoryChange}
-          onFileClick={(file) => handleFileClick(file, tab.directoryPath)}
+          onFileClick={(file) => handleFileClick(file)}
           isSearching={tab.searchQuery.length > 0}
           searchResults={tab.searchResults}
           fileFilters={tab.fileFilters}

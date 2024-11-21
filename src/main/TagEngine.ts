@@ -9,10 +9,8 @@ import crypto from 'crypto'
 import chokidar from 'chokidar'
 import { EventEmitter } from 'events'
 
-// Enable verbose logging for SQLite
 sqlite3.verbose()
 
-// SQL Statements for table creation
 const CREATE_TABLES_SQL = `
   -- Directories table to store folder structure
   CREATE TABLE IF NOT EXISTS directories (
@@ -76,7 +74,6 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
   async addTag(filePath: string, tag: string): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        // First, ensure the file exists in the database
         this.db.get('SELECT id FROM files WHERE path = ?', [filePath], (err, fileRow: any) => {
           if (err) {
             this.logger.error('Error checking file:', err)
@@ -88,21 +85,18 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
             return reject(new Error('File not found'))
           }
 
-          // Ensure the tag exists, insert if it doesn't
           this.db.run('INSERT OR IGNORE INTO tags (name) VALUES (?)', [tag], (tagErr) => {
             if (tagErr) {
               this.logger.error('Error inserting tag:', tagErr)
               return reject(tagErr)
             }
 
-            // Get the tag ID
             this.db.get('SELECT id FROM tags WHERE name = ?', [tag], (getTagErr, tagRow: any) => {
               if (getTagErr) {
                 this.logger.error('Error retrieving tag:', getTagErr)
                 return reject(getTagErr)
               }
 
-              // Insert the file-tag relationship
               this.db.run(
                 'INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)', 
                 [fileRow.id, tagRow.id], 
@@ -402,7 +396,6 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
     const fullPath = directoryPath.length > 0 ? path.join(...directoryPath) : '/'
     
     try {
-      // Get directories
       const directoriesQuery = `
         SELECT path, name, last_modified as lastModified
         FROM directories
@@ -410,16 +403,14 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
         ORDER BY name COLLATE NOCASE ASC
       `
       const directories = await this.allQuery(directoriesQuery, [fullPath])
-      
-      // Ensure directories have the correct structure
+
       const processedDirectories = directories.map((dir: any) => ({
         path: dir.path || '',
         name: dir.name || '',
         lastModified: dir.lastModified || Date.now(),
         type: 'directory' as const
       }))
-      
-      // Get files
+
       const filesQuery = `
         SELECT f.id, f.path, f.directory_path, f.name, f.type, f.hash, f.last_modified,
                f.created_at, f.updated_at,
@@ -433,7 +424,6 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
       `
       const files = await this.allQuery(filesQuery, [fullPath])
       
-      // Process files to convert tags from string to array
       const processedFiles = files.map((file: any) => ({
         id: file.id,
         path: file.directory_path,
@@ -441,7 +431,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
         last_modified: file.last_modified,
         type: 'file',
         directory_path: file.directory_path,
-        hash: '', // You might need to generate or fetch this
+        hash: '', // do i need this?
         tags: file.tags ? file.tags.split(',') : []
       }))
 
@@ -456,7 +446,6 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
     }
   }
 
-  // Get parent directory
   async getParentDirectory(currentPath: string): Promise<string | null> {
     try {
       const result = await this.getQuery<{ parent_path: string | null }>(
@@ -544,7 +533,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
       ignoreInitial: false,
       ignored: /(^|[/\\])\../,
       awaitWriteFinish: true,
-      depth: undefined, // Allow unlimited depth for recursive scanning
+      depth: undefined,
       followSymlinks: false
     })
 
@@ -559,7 +548,6 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
           await this.addFile(path)
           filesProcessed++
           
-          // Emit progress during initial scan
           if (!initialScanComplete) {
             const progress = (filesProcessed / totalFiles.size) * 100
             this.emit('scanProgress', {

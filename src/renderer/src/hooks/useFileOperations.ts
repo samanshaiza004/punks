@@ -8,7 +8,6 @@ export const useFileOperations = () => {
   const { showToast } = useToast()
 
   const createSampleUrl = (filePath: string) => {
-    // Split the path into segments using the platform-specific separator
     const segments = filePath.split(window.api.sep())
 
     // Encode each segment individually (preserving separators)
@@ -23,21 +22,17 @@ export const useFileOperations = () => {
     return `sample:///${encodedPath}`
   }
 
-  const handleFileClick = async (file: FileNode, currentPath: string[]) => {
+  const handleFileClick = async (file: FileNode) => {
     const extension = file.name.split('.').pop()?.toLowerCase()
 
     try {
       if (extension && FILE_EXTENSIONS.audio.includes(extension)) {
-        let audioPath: string
-
-        if (file.directory_path) {
-          audioPath = window.api.isAbsolute(file.directory_path)
-            ? window.api.renderPath([file.directory_path, file.name])
-            : window.api.renderPath([file.directory_path, file.name])
-        } else {
-          audioPath = window.api.renderPath([...currentPath, file.name])
+        // Always use the file's directory_path and name from the database
+        if (!file.directory_path) {
+          throw new Error('File path information is missing')
         }
 
+        const audioPath = window.api.renderPath([file.path, file.name])
         console.log('Raw audio path:', audioPath)
 
         // Verify file exists before playing
@@ -50,16 +45,15 @@ export const useFileOperations = () => {
         const sampleUrl = createSampleUrl(audioPath)
         console.log('Encoded sample URL:', sampleUrl)
 
-        playAudio(sampleUrl)
+        await playAudio(sampleUrl)
       }
-    } catch (err) {
-      console.error('File operation error:', err)
-      showToast(
-        `Error playing file ${file.name}: ${err instanceof Error ? err.message : String(err)}`,
-        'error'
-      )
+    } catch (error: any) {
+      console.error('Error handling file click:', error)
+      showToast(`Error playing file: ${error.message}`, 'error')
     }
   }
 
-  return { handleFileClick }
+  return {
+    handleFileClick
+  }
 }

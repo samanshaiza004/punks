@@ -12,7 +12,6 @@ const TabBar = ({ lastSelectedDirectory }) => {
   const [showLeftIndicator, setShowLeftIndicator] = useState(false)
   const [showRightIndicator, setShowRightIndicator] = useState(false)
 
-  // Check if we need to show scroll indicators
   const checkScroll = () => {
     const el = scrollContainerRef.current
     if (el) {
@@ -20,15 +19,11 @@ const TabBar = ({ lastSelectedDirectory }) => {
       setShowRightIndicator(el.scrollLeft < el.scrollWidth - el.clientWidth)
     }
   }
-
-  // Add scroll event listener
   useEffect(() => {
     const el = scrollContainerRef.current
     if (el) {
       el.addEventListener('scroll', checkScroll)
-      // Initial check
       checkScroll()
-      // Check on window resize
       window.addEventListener('resize', checkScroll)
     }
     return () => {
@@ -36,8 +31,6 @@ const TabBar = ({ lastSelectedDirectory }) => {
       window.removeEventListener('resize', checkScroll)
     }
   }, [])
-
-  // Scroll functions
   const scrollLeft = () => {
     const el = scrollContainerRef.current
     if (el) {
@@ -116,8 +109,6 @@ const TabBar = ({ lastSelectedDirectory }) => {
           </div>
         </div>
       )}
-
-      {/* Tabs container */}
       <div
         ref={scrollContainerRef}
         className="flex-1 flex items-center overflow-x-auto show-scrollbar-on-hover"
@@ -183,8 +174,6 @@ const TabBar = ({ lastSelectedDirectory }) => {
           </div>
         ))}
       </div>
-
-      {/* Right scroll indicator */}
       {showRightIndicator && (
         <div
           onClick={scrollRight}
@@ -203,8 +192,6 @@ const TabBar = ({ lastSelectedDirectory }) => {
           </div>
         </div>
       )}
-
-      {/* Actions section */}
       <div
         className={`
         flex items-center

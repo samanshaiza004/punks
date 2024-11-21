@@ -32,7 +32,6 @@ export const UpdateNotification: React.FC = () => {
       }
     }
 
-    // Listen for update events from main process
     window.electron.ipcRenderer.on('update-status', handleUpdateStatus)
 
     return () => {

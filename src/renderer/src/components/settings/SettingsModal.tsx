@@ -96,7 +96,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             orientation="vertical"
             className="flex w-full h-full"
           >
-            {/* Sidebar */}
             <div
               className={`w-64 flex-shrink-0 border-r flex flex-col ${
                 isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
@@ -152,8 +151,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                 </Tabs.Trigger>
               </Tabs.List>
             </div>
-
-            {/* Content */}
             <div className="flex-1 flex flex-col h-full">
               <div className="flex-1 overflow-y-auto p-6">
                 <Tabs.Content value="window" className="outline-none h-full">
