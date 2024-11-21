@@ -1,6 +1,6 @@
 // src/hooks/useBatchLoading.ts
 import { useState, useEffect } from 'react'
-import { FileNode } from '../../../types'
+import { FileNode, FileSystemNode } from '../../../types'
 import { useToast } from '@renderer/context/ToastContext'
 
 const BATCH_SIZE = 50
@@ -57,12 +57,17 @@ export function useBatchLoading(directoryPath: string[]): {
     setIsLoading(false)
   }
 
-  const sortFiles = (files: FileNode[]): FileNode[] => {
-    return files.sort((a, b) => {
-      if (a.isDirectory && !b.isDirectory) return -1
-      if (!a.isDirectory && b.isDirectory) return 1
-      return a.name.localeCompare(b.name)
-    })
+  const sortFiles = (files: FileSystemNode[]): FileNode[] => {
+    return files
+      .sort((a, b) => {
+        const isADirectory = a.type === 'directory'
+        const isBDirectory = b.type === 'directory'
+        
+        if (isADirectory && !isBDirectory) return -1
+        if (!isADirectory && isBDirectory) return 1
+        return a.name.localeCompare(b.name)
+      })
+      .filter((file): file is FileNode => file.type === 'file')
   }
 
   return {

@@ -1,5 +1,5 @@
-import { FileFilterOptions } from '@renderer/components/FileFilters'
-import { FileNode } from './'
+import { FileFilterOptions } from '../../../renderer/src/components/FileFilters'
+import { FileNode } from '../../../types'
 
 export interface Tab {
   id: string

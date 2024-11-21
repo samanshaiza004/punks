@@ -1,5 +1,5 @@
-import { FileFilterOptions } from '@renderer/components/FileFilter'
-import { FileNode } from '@renderer/types/FileNode'
+import { FileFilterOptions } from '../components/FileFilters'
+import { FileNode } from '../../../types'
 
 export const FILE_EXTENSIONS = {
   audio: ['mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'wma'],
@@ -16,7 +16,7 @@ export const filterFiles = (files: FileNode[], filters: FileFilterOptions): File
 
   return files.filter((file) => {
     // Always show directories if the directories filter is enabled
-    if (file.isDirectory) {
+    if (file.directory_path) {
       return filters.directories
     }
 

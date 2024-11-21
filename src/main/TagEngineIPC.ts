@@ -2,7 +2,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import TagEngine from './TagEngine'
 import { IPC_CHANNELS, TagSearchOptions } from '../types'
-import * as path from 'path'
 
 export function setupTagEngineIPC(tagEngine: TagEngine): void {
   // Scan directory
@@ -34,7 +33,7 @@ export function setupTagEngineIPC(tagEngine: TagEngine): void {
   })
 
   // Remove tag from file
-  ipcMain.handle(IPC_CHANNELS.REMOVE_TAG, async (_, filePath: string, tag: string) => {
+  ipcMain.handle(IPC_CHANNELS.REMOVE_TAG, async (_) => {
     return await tagEngine.removeTag()
   })
 

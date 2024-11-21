@@ -65,31 +65,3 @@ export const ToastProvider = ({ children }: { children: ReactNode }) => {
 }
 
 // Add these styles to your global CSS or tailwind.config.js
-const toastAnimationStyles = `
-@keyframes slideIn {
-  from {
-    transform: translateX(calc(100% + 1rem));
-  }
-  to {
-    transform: translateX(0);
-  }
-}
-
-@keyframes hide {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
-
-@keyframes swipeOut {
-  from {
-    transform: translateX(var(--radix-toast-swipe-end-x));
-  }
-  to {
-    transform: translateX(calc(100% + 1rem));
-  }
-}
-`

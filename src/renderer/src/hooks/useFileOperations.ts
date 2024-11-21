@@ -1,4 +1,4 @@
-import { FileNode } from '@renderer/types/FileNode'
+import { FileNode } from '../../../types'
 import { useAudio } from '../context/AudioContextProvider'
 import { FILE_EXTENSIONS } from '@renderer/utils/fileFilters'
 import { useToast } from '@renderer/context/ToastContext'
@@ -30,10 +30,10 @@ export const useFileOperations = () => {
       if (extension && FILE_EXTENSIONS.audio.includes(extension)) {
         let audioPath: string
 
-        if (file.location) {
-          audioPath = window.api.isAbsolute(file.location)
-            ? window.api.renderPath([file.location, file.name])
-            : window.api.renderPath([file.location, file.name])
+        if (file.directory_path) {
+          audioPath = window.api.isAbsolute(file.directory_path)
+            ? window.api.renderPath([file.directory_path, file.name])
+            : window.api.renderPath([file.directory_path, file.name])
         } else {
           audioPath = window.api.renderPath([...currentPath, file.name])
         }

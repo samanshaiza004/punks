@@ -40,9 +40,9 @@ export const UpdateNotification: React.FC = () => {
     }
   }, [showToast])
 
-  const handleCheckForUpdates = () => {
+  /* const handleCheckForUpdates = () => {
     window.electron.ipcRenderer.invoke('check-for-updates')
-  }
+  } */
 
   const handleStartUpdate = () => {
     window.electron.ipcRenderer.invoke('start-update')

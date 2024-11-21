@@ -39,7 +39,6 @@ export const FileGrid: React.FC<FileGridProps> = ({
   
   const gridRef = useRef<HTMLDivElement>(null)
 
-  // Filter files based on fileFilters
   const filteredFiles = useMemo(() => {
     if (!fileFilters) return files
     return files.filter(file => {
@@ -59,8 +58,6 @@ export const FileGrid: React.FC<FileGridProps> = ({
       })
     })
   }, [files, fileFilters])
-
-  // Combine directories and filtered files for display
   const displayItems = useMemo(() => {
     if (isSearching && searchResults) {
       return searchResults
@@ -213,7 +210,6 @@ export const FileGrid: React.FC<FileGridProps> = ({
   // Get grid columns class dynamically
   const gridColumnsClass = useMemo(() => `grid-cols-${GRID_COLUMNS}`, [GRID_COLUMNS])
 
-  // Loading state
   if (isLoading) {
     return (
       <div className="h-full w-full flex items-center justify-center">
@@ -222,12 +218,10 @@ export const FileGrid: React.FC<FileGridProps> = ({
     )
   }
 
-  // Scanning state
   if (isScanning && scanProgress) {
     return <ScanProgress {...scanProgress} />
   }
 
-  // Empty state
   if (displayItems.length === 0 && !isSearching) {
     return <EmptyStatePrompt onScanDirectory={handleScanDirectory} />
   }

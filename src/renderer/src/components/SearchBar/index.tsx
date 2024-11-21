@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react'
-import { FileNode } from '../../types/FileNode'
+import { FileNode } from '../../../../types'
 import { KeyHandlerMap } from '@renderer/types/keybinds'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
 import { useTheme } from '@renderer/context/ThemeContext'

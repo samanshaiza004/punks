@@ -69,6 +69,7 @@ export function useKeyBindings(handlers: KeyHandlerMap, enabled = true) {
         return false
       } else {
         console.log('No matching keybind found')
+        return true
       }
     }
 
