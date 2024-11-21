@@ -2,22 +2,18 @@
 // src/App.tsx
 
 import { useState, useEffect } from 'react'
-
 import AudioPlayer from './components/AudioPlayer'
-
 import { useAudio } from './context/AudioContextProvider'
-
 import SettingsModal from './components/settings/SettingsModal'
 import { KeyBindingStore } from './keybinds/store'
 import { useTheme } from './context/ThemeContext'
 import { Button } from './components/Button'
-
 import TabBar from './components/TabBar'
-
 import { useTabs } from './context/TabContext'
 import TabContainer from './components/TabContainer'
 import { UpdateNotification } from './components/UpdateNotification'
 import { Gear } from '@phosphor-icons/react/dist/ssr'
+import { useDirectoryOperations } from './hooks/useDirectoryOperations'
 
 interface DirectoryHistoryEntry {
   path: string[]
@@ -27,19 +23,14 @@ interface DirectoryHistoryEntry {
 export function App() {
   const { isDarkMode } = useTheme()
   const [directoryPath, setDirectoryPath] = useState<string[]>([])
-
   const [directoryHistory, setDirectoryHistory] = useState<DirectoryHistoryEntry[]>([])
   const [currentHistoryIndex, setCurrentHistoryIndex] = useState<number>(-1)
   const [lastSelectedDirectory, setLastSelectedDirectory] = useState<string[]>([])
   const [currentAudio, _setCurrentAudio] = useState<string | null>(null)
-
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-
-  // const [audioMetadata, setAudioMetadata] = useState<any>(null)
-
   const { dispatch } = useTabs()
-
   const { playAudio } = useAudio()
+  const { getLastDirectory } = useDirectoryOperations()
 
   const handleDirectoryChange = (newPath: string[]) => {
     if (JSON.stringify(newPath) === JSON.stringify(directoryPath)) {
@@ -68,20 +59,22 @@ export function App() {
     if (directoryPath.length > 0 && directoryHistory.length === 0) {
       setDirectoryHistory([{ path: directoryPath, timestamp: Date.now() }])
     }
-    console.log(currentHistoryIndex)
   }, [directoryPath])
 
   useEffect(() => {
     const initializeApp = async () => {
+      // Initialize key bindings
       const store = KeyBindingStore.getInstance()
       await store.initialize()
-      const lastSelectedDirectory = await window.api.getLastSelectedDirectory()
-      if (lastSelectedDirectory) {
-        setLastSelectedDirectory([lastSelectedDirectory])
+
+      // Get the last selected directory
+      const lastDir = await getLastDirectory()
+      if (lastDir) {
+        setLastSelectedDirectory([lastDir])
         dispatch({
           type: 'ADD_TAB',
           payload: {
-            directoryPath: [lastSelectedDirectory],
+            directoryPath: [lastDir],
             searchQuery: '',
             searchResults: [],
             fileFilters: {
@@ -99,7 +92,9 @@ export function App() {
     }
 
     initializeApp()
+  }, [dispatch, getLastDirectory])
 
+  useEffect(() => {
     const keyDownHandler = (event: any) => {
       console.log('User pressed: ', event.key)
 
@@ -117,7 +112,7 @@ export function App() {
     return () => {
       document.removeEventListener('keydown', keyDownHandler)
     }
-  }, [])
+  }, [currentAudio, playAudio])
 
   return (
     <div

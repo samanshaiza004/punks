@@ -1,6 +1,7 @@
 import React from 'react'
 import { useTheme } from '@renderer/context/ThemeContext'
 import { Folder } from '@phosphor-icons/react'
+import { useDirectoryOperations } from '../hooks/useDirectoryOperations'
 
 interface EmptyStatePromptProps {
   onScanDirectory: () => void
@@ -8,6 +9,17 @@ interface EmptyStatePromptProps {
 
 const EmptyStatePrompt: React.FC<EmptyStatePromptProps> = ({ onScanDirectory }) => {
   const { isDarkMode } = useTheme()
+  const { handleDirectorySelection } = useDirectoryOperations()
+
+  const handleScan = async () => {
+    const directory = await window.api.openDirectoryPicker()
+    if (directory) {
+      const success = await handleDirectorySelection(directory)
+      if (success) {
+        onScanDirectory()
+      }
+    }
+  }
 
   return (
     <div className="h-full w-full flex items-center justify-center">
@@ -50,7 +62,7 @@ const EmptyStatePrompt: React.FC<EmptyStatePromptProps> = ({ onScanDirectory }) 
           Start by scanning a directory to index your files.
         </p>
         <button
-          onClick={onScanDirectory}
+          onClick={handleScan}
           className={`
             px-4
             py-2
@@ -66,7 +78,7 @@ const EmptyStatePrompt: React.FC<EmptyStatePromptProps> = ({ onScanDirectory }) 
             ${isDarkMode ? 'focus:ring-offset-gray-900' : 'focus:ring-offset-white'}
           `}
         >
-          Scan Directory
+          Select Directory
         </button>
       </div>
     </div>

@@ -79,7 +79,7 @@ export const api = {
   },
 
   getLastSelectedDirectory: (): Promise<string | null> => {
-    return ipcRenderer.invoke('get-last-selected-directory')
+    return ipcRenderer.invoke('get-last-directory')
   },
 
   isDirectory: async (fullPath: string): Promise<boolean> => {

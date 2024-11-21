@@ -25,13 +25,24 @@ ipcMain.handle('save-key-bindings', (_, bindings) => {
   return true
 })
 
-function getIconPath(): string {
-  if (is.dev) {
-    return path.join(process.cwd(), 'resources', 'icon.png')
-  } else {
-    return path.join(__dirname, '../../resources/icon.png')
+ipcMain.handle('save-last-directory', async (_, directory: string) => {
+  try {
+    await store.set('lastDirectory', directory)
+    return true
+  } catch (error) {
+    console.error('Error saving last directory:', error)
+    return false
   }
-}
+})
+
+ipcMain.handle('get-last-directory', async () => {
+  try {
+    return await store.get('lastDirectory')
+  } catch (error) {
+    console.error('Error getting last directory:', error)
+    return null
+  }
+})
 
 ipcMain.handle('show-save-dialog', async () => {
   const result = await dialog.showSaveDialog({
@@ -177,20 +188,18 @@ function createWindow(): void {
   })
 
   ipcMain.handle('open-directory-picker', async () => {
-    console.log('opening directory')
     const result = await dialog.showOpenDialog({
-      properties: ['openDirectory'],
-      title: 'Select a directory'
+      properties: ['openDirectory']
     })
-    if (result.filePaths[0]) {
-      store?.set('lastSelectedDirectory', result.filePaths[0])
+    if (!result.canceled) {
+      store?.set('lastDirectory', result.filePaths[0])
     }
     return result.filePaths[0]
   })
 
-  ipcMain.handle('get-last-selected-directory', async () => {
+  /* ipcMain.handle('get-last-selected-directory', async () => {
     return store?.get('lastSelectedDirectory')
-  })
+  }) */
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
@@ -257,3 +266,11 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
+
+function getIconPath(): string {
+  if (is.dev) {
+    return path.join(process.cwd(), 'resources', 'icon.png')
+  } else {
+    return path.join(__dirname, '../../resources/icon.png')
+  }
+}

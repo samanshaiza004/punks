@@ -27,7 +27,6 @@ export const useFileOperations = () => {
 
     try {
       if (extension && FILE_EXTENSIONS.audio.includes(extension)) {
-        // Always use the file's directory_path and name from the database
         if (!file.directory_path) {
           throw new Error('File path information is missing')
         }
@@ -35,13 +34,11 @@ export const useFileOperations = () => {
         const audioPath = window.api.renderPath([file.path, file.name])
         console.log('Raw audio path:', audioPath)
 
-        // Verify file exists before playing
         const fileExists = await window.api.doesFileExist(audioPath)
         if (!fileExists) {
           throw new Error(`File does not exist: ${audioPath}`)
         }
 
-        // Create properly encoded sample URL
         const sampleUrl = createSampleUrl(audioPath)
         console.log('Encoded sample URL:', sampleUrl)
 
