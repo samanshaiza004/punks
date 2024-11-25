@@ -15,9 +15,7 @@ const EmptyStatePrompt: React.FC<EmptyStatePromptProps> = ({ }) => {
     const directory = await window.api.openDirectoryPicker()
     if (directory) {
       const success = await handleDirectorySelection(directory)
-      if (success) {
-
-      }
+      console.log('Directory selection result:', success)
     }
   }
 

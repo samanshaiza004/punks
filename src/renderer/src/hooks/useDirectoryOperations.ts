@@ -69,7 +69,7 @@ export const useDirectoryOperations = () => {
       // Save the selected directory path
       await window.electron.ipcRenderer.invoke('save-last-directory', directory)
       
-      await window.api.scanDirectory(directory, scanAbortController.current.signal)
+      await window.api.scanDirectory(directory)
     } catch (error: any) {
       if (error.name === 'AbortError') {
         showToast('Scan cancelled', 'info')

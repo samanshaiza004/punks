@@ -6,6 +6,7 @@ interface ScanProgress {
   percentComplete: number
   type?: 'directory' | 'file'
   path?: string
+  batch?: any[]
 }
 
 interface ScanProgressContextType {

@@ -54,6 +54,9 @@ export interface ScanProgress {
   total: number
   processed: number
   percentComplete: number
+  type?: 'directory' | 'file'
+  path?: string
+  batch?: FileSystemNode[]
 }
 
 export interface ScanComplete {

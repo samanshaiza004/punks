@@ -124,7 +124,7 @@ app.whenReady().then(() => {
         })
 
       return true
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error during directory scan:', error)
       mainWindow?.webContents.send('scan-error', error.message || 'Failed to scan directory')
       return false
@@ -249,14 +249,14 @@ function createWindow(): void {
   })
 
   const alwaysOnTop = store?.get('alwaysOnTop', false) ?? false
-  mainWindow.setAlwaysOnTop(alwaysOnTop)
+  mainWindow?.setAlwaysOnTop(alwaysOnTop)
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show()
-    mainWindow.focus()
+  mainWindow?.once('ready-to-show', () => {
+    mainWindow?.show()
+    mainWindow?.focus()
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
+  mainWindow?.webContents?.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })

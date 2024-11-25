@@ -73,15 +73,10 @@ const CREATE_TABLES_SQL = `
   CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
 `
 
-interface BatchProgress {
-  processed: number
-  total: number
-  percentComplete: number
-  batch: FileNode[]
-}
+
 
 class TagEngine extends EventEmitter<TagEngineEvents> {
-  private readonly BATCH_SIZE = 100
+  
   removeTag(): any {
     throw new Error('Method not implemented.')
   }
@@ -324,7 +319,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
           processed: processedFiles,
           total: totalFiles,
           percentComplete: totalFiles ? (processedFiles / totalFiles) * 100 : 0,
-          type: 'directory',
+          type: 'directory' ,
           path: dir
         })
 
@@ -380,7 +375,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
         totalFiles,
         directory: directoryPath
       })
-    } catch (error) {
+    } catch (error: any) {
       this.emit(TagEngineEventType.ERROR, error)
       throw error
     }
@@ -389,7 +384,6 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
   private async processFile(filePath: string): Promise<FileNode | null> {
     try {
       const stats = await fs.promises.stat(filePath)
-      const fileType = this.getFileType(filePath)
       const hash = await this.calculateFileHash(filePath)
 
       const file: FileNode = {
