@@ -2,9 +2,18 @@
 import { app } from 'electron'
 import * as sqlite3 from 'sqlite3'
 
+export enum TagEngineEventType {
+  SCAN_PROGRESS = 'scanProgress',
+  SCAN_COMPLETE = 'scanComplete',
+  ERROR = 'error',
+  FILE_CHANGED = 'fileChanged',
+  FILE_REMOVED = 'fileRemoved',
+  FILE_ADDED = 'fileAdded'
+}
+
 import fs from 'fs'
 import path from 'path'
-import { TagSearchOptions, TagEngineEvents } from '../types'
+import { TagSearchOptions, TagEngineEvents, FileNode, DirectoryNode } from '../types/index'
 import crypto from 'crypto'
 import chokidar from 'chokidar'
 import { EventEmitter } from 'events'
@@ -62,9 +71,17 @@ const CREATE_TABLES_SQL = `
   CREATE INDEX IF NOT EXISTS idx_files_type ON files(type);
   CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
   CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
-`;
+`
+
+interface BatchProgress {
+  processed: number
+  total: number
+  percentComplete: number
+  batch: FileNode[]
+}
 
 class TagEngine extends EventEmitter<TagEngineEvents> {
+  private readonly BATCH_SIZE = 100
   removeTag(): any {
     throw new Error('Method not implemented.')
   }
@@ -98,8 +115,8 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
               }
 
               this.db.run(
-                'INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)', 
-                [fileRow.id, tagRow.id], 
+                'INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)',
+                [fileRow.id, tagRow.id],
                 (insertErr) => {
                   if (insertErr) {
                     this.logger.error('Error adding tag to file:', insertErr)
@@ -124,9 +141,9 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
     super()
     this.logger = console
     const dbPath = path.join(app.getPath('userData'), 'tags.db')
-    
+
     this.logger.info('Initializing TagEngine with database at:', dbPath)
-    
+
     try {
       this.db = new sqlite3.Database(dbPath, (err) => {
         if (err) {
@@ -144,7 +161,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
 
   private initializeDatabase(): void {
     this.logger.info('Initializing database tables...')
-    
+
     this.db.serialize(() => {
       this.db.exec(CREATE_TABLES_SQL, (err) => {
         if (err) {
@@ -174,7 +191,14 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
       await this.db.serialize(async () => {
         await this.runQuery(
           'INSERT OR REPLACE INTO files (path, directory_path, name, type, hash, last_modified) VALUES (?, ?, ?, ?, ?, ?)',
-          [filePath, path.dirname(filePath), path.basename(filePath), this.getFileType(filePath), hash, stats.mtimeMs]
+          [
+            filePath,
+            path.dirname(filePath),
+            path.basename(filePath),
+            this.getFileType(filePath),
+            hash,
+            stats.mtimeMs
+          ]
         )
       })
     } catch (error) {
@@ -230,7 +254,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
 
   async searchByTags(tags: string[], options: TagSearchOptions = {}): Promise<any[]> {
     const { matchAll = false, sortBy = 'path', sortOrder = 'asc' } = options
-    
+
     // If no tags provided, return all files
     if (tags.length === 0) {
       return this.allQuery<any>(
@@ -267,134 +291,139 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
   }
 
   async scanDirectory(directoryPath: string): Promise<void> {
-    this.logger.info('Starting directory scan:', directoryPath)
-    
     try {
-      const watcher = chokidar.watch(directoryPath, {
-        ignored: /(^|[\/\\])\../, // ignore dotfiles
-        persistent: false,
-        depth: Infinity
-      })
-
-      let processedFiles = 0
+      const batchSize = 100
       let totalFiles = 0
+      let processedFiles = 0
+      const fileBatches: string[][] = [[]]
+      let currentBatchIndex = 0
 
-      // Process directories first
-      const processDirectory = async (dirPath: string) => {
-        const stats = fs.statSync(dirPath)
-        const name = path.basename(dirPath)
-        const parentPath = path.dirname(dirPath)
-
-        await this.db.run(
-          `INSERT OR REPLACE INTO directories 
-           (path, parent_path, name, last_modified) 
-           VALUES (?, ?, ?, ?)`,
-          [dirPath, parentPath === dirPath ? null : parentPath, name, stats.mtimeMs]
+      // First, collect all files and emit directory structure immediately
+      const walk = async (dir: string) => {
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true })
+        const stats = await fs.promises.stat(dir)
+        
+        // Create and emit directory node
+        const directoryNode: DirectoryNode = {
+          id: Date.now(), // Temporary ID until DB insert
+          path: dir,
+          name: path.basename(dir),
+          last_modified: stats.mtimeMs,
+          type: 'directory',
+          parent_path: dir === directoryPath ? null : path.dirname(dir)
+        }
+        
+        // Insert directory into database
+        await this.runQuery(
+          'INSERT OR IGNORE INTO directories (path, parent_path, name, last_modified) VALUES (?, ?, ?, ?)',
+          [directoryNode.path, directoryNode.parent_path, directoryNode.name, directoryNode.last_modified]
         )
+        
+        // Emit progress with directory information
+        this.emit(TagEngineEventType.SCAN_PROGRESS, {
+          processed: processedFiles,
+          total: totalFiles,
+          percentComplete: totalFiles ? (processedFiles / totalFiles) * 100 : 0,
+          type: 'directory',
+          path: dir
+        })
+
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name)
+          if (entry.isDirectory()) {
+            await walk(fullPath)
+          } else {
+            totalFiles++
+            // Add file to current batch
+            if (fileBatches[currentBatchIndex].length >= batchSize) {
+              currentBatchIndex++
+              fileBatches[currentBatchIndex] = []
+            }
+            fileBatches[currentBatchIndex].push(fullPath)
+          }
+        }
       }
 
-      watcher.on('addDir', async (dirPath) => {
-        try {
-          await processDirectory(dirPath)
-        } catch (error) {
-          this.logger.error(`Error processing directory ${dirPath}:`, error)
+      // Walk the directory tree first
+      await walk(directoryPath)
+
+      // Process files in batches
+      for (const batch of fileBatches) {
+        const batchResults: FileNode[] = []
+        for (const filePath of batch) {
+          try {
+            const fileNode = await this.processFile(filePath)
+            if (fileNode) {
+              batchResults.push(fileNode)
+              processedFiles++
+              
+              // Emit progress with file information
+              this.emit(TagEngineEventType.SCAN_PROGRESS, {
+                processed: processedFiles,
+                total: totalFiles,
+                percentComplete: (processedFiles / totalFiles) * 100,
+                type: 'file',
+                path: filePath,
+                batch: batchResults
+              })
+            }
+          } catch (error) {
+            console.error(`Error processing file ${filePath}:`, error)
+          }
         }
-      })
 
-      watcher.on('add', async (filePath) => {
-        totalFiles++
-        this.emit('scanProgress', {
-          total: totalFiles,
-          processed: processedFiles,
-          percentComplete: totalFiles > 0 ? Math.round((processedFiles / totalFiles) * 100) : 0
-        })
+        // Give the event loop a chance to process other events
+        await new Promise(resolve => setTimeout(resolve, 0))
+      }
 
-        try {
-          await this.processFile(filePath)
-          processedFiles++
-          this.logger.debug(`Processed file ${processedFiles}/${totalFiles}: ${filePath}`)
-        } catch (error) {
-          this.logger.error(`Error processing file ${filePath}:`, error)
-        }
-      })
-
-      await new Promise<void>((resolve, reject) => {
-        watcher.on('ready', () => {
-          watcher.close()
-          this.logger.info(`Scan complete. Processed $ {processedFiles}/${totalFiles} files`)
-          this.emit('scanComplete', { 
-            totalFiles: processedFiles,
-            directory: directoryPath
-          })
-          resolve()
-        })
-
-        watcher.on('error', (error: any) => {
-          this.logger.error('Watcher error:', error)
-          this.emit('error', error)
-          reject(error)
-        })
+      this.emit(TagEngineEventType.SCAN_COMPLETE, {
+        totalFiles,
+        directory: directoryPath
       })
     } catch (error) {
-      this.logger.error('Scan error:', error)
-      this.emit('error', error as Error)
-
+      this.emit(TagEngineEventType.ERROR, error)
       throw error
     }
   }
 
-  private async processFile(filePath: string): Promise<void> {
-    this.logger.debug('Processing file:', filePath)
-    
+  private async processFile(filePath: string): Promise<FileNode | null> {
     try {
+      const stats = await fs.promises.stat(filePath)
+      const fileType = this.getFileType(filePath)
       const hash = await this.calculateFileHash(filePath)
-      const stats = fs.statSync(filePath)
-      const name = path.basename(filePath)
-      const directoryPath = path.dirname(filePath)
 
-      const insertQuery = `
-        INSERT OR REPLACE INTO files 
-        (path, directory_path, name, type, hash, last_modified) 
-        VALUES (?, ?, ?, ?, ?, ?)
-      `
-      
-      await new Promise<void>((resolve, reject) => {
-        this.db.run(insertQuery, [
-          filePath,
-          directoryPath,
-          name,
-          this.getFileType(filePath),
-          hash,
-          stats.mtime.getTime()
-        ], (err) => {
-          if (err) {
-            this.logger.error('Error inserting file:', err)
-            reject(err)
-          } else {
-            resolve()
-          }
-        })
-      })
+      const file: FileNode = {
+        id: Date.now(),
+        path: filePath,
+        directory_path: path.dirname(filePath),
+        name: path.basename(filePath),
+        type: 'file' as const,
+        hash,
+        last_modified: stats.mtimeMs,
+        tags: []
+      }
 
-      this.logger.debug('Successfully processed file:', filePath)
+
+      await this.addFile(filePath)
+      return file
     } catch (error) {
-      this.logger.error('Error processing file:', filePath, error)
-      throw error
+      console.error(`Error processing file ${filePath}:`, error)
+      return null
     }
   }
 
   // Get contents of a directory
   async getDirectoryContents(directoryPath: string[]): Promise<{
-    directories: Array<{ path: string; name: string; lastModified: number; type: 'directory' }>;
-    files: any[];
-    currentPath: string;
+    directories: Array<{ path: string; name: string; lastModified: number; type: 'directory' }>
+    files: any[]
+    currentPath: string
   }> {
     if (!Array.isArray(directoryPath)) {
       throw new Error('directoryPath must be an array of path segments')
     }
-    
+
     const fullPath = directoryPath.length > 0 ? path.join(...directoryPath) : '/'
-    
+
     try {
       const directoriesQuery = `
         SELECT path, name, last_modified as lastModified
@@ -423,7 +452,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
         ORDER BY f.name COLLATE NOCASE ASC
       `
       const files = await this.allQuery(filesQuery, [fullPath])
-      
+
       const processedFiles = files.map((file: any) => ({
         id: file.id,
         path: file.directory_path,
@@ -547,7 +576,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
         try {
           await this.addFile(path)
           filesProcessed++
-          
+
           if (!initialScanComplete) {
             const progress = (filesProcessed / totalFiles.size) * 100
             this.emit('scanProgress', {

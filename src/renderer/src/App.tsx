@@ -14,6 +14,8 @@ import TabContainer from './components/TabContainer'
 import { UpdateNotification } from './components/UpdateNotification'
 import { Gear } from '@phosphor-icons/react/dist/ssr'
 import { useDirectoryOperations } from './hooks/useDirectoryOperations'
+import { useScanProgress } from './context/ScanProgressContext'
+import ScanProgress from './components/ScanProgress'
 
 interface DirectoryHistoryEntry {
   path: string[]
@@ -127,7 +129,7 @@ export function App() {
           </Button>
         </div>
       </div>
-        <TabBar lastSelectedDirectory={lastSelectedDirectory} />
+      <TabBar lastSelectedDirectory={lastSelectedDirectory} />
       <div className="flex-shrink-0 mb-2">
         <AudioPlayer currentAudio={currentAudio} shouldReplay />
       </div>
@@ -145,6 +147,23 @@ export function App() {
         }}
       />
       <UpdateNotification />
+      <ScanProgressOverlay />
     </div>
+  )
+}
+
+const ScanProgressOverlay = () => {
+  const { isScanning, progress } = useScanProgress()
+
+  if (!isScanning || !progress) {
+    return null
+  }
+
+  return (
+    <ScanProgress
+      total={progress.total}
+      processed={progress.processed}
+      percentComplete={progress.percentComplete}
+    />
   )
 }

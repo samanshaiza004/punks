@@ -7,7 +7,7 @@ interface EmptyStatePromptProps {
   onScanDirectory: () => void
 }
 
-const EmptyStatePrompt: React.FC<EmptyStatePromptProps> = ({ onScanDirectory }) => {
+const EmptyStatePrompt: React.FC<EmptyStatePromptProps> = ({ }) => {
   const { isDarkMode } = useTheme()
   const { handleDirectorySelection } = useDirectoryOperations()
 
@@ -16,7 +16,7 @@ const EmptyStatePrompt: React.FC<EmptyStatePromptProps> = ({ onScanDirectory }) 
     if (directory) {
       const success = await handleDirectorySelection(directory)
       if (success) {
-        onScanDirectory()
+
       }
     }
   }

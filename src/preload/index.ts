@@ -7,7 +7,7 @@ import { ipcRenderer } from 'electron/renderer'
 import fs from 'fs/promises'
 import fs2 from 'fs'
 import path from 'path'
-import { FileNode, AudioFile, TagSearchOptions, IPC_CHANNELS } from '../types'
+import { FileNode, AudioFile, TagSearchOptions, IPC_CHANNELS } from '../types/index'
 import { IAudioMetadata, parseFile } from 'music-metadata'
 
 export const api = {
@@ -245,22 +245,26 @@ export const api = {
   },
 
   // File scanning and metadata
-  scanDirectory: async (directoryPath: string): Promise<boolean> => {
-    return await ipcRenderer.invoke('tag-engine:scan-directory', directoryPath)
+  scanDirectory: async (directory: string): Promise<boolean> => {
+    return await ipcRenderer.invoke('scan-directory', directory)
+  },
+
+  verifyDirectoryAccess: async (directory: string): Promise<boolean> => {
+    return await ipcRenderer.invoke('verify-directory-access', directory)
   },
 
   onScanProgress: (
     callback: (progress: { total: number; processed: number; percentComplete: number }) => void
   ): void => {
-    ipcRenderer.on('tag-engine:scan-progress', (_event, progress) => callback(progress))
+    ipcRenderer.on('scan-progress', (_event, progress) => callback(progress))
   },
 
-  onScanComplete: (callback: (stats: { totalFiles: number; directory: string }) => void): void => {
-    ipcRenderer.on('tag-engine:scan-complete', (_event, stats) => callback(stats))
+  onScanComplete: (callback: () => void): void => {
+    ipcRenderer.on('scan-complete', () => callback())
   },
 
   onScanError: (callback: (error: string) => void): void => {
-    ipcRenderer.on('tag-engine:error', (_event, error) => callback(error))
+    ipcRenderer.on('scan-error', (_event, error) => callback(error))
   },
 
   getFileMetadata: async (filePath: string): Promise<AudioFile | null> => {
@@ -303,7 +307,20 @@ export const api = {
 if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', electronAPI)
-    contextBridge.exposeInMainWorld('api', api)
+    contextBridge.exposeInMainWorld('api', {
+      ...api,
+      onScanProgress: (callback: (progress: { total: number; processed: number; percentComplete: number }) => void) => {
+        ipcRenderer.on('scan-progress', (_event, progress) => callback(progress))
+      },
+      onScanComplete: (callback: () => void) => {
+        ipcRenderer.on('scan-complete', () => callback())
+      },
+      onScanError: (callback: (error: string) => void) => {
+        ipcRenderer.on('scan-error', (_event, error) => callback(error))
+      },
+      verifyDirectoryAccess: api.verifyDirectoryAccess,
+      scanDirectory: api.scanDirectory
+    })
   } catch (error) {
     console.error('Error setting up context bridge:', error)
   }

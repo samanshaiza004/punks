@@ -6,8 +6,9 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { existsSync } from 'fs'
 import TagEngine from './TagEngine'
 import { setupTagEngineIPC } from './TagEngineIPC'
-
+import fs from 'fs'
 let tagEngine: TagEngine
+let mainWindow: BrowserWindow | null = null
 
 // this is a dynamic import silly
 let store
@@ -72,6 +73,79 @@ protocol.registerSchemesAsPrivileged([
 app.whenReady().then(() => {
   tagEngine = new TagEngine()
   setupTagEngineIPC(tagEngine)
+
+  console.log('TagEngine initialized:', !!tagEngine)
+
+  // Add handler for directory access verification
+  ipcMain.handle('verify-directory-access', async (_event, directoryPath: string) => {
+    try {
+      if (!directoryPath || !existsSync(directoryPath)) {
+        throw new Error('Invalid directory path')
+      }
+
+      await fs.promises.access(directoryPath, fs.constants.R_OK)
+      return true
+    } catch (error: any) {
+      console.error('Directory access verification failed:', error)
+      throw new Error(error.message || 'Cannot access directory')
+    }
+  })
+
+  // In main/index.ts, modify the scan-directory handler:
+  ipcMain.handle('scan-directory', async (_event, directoryPath: string) => {
+    try {
+      if (!directoryPath || !existsSync(directoryPath)) {
+        throw new Error('Invalid directory path')
+      }
+
+      if (!tagEngine) {
+        throw new Error('TagEngine not initialized')
+      }
+
+      // Add more detailed error handling
+      const canAccess = await fs.promises.access(directoryPath, fs.constants.R_OK)
+        .then(() => true)
+        .catch(() => false)
+      
+      if (!canAccess) {
+        throw new Error('Cannot access directory: Permission denied')
+      }
+
+      // Start scanning in the background
+      await tagEngine.scanDirectory(directoryPath)
+        .then(() => {
+          mainWindow?.webContents.send('scan-complete')
+          return true
+        })
+        .catch((error) => {
+          console.error('Error during directory scan:', error)
+          mainWindow?.webContents.send('scan-error', error.message || 'Failed to scan directory')
+          return false
+        })
+
+      return true
+    } catch (error) {
+      console.error('Error during directory scan:', error)
+      mainWindow?.webContents.send('scan-error', error.message || 'Failed to scan directory')
+      return false
+    }
+  })
+
+  // Add event listeners for TagEngine events
+  tagEngine.on('scanProgress', (progress) => {
+    if (mainWindow?.isDestroyed()) return
+    mainWindow?.webContents.send('scan-progress', progress)
+  })
+
+  tagEngine.on('scanComplete', (stats) => {
+    if (mainWindow?.isDestroyed()) return
+    mainWindow?.webContents.send('scan-complete', stats)
+  })
+
+  tagEngine.on('error', (error) => {
+    if (mainWindow?.isDestroyed()) return
+    mainWindow?.webContents.send('scan-error', error.message || 'Unknown error occurred')
+  })
 
   protocol.handle('sample', async (request) => {
     try {
@@ -158,7 +232,7 @@ app.whenReady().then(() => {
 })
 
 function createWindow(): void {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 900,
     height: 670,
     minWidth: 480,
@@ -197,32 +271,13 @@ function createWindow(): void {
     return result.filePaths[0]
   })
 
-  /* ipcMain.handle('get-last-selected-directory', async () => {
-    return store?.get('lastSelectedDirectory')
-  }) */
+  
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
-
-  
-
-
-  /* let windowState = store?.get('windowState')
-
-  [('resize', 'move', 'close')].forEach((element) => {
-    mainWindow.on(element, () => {
-      windowState.isMaximized = mainWindow.isMaximized()
-
-      if (!windowState.isMaximized) {
-        windowState.bounds = mainWindow.getBounds()
-      }
-
-      store.set('windowState', windowState)
-    })
-  }) */
 }
 
 ipcMain.on('ondragstart', (event, filePath) => {

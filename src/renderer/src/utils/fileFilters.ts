@@ -1,5 +1,5 @@
 import { FileFilterOptions } from '../components/FileFilters'
-import { FileNode } from '../../../types'
+import { FileNode } from '../../../types/index'
 
 export const FILE_EXTENSIONS = {
   audio: ['mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'wma'],
