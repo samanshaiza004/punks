@@ -12,10 +12,8 @@ export const DirectoryPicker: React.FC<DirectoryPickerProps> = ({ onDirectorySel
   const handlePickDirectory = async () => {
     const directory = await window.api.openDirectoryPicker()
     if (directory) {
-      const success = await handleDirectorySelection(directory)
-      if (success) {
-        onDirectorySelected([directory])
-      }
+      await handleDirectorySelection(directory)
+      onDirectorySelected([directory])
     }
   }
 
