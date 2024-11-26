@@ -19,6 +19,13 @@ interface FileGridProps {
   fileFilters?: FileFilterOptions
 }
 
+const COLUMN_WIDTHS = [
+  { maxWidth: 600, columns: 1 },
+  { maxWidth: 900, columns: 2 },
+  { maxWidth: 1200, columns: 3 },
+  { maxWidth: Infinity, columns: 4 }
+]
+
 const GRID_COLUMNS = 3
 export const FileGrid: React.FC<FileGridProps> = ({
   directoryPath,
@@ -35,13 +42,18 @@ export const FileGrid: React.FC<FileGridProps> = ({
   const [isLoading, setIsLoading] = useState(true)
   const [isScanning, setIsScanning] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const [scanProgress, setScanProgress] = useState<{ total: number; processed: number; percentComplete: number } | null>(null)
-  
+  const [scanProgress, setScanProgress] = useState<{
+    total: number
+    processed: number
+    percentComplete: number
+  } | null>(null)
+
+  const [gridColumns, setGridColumns] = useState(3) // Default to 3 columns
   const gridRef = useRef<HTMLDivElement>(null)
 
   const filteredFiles = useMemo(() => {
     if (!fileFilters) return files
-    return files.filter(file => {
+    return files.filter((file) => {
       const extension = file.name.split('.').pop()?.toLowerCase() || ''
       return Object.entries(fileFilters).some(([type, isEnabled]) => {
         if (!isEnabled) return false
@@ -70,7 +82,7 @@ export const FileGrid: React.FC<FileGridProps> = ({
     try {
       setIsLoading(true)
       const contents = await window.api.getDirectoryContents(directoryPath)
-      
+
       // Transform directories to match DirectoryNode type
       const transformedDirectories = contents.directories.map((dir, index) => ({
         ...dir,
@@ -78,7 +90,7 @@ export const FileGrid: React.FC<FileGridProps> = ({
         parent_path: directoryPath.join('/') || null, // Use current directory path as parent_path
         last_modified: dir.lastModified // Ensure last_modified is used
       }))
-      
+
       setDirectories(transformedDirectories)
       setFiles(contents.files)
       setSelectedIndex(0) // Reset selection when directory changes
@@ -102,11 +114,11 @@ export const FileGrid: React.FC<FileGridProps> = ({
         tags: file.tags,
         last_modified: file.last_modified
       }
-      setFiles(prev => [...prev, fileNode])
+      setFiles((prev) => [...prev, fileNode])
     }
 
     const handleFileRemoved = (path: string) => {
-      setFiles(prev => prev.filter(f => f.path !== path))
+      setFiles((prev) => prev.filter((f) => f.path !== path))
     }
 
     const handleScanProgress = (progress: typeof scanProgress) => {
@@ -120,13 +132,30 @@ export const FileGrid: React.FC<FileGridProps> = ({
       showToast('Directory scan complete!', 'success')
     }
 
+    const calculateColumns = () => {
+      if (!gridRef.current) return
+
+      const gridWidth = gridRef.current.clientWidth
+      const columnConfig =
+        COLUMN_WIDTHS.find((config) => gridWidth <= config.maxWidth) ||
+        COLUMN_WIDTHS[COLUMN_WIDTHS.length - 1]
+
+      setGridColumns(columnConfig.columns)
+    }
+
     window.api.onFileAdded(handleFileAdded)
     window.api.onFileRemoved(handleFileRemoved)
     window.api.onScanProgress(handleScanProgress)
     window.api.onScanComplete(handleScanComplete)
 
+    calculateColumns()
+
+    // Add resize listener
+    window.addEventListener('resize', calculateColumns)
+
+    // Cleanup listener
     return () => {
-      // Clean up listeners if needed
+      window.removeEventListener('resize', calculateColumns)
     }
   }, [])
 
@@ -177,7 +206,7 @@ export const FileGrid: React.FC<FileGridProps> = ({
       SELECT_ITEM: () => {
         const item = displayItems[selectedIndex]
         if (!item) return
-        
+
         if ('type' in item && item.type === 'directory') {
           onDirectoryClick([...directoryPath, item.name])
         } else {
@@ -208,7 +237,7 @@ export const FileGrid: React.FC<FileGridProps> = ({
   }
 
   // Get grid columns class dynamically
-  const gridColumnsClass = useMemo(() => `grid-cols-${GRID_COLUMNS}`, [GRID_COLUMNS])
+  const gridColumnsClass = useMemo(() => `grid-cols-${gridColumns}`, [gridColumns])
 
   if (isLoading) {
     return (
@@ -239,13 +268,12 @@ export const FileGrid: React.FC<FileGridProps> = ({
         overflow-auto
         ${isDarkMode ? 'bg-gray-900' : 'bg-white'}
       `}
-      
       tabIndex={0}
       ref={gridRef}
     >
       {displayItems.map((item, index) => (
         <FileItem
-          key={`${('type' in item ? item.type : 'file')}-${item.path}-${index}`}
+          key={`${'type' in item ? item.type : 'file'}-${item.path}-${index}`}
           data-index={index}
           fileName={item.name}
           isDirectory={'type' in item && item.type === 'directory'}
