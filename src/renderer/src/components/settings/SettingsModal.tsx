@@ -84,7 +84,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         <Dialog.Content
           className={`
             fixed top-[50%] left-[50%] translate-x-[-50%] translate-y-[-50%]
-            w-[800px] h-[600px]
+            w-[90vw] max-w-[800px] h-[90vh] max-h-[600px]
             rounded-lg flex overflow-hidden
             data-[state=open]:animate-contentShow
             focus:outline-none
@@ -97,7 +97,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             className="flex w-full h-full"
           >
             <div
-              className={`w-64 flex-shrink-0 border-r flex flex-col ${
+              className={`w-48 md:w-64 flex-shrink-0 border-r flex flex-col ${
                 isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
               }`}
             >
