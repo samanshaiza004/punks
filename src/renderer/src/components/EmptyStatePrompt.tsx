@@ -14,8 +14,8 @@ const EmptyStatePrompt: React.FC<EmptyStatePromptProps> = ({ }) => {
   const handleScan = async () => {
     const directory = await window.api.openDirectoryPicker()
     if (directory) {
-      const success = await handleDirectorySelection(directory)
-      console.log('Directory selection result:', success)
+      await handleDirectorySelection(directory)
+
     }
   }
 
