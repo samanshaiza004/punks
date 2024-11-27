@@ -3,6 +3,7 @@ import WaveSurfer from 'wavesurfer.js'
 import { useAudio } from '../../context/AudioContextProvider'
 import { useTheme } from '@renderer/context/ThemeContext'
 import { Play, Pause } from '@phosphor-icons/react'
+import * as Slider from '@radix-ui/react-slider'
 
 interface AudioPlayerProps {
   currentAudio: string | null
@@ -56,24 +57,32 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
         </div>
 
         <div className="flex items-center space-x-2">
-          <input
-            className={`w-24 h-2 rounded-full appearance-none cursor-pointer transition-colors ${
-              isDarkMode ? 'bg-gray-600' : 'bg-gray-200'
-            }`}
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={volume}
-            onChange={(e) => setVolume(Number(e.target.value))}
-            style={{
-              background: `linear-gradient(to right, 
-              ${isDarkMode ? '#60A5FA' : '#3B82F6'} 0%, 
-              ${isDarkMode ? '#60A5FA' : '#3B82F6'} ${volume * 100}%, 
-              ${isDarkMode ? '#4B5563' : '#D1D5DB'} ${volume * 100}%, 
-              ${isDarkMode ? '#4B5563' : '#D1D5DB'} 100%)`
-            }}
-          />
+          <Slider.Root
+            className="relative flex items-center select-none touch-none w-24 h-5"
+            value={[volume]}
+            onValueChange={(value) => setVolume(value[0])}
+            max={1}
+            step={0.01}
+            aria-label="Volume"
+          >
+            <Slider.Track
+              className={`relative grow rounded-full h-2 ${
+                isDarkMode ? 'bg-gray-600' : 'bg-gray-200'
+              }`}
+            >
+              <Slider.Range
+                className={`absolute h-full rounded-full ${
+                  isDarkMode ? 'bg-blue-400' : 'bg-blue-500'
+                }`}
+              />
+            </Slider.Track>
+            <Slider.Thumb
+              className={`block w-4 h-4 rounded-full ${
+                isDarkMode ? 'bg-blue-400' : 'bg-blue-500'
+              } hover:scale-110 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-transform`}
+            />
+          </Slider.Root>
+          <span className="text-sm max-w-[3ch] text-gray-500">{Math.round(volume * 100)}%</span>
         </div>
       </div>
       {/* Waveform Section */}
