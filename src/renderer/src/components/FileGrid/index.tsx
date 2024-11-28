@@ -48,7 +48,7 @@ export const FileGrid: React.FC<FileGridProps> = ({
     percentComplete: number
   } | null>(null)
 
-  const [gridColumns, setGridColumns] = useState(3) // Default to 3 columns
+  const [gridColumns, setGridColumns] = useState(3)
   const gridRef = useRef<HTMLDivElement>(null)
 
   const filteredFiles = useMemo(() => {
@@ -77,23 +77,21 @@ export const FileGrid: React.FC<FileGridProps> = ({
     return [...directories, ...filteredFiles]
   }, [directories, filteredFiles, isSearching, searchResults])
 
-  // Load directory contents
   const loadDirectoryContents = async () => {
     try {
       setIsLoading(true)
       const contents = await window.api.getDirectoryContents(directoryPath)
 
-      // Transform directories to match DirectoryNode type
       const transformedDirectories = contents.directories.map((dir, index) => ({
         ...dir,
-        id: index, // Generate a unique ID based on index
-        parent_path: directoryPath.join('/') || null, // Use current directory path as parent_path
-        last_modified: dir.lastModified // Ensure last_modified is used
+        id: index,
+        parent_path: directoryPath.join('/') || null,
+        last_modified: dir.lastModified
       }))
 
       setDirectories(transformedDirectories)
       setFiles(contents.files)
-      setSelectedIndex(0) // Reset selection when directory changes
+      setSelectedIndex(0)
     } catch (error) {
       showToast('Error loading directory contents: ' + error, 'error')
     } finally {
@@ -150,21 +148,18 @@ export const FileGrid: React.FC<FileGridProps> = ({
 
     calculateColumns()
 
-    // Add resize listener
     window.addEventListener('resize', calculateColumns)
 
-    // Cleanup listener
     return () => {
       window.removeEventListener('resize', calculateColumns)
     }
   }, [])
 
-  // Load contents when directory changes
+  
   useEffect(() => {
     loadDirectoryContents()
   }, [directoryPath])
 
-  // Handle keyboard navigation
   const handleNavigate = useCallback(
     (direction: 'up' | 'down' | 'left' | 'right') => {
       const maxIndex = displayItems.length - 1
@@ -173,30 +168,49 @@ export const FileGrid: React.FC<FileGridProps> = ({
       let newIndex = selectedIndex
       switch (direction) {
         case 'up':
-          newIndex = Math.max(0, selectedIndex - GRID_COLUMNS)
+          newIndex = selectedIndex >= gridColumns ? selectedIndex - gridColumns : selectedIndex
           break
         case 'down':
-          newIndex = Math.min(maxIndex, selectedIndex + GRID_COLUMNS)
+          newIndex = selectedIndex + gridColumns <= maxIndex ? selectedIndex + gridColumns : selectedIndex
           break
         case 'left':
-          newIndex = Math.max(0, selectedIndex - 1)
+          newIndex = selectedIndex > 0 ? selectedIndex - 1 : selectedIndex
           break
         case 'right':
-          newIndex = Math.min(maxIndex, selectedIndex + 1)
+          newIndex = selectedIndex < maxIndex ? selectedIndex + 1 : selectedIndex
           break
       }
 
       if (newIndex !== selectedIndex) {
         setSelectedIndex(newIndex)
-        // Scroll into view
-        const element = document.querySelector(`[data-index="${newIndex}"]`)
-        element?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+        
+        // Enhanced scrolling behavior
+        requestAnimationFrame(() => {
+          const element = document.querySelector(`[data-index="${newIndex}"]`)
+          if (!element) return
+
+          const container = gridRef.current
+          if (!container) return
+
+          const elementRect = element.getBoundingClientRect()
+          const containerRect = container.getBoundingClientRect()
+
+          // Calculate if element is out of view
+          const isAbove = elementRect.top < containerRect.top + 40 // Add padding for better visibility
+          const isBelow = elementRect.bottom > containerRect.bottom - 40
+
+          if (isAbove || isBelow) {
+            element.scrollIntoView({
+              block: isAbove ? 'start' : 'end',
+              behavior: 'smooth'
+            })
+          }
+        })
       }
     },
-    [selectedIndex, displayItems.length]
+    [selectedIndex, displayItems.length, gridColumns]
   )
 
-  // Keyboard shortcut handlers
   const handlers = useMemo<KeyHandlerMap>(
     () => ({
       NAVIGATE_UP: () => handleNavigate('up'),
@@ -257,19 +271,17 @@ export const FileGrid: React.FC<FileGridProps> = ({
 
   return (
     <div
+      ref={gridRef}
       className={`
         grid
-        gap-1
         p-2
         auto-rows-[35px]
         ${gridColumnsClass}
         h-full
         w-full
-        overflow-auto
-        ${isDarkMode ? 'bg-gray-900' : 'bg-white'}
+        overflow-y-auto
       `}
       tabIndex={0}
-      ref={gridRef}
     >
       {displayItems.map((item, index) => (
         <FileItem
