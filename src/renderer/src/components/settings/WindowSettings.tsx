@@ -19,9 +19,9 @@ const WindowSettings: React.FC<WindowSettingsProps> = ({
   return (
     <div className="space-y-8">
       <section>
-        <h3 className="text-lg font-semibold mb-4">Window Behavior</h3>
-        <div className="space-y-4">
-          <label className="flex items-center gap-3 cursor-pointer">
+        <h3 className="text-lg font-semibold mb-1">Window Behavior</h3>
+        <div className="space-y-2">
+          <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
               checked={alwaysOnTop}
@@ -34,12 +34,12 @@ const WindowSettings: React.FC<WindowSettingsProps> = ({
       </section>
 
       <section>
-        <h3 className="text-lg font-semibold mb-4">Default Directory</h3>
+        <h3 className="text-lg font-semibold mb-1">Default Directory</h3>
         <DirectoryPicker onDirectorySelected={onDirectorySelected} />
       </section>
 
       <section>
-        <h3 className="text-lg font-semibold mb-4">Theme</h3>
+        <h3 className="text-lg font-semibold mb-1">Theme</h3>
         <Button variant="primary" onClick={toggleDarkMode}>
           {isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
         </Button>

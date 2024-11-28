@@ -63,6 +63,20 @@ ipcMain.handle('get-always-on-top', () => {
   return store.get('alwaysOnTop', false)
 })
 
+ipcMain.handle('save-auto-play', async (_, value: boolean) => {
+  try {
+    store.set('autoPlay', value)
+    return true
+  } catch (error) {
+    console.error('Error saving auto-play setting:', error)
+    return false
+  }
+})
+
+ipcMain.handle('get-auto-play', () => {
+  return store.get('autoPlay', true) // Default to true
+})
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'sample',

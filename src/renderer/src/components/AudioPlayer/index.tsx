@@ -1,9 +1,10 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 import { useAudio } from '../../context/AudioContextProvider'
 import { useTheme } from '@renderer/context/ThemeContext'
-import { Play, Pause } from '@phosphor-icons/react'
+import { Play, Pause, SpeakerHigh } from '@phosphor-icons/react'
 import * as Slider from '@radix-ui/react-slider'
+import * as Switch from '@radix-ui/react-switch'
 
 interface AudioPlayerProps {
   currentAudio: string | null
@@ -24,6 +25,7 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
     formatTime
   } = useAudio()
   const { isDarkMode } = useTheme()
+  const [autoPlay, setAutoPlay] = useState(false)
 
   useEffect(() => {
     if (!currentAudio) return
@@ -32,6 +34,12 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
   useEffect(() => {
     waveSurferRef.current?.setVolume(volume)
   }, [volume])
+
+  useEffect(() => {
+    if (autoPlay && currentAudio) {
+      togglePlayPause()
+    }
+  }, [autoPlay, currentAudio, togglePlayPause])
 
   return (
     <div
@@ -56,33 +64,64 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ currentAudio }) => {
           </div>
         </div>
 
-        <div className="flex items-center space-x-2">
-          <Slider.Root
-            className="relative flex items-center select-none touch-none w-24 h-5"
-            value={[volume]}
-            onValueChange={(value) => setVolume(value[0])}
-            max={1}
-            step={0.01}
-            aria-label="Volume"
-          >
-            <Slider.Track
-              className={`relative grow rounded-full h-2 ${
-                isDarkMode ? 'bg-gray-600' : 'bg-gray-200'
+        <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-2">
+            <SpeakerHigh className="w-4 h-4 text-gray-500" />
+            <Slider.Root
+              className="relative flex items-center select-none touch-none w-24 h-5"
+              value={[volume]}
+              onValueChange={(value) => setVolume(value[0])}
+              max={1}
+              step={0.01}
+              aria-label="Volume"
+            >
+              <Slider.Track
+                className={`relative grow rounded-full h-2 ${
+                  isDarkMode ? 'bg-gray-600' : 'bg-gray-200'
+                }`}
+              >
+                <Slider.Range
+                  className={`absolute h-full rounded-full ${
+                    isDarkMode ? 'bg-blue-400' : 'bg-blue-500'
+                  }`}
+                />
+              </Slider.Track>
+              <Slider.Thumb
+                className={`block w-4 h-4 rounded-full ${
+                  isDarkMode ? 'bg-blue-400' : 'bg-blue-500'
+                } hover:scale-110 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-transform`}
+              />
+            </Slider.Root>
+          </div>
+          
+          <div className="flex items-center space-x-2">
+            <label
+              className="text-sm text-gray-500"
+              htmlFor="auto-play-switch"
+            >
+              Auto-play
+            </label>
+            <Switch.Root
+              id="auto-play-switch"
+              checked={autoPlay}
+              onCheckedChange={setAutoPlay}
+              className={`w-9 h-5 rounded-full transition-colors ${
+                autoPlay
+                  ? isDarkMode
+                    ? 'bg-blue-400'
+                    : 'bg-blue-500'
+                  : isDarkMode
+                  ? 'bg-gray-600'
+                  : 'bg-gray-200'
               }`}
             >
-              <Slider.Range
-                className={`absolute h-full rounded-full ${
-                  isDarkMode ? 'bg-blue-400' : 'bg-blue-500'
-                }`}
+              <Switch.Thumb
+                className={`block w-4 h-4 rounded-full transition-transform translate-x-0.5 ${
+                  autoPlay ? 'translate-x-[18px]' : ''
+                } ${isDarkMode ? 'bg-white' : 'bg-white'}`}
               />
-            </Slider.Track>
-            <Slider.Thumb
-              className={`block w-4 h-4 rounded-full ${
-                isDarkMode ? 'bg-blue-400' : 'bg-blue-500'
-              } hover:scale-110 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-transform`}
-            />
-          </Slider.Root>
-          <span className="text-sm max-w-[3ch] text-gray-500">{Math.round(volume * 100)}%</span>
+            </Switch.Root>
+          </div>
         </div>
       </div>
       {/* Waveform Section */}

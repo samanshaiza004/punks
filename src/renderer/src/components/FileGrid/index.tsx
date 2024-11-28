@@ -17,6 +17,8 @@ interface FileGridProps {
   isSearching?: boolean
   searchResults?: FileNode[]
   fileFilters?: FileFilterOptions
+  autoPlay?: boolean
+  playAudio?: (path: string) => void
 }
 
 const COLUMN_WIDTHS = [
@@ -26,14 +28,15 @@ const COLUMN_WIDTHS = [
   { maxWidth: Infinity, columns: 4 }
 ]
 
-const GRID_COLUMNS = 3
 export const FileGrid: React.FC<FileGridProps> = ({
   directoryPath,
   onDirectoryClick,
   onFileClick,
   isSearching,
   searchResults,
-  fileFilters
+  fileFilters,
+  autoPlay,
+  playAudio
 }) => {
   const { isDarkMode } = useTheme()
   const { showToast } = useToast()
@@ -99,7 +102,6 @@ export const FileGrid: React.FC<FileGridProps> = ({
     }
   }
 
-  // Set up event listeners for file changes
   useEffect(() => {
     const handleFileAdded = (file: AudioFile) => {
       const fileNode: FileNode = {
@@ -155,7 +157,6 @@ export const FileGrid: React.FC<FileGridProps> = ({
     }
   }, [])
 
-  
   useEffect(() => {
     loadDirectoryContents()
   }, [directoryPath])
@@ -184,6 +185,15 @@ export const FileGrid: React.FC<FileGridProps> = ({
       if (newIndex !== selectedIndex) {
         setSelectedIndex(newIndex)
         
+        // Auto-play the selected audio file if it's an audio file and auto-play is enabled
+        const selectedItem = displayItems[newIndex]
+        if (selectedItem && 'type' in selectedItem && selectedItem.type === 'file' && autoPlay) {
+          const fileExtension = selectedItem.path.split('.').pop()?.toLowerCase()
+          if (fileExtension && ['mp3', 'wav', 'ogg', 'aac', 'm4a'].includes(fileExtension)) {
+            playAudio && playAudio(selectedItem.path)
+          }
+        }
+        
         // Enhanced scrolling behavior
         requestAnimationFrame(() => {
           const element = document.querySelector(`[data-index="${newIndex}"]`)
@@ -195,8 +205,7 @@ export const FileGrid: React.FC<FileGridProps> = ({
           const elementRect = element.getBoundingClientRect()
           const containerRect = container.getBoundingClientRect()
 
-          // Calculate if element is out of view
-          const isAbove = elementRect.top < containerRect.top + 40 // Add padding for better visibility
+          const isAbove = elementRect.top < containerRect.top + 40
           const isBelow = elementRect.bottom > containerRect.bottom - 40
 
           if (isAbove || isBelow) {
@@ -208,7 +217,7 @@ export const FileGrid: React.FC<FileGridProps> = ({
         })
       }
     },
-    [selectedIndex, displayItems.length, gridColumns]
+    [selectedIndex, displayItems.length, gridColumns, autoPlay, playAudio]
   )
 
   const handlers = useMemo<KeyHandlerMap>(
@@ -275,7 +284,7 @@ export const FileGrid: React.FC<FileGridProps> = ({
       className={`
         grid
         p-2
-        auto-rows-[35px]
+        auto-rows-[30px]
         ${gridColumnsClass}
         h-full
         w-full

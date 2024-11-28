@@ -48,7 +48,7 @@ const FileFilterButtons: React.FC<FileFilterProps> = ({ filters, onFilterChange 
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <Button className="gap-2">
+        <Button className="gap-2 flex">
           <Funnel className="h-4 w-4" />
           <span>Filter</span>
           {(activeFiltersCount > 0 || filters.all) && (

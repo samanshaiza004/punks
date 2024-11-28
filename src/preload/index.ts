@@ -212,6 +212,8 @@ export const api = {
   setAlwaysOnTop: (value: boolean): Promise<boolean> =>
     ipcRenderer.invoke('set-always-on-top', value),
   getAlwaysOnTop: (): Promise<boolean> => ipcRenderer.invoke('get-always-on-top'),
+  saveAutoPlay: (value: boolean): Promise<boolean> => ipcRenderer.invoke('save-auto-play', value),
+  getAutoPlay: (): Promise<boolean> => ipcRenderer.invoke('get-auto-play'),
   isAbsolute: (pathString: string): boolean => {
     return path.isAbsolute(pathString)
   },
@@ -309,17 +311,16 @@ if (process.contextIsolated) {
     contextBridge.exposeInMainWorld('electron', electronAPI)
     contextBridge.exposeInMainWorld('api', {
       ...api,
-      onScanProgress: (callback: (progress: { total: number; processed: number; percentComplete: number }) => void) => {
-        ipcRenderer.on('scan-progress', (_event, progress) => callback(progress))
-      },
-      onScanComplete: (callback: () => void) => {
-        ipcRenderer.on('scan-complete', () => callback())
-      },
-      onScanError: (callback: (error: string) => void) => {
-        ipcRenderer.on('scan-error', (_event, error) => callback(error))
-      },
+      getDirectoryContents: api.getDirectoryContents,
+      getParentDirectory: api.getParentDirectory,
+      getTagStats: api.getTagStats,
+      scanDirectory: api.scanDirectory,
       verifyDirectoryAccess: api.verifyDirectoryAccess,
-      scanDirectory: api.scanDirectory
+      saveAutoPlay: api.saveAutoPlay,
+      getAutoPlay: api.getAutoPlay,
+      onScanProgress: api.onScanProgress,
+      onScanComplete: api.onScanComplete,
+      onScanError: api.onScanError
     })
   } catch (error) {
     console.error('Error setting up context bridge:', error)

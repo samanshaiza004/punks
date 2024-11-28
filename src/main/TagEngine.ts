@@ -73,10 +73,7 @@ const CREATE_TABLES_SQL = `
   CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
 `
 
-
-
 class TagEngine extends EventEmitter<TagEngineEvents> {
-  
   removeTag(): any {
     throw new Error('Method not implemented.')
   }
@@ -297,7 +294,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
       const walk = async (dir: string) => {
         const entries = await fs.promises.readdir(dir, { withFileTypes: true })
         const stats = await fs.promises.stat(dir)
-        
+
         // Create and emit directory node
         const directoryNode: DirectoryNode = {
           id: Date.now(), // Temporary ID until DB insert
@@ -307,19 +304,24 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
           type: 'directory',
           parent_path: dir === directoryPath ? null : path.dirname(dir)
         }
-        
+
         // Insert directory into database
         await this.runQuery(
           'INSERT OR IGNORE INTO directories (path, parent_path, name, last_modified) VALUES (?, ?, ?, ?)',
-          [directoryNode.path, directoryNode.parent_path, directoryNode.name, directoryNode.last_modified]
+          [
+            directoryNode.path,
+            directoryNode.parent_path,
+            directoryNode.name,
+            directoryNode.last_modified
+          ]
         )
-        
+
         // Emit progress with directory information
         this.emit(TagEngineEventType.SCAN_PROGRESS, {
           processed: processedFiles,
           total: totalFiles,
           percentComplete: totalFiles ? (processedFiles / totalFiles) * 100 : 0,
-          type: 'directory' ,
+          type: 'directory',
           path: dir
         })
 
@@ -351,7 +353,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
             if (fileNode) {
               batchResults.push(fileNode)
               processedFiles++
-              
+
               // Emit progress with file information
               this.emit(TagEngineEventType.SCAN_PROGRESS, {
                 processed: processedFiles,
@@ -368,7 +370,7 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
         }
 
         // Give the event loop a chance to process other events
-        await new Promise(resolve => setTimeout(resolve, 0))
+        await new Promise((resolve) => setTimeout(resolve, 0))
       }
 
       this.emit(TagEngineEventType.SCAN_COMPLETE, {
@@ -396,7 +398,6 @@ class TagEngine extends EventEmitter<TagEngineEvents> {
         last_modified: stats.mtimeMs,
         tags: []
       }
-
 
       await this.addFile(filePath)
       return file

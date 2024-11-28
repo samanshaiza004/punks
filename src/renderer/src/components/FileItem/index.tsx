@@ -82,6 +82,7 @@ export const FileItem: React.FC<FileItemProps> = ({
             truncate
             transition-colors
             duration-100
+            text-sm
             ${
               isSelected
                 ? 'bg-blue-500 text-white'
@@ -97,7 +98,7 @@ export const FileItem: React.FC<FileItemProps> = ({
           onDragStart={handleDragStart}
         >
           <div
-            className={`flex-shrink-0 ${isSelected ? 'text-white' : isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}
+            className={`flex-shrink-0  ${isSelected ? 'text-white' : isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}
           >
             <FileIcons fileName={fileName} isDirectory={isDirectory} />
           </div>

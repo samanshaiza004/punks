@@ -15,6 +15,8 @@ interface AudioContextProps {
   isPlaying: boolean
   currentTime: number
   duration: number
+  autoPlay: boolean
+  setAutoPlay: (enabled: boolean) => void
 }
 
 interface AudioProviderProps {
@@ -29,6 +31,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [autoPlay, setAutoPlay] = useState(true)
 
   const waveSurferRef = useRef<WaveSurfer | null>(null)
   const { isDarkMode } = useTheme()
@@ -70,6 +73,28 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
   useEffect(() => {
     waveSurferRef.current?.setVolume(volume)
   }, [volume])
+
+  // Load auto-play preference from storage
+  useEffect(() => {
+    const loadAutoPlayPreference = async () => {
+      try {
+        const savedAutoPlay = await window.api.getAutoPlay()
+        if (savedAutoPlay !== undefined) {
+          setAutoPlay(savedAutoPlay)
+        }
+      } catch (error) {
+        console.error('Failed to load auto-play preference:', error)
+      }
+    }
+    loadAutoPlayPreference()
+  }, [])
+
+  // Save auto-play preference when it changes
+  useEffect(() => {
+    window.api.saveAutoPlay(autoPlay).catch((error) => {
+      console.error('Failed to save auto-play preference:', error)
+    })
+  }, [autoPlay])
 
   const playAudio = (filePath: string) => {
     setCurrentAudio(filePath)
@@ -134,7 +159,9 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
         formatTime,
         isPlaying,
         currentTime,
-        duration
+        duration,
+        autoPlay,
+        setAutoPlay
       }}
     >
       {children}
