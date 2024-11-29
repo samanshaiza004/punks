@@ -137,30 +137,32 @@ export const FileGrid: React.FC<FileGridProps> = ({
     }
   }, [])
 
-  useEffect(() => {
-    let mounted = true
-    const loadFiles = async () => {
-      if (!directoryPath.length || !directoryPath[0]) return
+  const currentDirectoryPath = directoryPath[0] || ''
 
-      setIsLoading(true)
-      try {
-        const allFiles = await loadFilesRecursively(directoryPath[0])
-        if (mounted) {
-          setFiles(allFiles)
-        }
-      } catch (error) {
-        console.error('Error loading files:', error)
-      }
+useEffect(() => {
+  let mounted = true
+  const loadFiles = async () => {
+    if (!currentDirectoryPath) return
+
+    setIsLoading(true)
+    try {
+      const allFiles = await loadFilesRecursively(currentDirectoryPath)
       if (mounted) {
-        setIsLoading(false)
+        setFiles(allFiles)
       }
+    } catch (error) {
+      console.error('Error loading files:', error)
     }
+    if (mounted) {
+      setIsLoading(false)
+    }
+  }
 
-    loadFiles()
-    return () => {
-      mounted = false
-    }
-  }, [directoryPath, loadFilesRecursively])
+  loadFiles()
+  return () => {
+    mounted = false
+  }
+}, [currentDirectoryPath, loadFilesRecursively])
 
   const handleFileAdded = (file: AudioFile) => {
     const fileNode: FileNode = {

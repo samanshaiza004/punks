@@ -81,6 +81,7 @@ export const FolderTree: React.FC = () => {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [rootPath, setRootPath] = useState<string | null>(null);
 
+  
   const buildFolderStructure = useCallback(async (path: string): Promise<FolderNode | null> => {
     try {
       const contents = await window.api.getDirectoryContents([path]);
@@ -88,20 +89,47 @@ export const FolderTree: React.FC = () => {
       
       const children = await Promise.all(
         directories.map(async (dir) => {
-          const childStructure = await buildFolderStructure(dir.path);
-          return childStructure;
+          // Important change: Don't recursively build structure unless folder is expanded
+          return {
+            name: dir.name,
+            path: dir.path,
+            children: [], // Initially empty
+            isExpanded: expandedFolders.has(dir.path)
+          };
         })
       );
 
       return {
         name: path.split('/').pop() || path,
         path: path,
-        children: children.filter((child): child is FolderNode => child !== null),
+        children: children,
         isExpanded: expandedFolders.has(path)
       };
     } catch (error) {
       console.error('Error building folder structure:', error);
       return null;
+    }
+  }, [expandedFolders]);
+
+  const loadChildrenForFolder = useCallback(async (folder: FolderNode): Promise<FolderNode> => {
+    try {
+      const contents = await window.api.getDirectoryContents([folder.path]);
+      const directories = contents.directories.sort((a, b) => a.name.localeCompare(b.name));
+      
+      const children = directories.map(dir => ({
+        name: dir.name,
+        path: dir.path,
+        children: [], // Start with empty children
+        isExpanded: expandedFolders.has(dir.path)
+      }));
+
+      return {
+        ...folder,
+        children: children
+      };
+    } catch (error) {
+      console.error('Error loading children:', error);
+      return folder;
     }
   }, [expandedFolders]);
 
@@ -118,6 +146,44 @@ export const FolderTree: React.FC = () => {
   }, [activeTab?.directoryPath[0], buildFolderStructure, rootPath]);
 
   const handleToggle = useCallback((path: string) => {
+    setFolderStructure(prev => {
+      if (!prev) return prev;
+
+      const updateFolderChildren = (folder: FolderNode): FolderNode => {
+        if (folder.path === path) {
+          // If this is the folder being toggled
+          const newIsExpanded = !folder.isExpanded;
+          
+          if (newIsExpanded) {
+            // If we're expanding, load children asynchronously
+            loadChildrenForFolder(folder).then(updatedFolder => {
+              setFolderStructure(currentStructure => 
+                currentStructure ? updateFolderInTree(currentStructure, {
+                  ...updatedFolder,
+                  isExpanded: true
+                }) : currentStructure
+              );
+            });
+          }
+          
+          // Return immediately with just the expansion state changed
+          return {
+            ...folder,
+            isExpanded: newIsExpanded
+          };
+        }
+
+        // Recursively update children
+        return {
+          ...folder,
+          children: folder.children.map(updateFolderChildren)
+        };
+      };
+
+      return updateFolderInTree(prev, updateFolderChildren(prev));
+    });
+
+    // Update expanded folders set
     setExpandedFolders(prev => {
       const next = new Set(prev);
       if (next.has(path)) {
@@ -127,7 +193,29 @@ export const FolderTree: React.FC = () => {
       }
       return next;
     });
-  }, []);
+  }, [loadChildrenForFolder]);
+
+  const updateFolderInTree = (
+    tree: FolderNode, 
+    updatedFolder: FolderNode | ((folder: FolderNode) => FolderNode)
+  ): FolderNode => {
+    const updateFolder = (folder: FolderNode): FolderNode => {
+      if (folder.path === (typeof updatedFolder === 'function' ? 
+        updatedFolder(folder).path : 
+        updatedFolder.path)) {
+        return typeof updatedFolder === 'function' 
+          ? updatedFolder(folder) 
+          : updatedFolder;
+      }
+
+      return {
+        ...folder,
+        children: folder.children.map(updateFolder)
+      };
+    };
+
+    return updateFolder(tree);
+  };
 
   const handleSelect = useCallback((path: string) => {
     if (activeTab) {
