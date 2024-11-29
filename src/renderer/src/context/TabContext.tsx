@@ -1,6 +1,8 @@
-import { Tab } from '@renderer/types/tabs'
+
 import { v4 as uuidv4 } from 'uuid'
 import { createContext, useContext, useReducer } from 'react'
+import { FileNode } from '../../../types/index'
+import { FileFilterOptions } from '@renderer/components/FileFilters'
 
 interface TabState {
   tabs: Tab[]
@@ -23,6 +25,15 @@ type TabAction =
   | { type: 'SET_ACTIVE_TAB'; payload: string }
   | { type: 'SET_LAYOUT'; payload: 'tabs' | 'tiles' }
   | { type: 'UPDATE_TILE_CONFIG'; payload: TileConfig[] }
+
+interface Tab {
+  id: string
+  directoryPath: string[]
+  searchQuery: string
+  searchResults: FileNode[]
+  fileFilters?: FileFilterOptions
+  selectedFolder: string | null
+}
 
 const tabReducer = (state: TabState, action: TabAction): TabState => {
   switch (action.type) {

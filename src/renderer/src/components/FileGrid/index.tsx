@@ -21,6 +21,12 @@ interface FileGridProps {
   playAudio?: (path: string) => void
 }
 
+const isAudioFile = (filePath: string): boolean => {
+  const audioExtensions = ['mp3', 'wav', 'ogg', 'aac', 'm4a']
+  const fileExtension = path.extname(filePath).toLowerCase().slice(1)
+  return audioExtensions.includes(fileExtension)
+}
+
 const COLUMN_WIDTHS = [
   { maxWidth: 600, columns: 1 },
   { maxWidth: 900, columns: 2 },
@@ -35,7 +41,7 @@ export const FileGrid: React.FC<FileGridProps> = ({
   isSearching,
   searchResults,
   fileFilters,
-  autoPlay,
+  autoPlay = false,
   playAudio
 }) => {
   const { isDarkMode } = useTheme()
@@ -73,6 +79,39 @@ export const FileGrid: React.FC<FileGridProps> = ({
       })
     })
   }, [files, fileFilters])
+
+  const ensureSelectedItemInView = useCallback((index: number) => {
+    requestAnimationFrame(() => {
+      const container = gridRef.current
+      if (!container) return
+
+      const element = container.querySelector(`[data-index="${index}"]`) as HTMLElement
+      if (!element) return
+
+      const containerRect = container.getBoundingClientRect()
+      const elementRect = element.getBoundingClientRect()
+
+      // Calculate scroll positions
+      const scrollTop = container.scrollTop
+      const containerTop = containerRect.top
+      const containerBottom = containerRect.bottom
+      const elementTop = elementRect.top
+      const elementBottom = elementRect.bottom
+
+      // Determine if the element is fully visible
+      const isAboveContainer = elementTop < containerTop
+      const isBelowContainer = elementBottom > containerBottom
+
+      if (isAboveContainer) {
+        // Scroll up to show the element
+        container.scrollTop = scrollTop + (elementTop - containerTop)
+      } else if (isBelowContainer) {
+        // Scroll down to show the element
+        container.scrollTop = scrollTop + (elementBottom - containerBottom)
+      }
+    })
+  }, [])
+
   const displayItems = useMemo(() => {
     if (isSearching && searchResults) {
       return searchResults
@@ -80,69 +119,102 @@ export const FileGrid: React.FC<FileGridProps> = ({
     return [...directories, ...filteredFiles]
   }, [directories, filteredFiles, isSearching, searchResults])
 
-  const loadDirectoryContents = async () => {
+  const loadFilesRecursively = useCallback(async (dirPath: string): Promise<FileNode[]> => {
     try {
-      setIsLoading(true)
-      const contents = await window.api.getDirectoryContents(directoryPath)
+      const contents = await window.api.getDirectoryContents([dirPath])
+      let allFiles: FileNode[] = contents.files
 
-      const transformedDirectories = contents.directories.map((dir, index) => ({
-        ...dir,
-        id: index,
-        parent_path: directoryPath.join('/') || null,
-        last_modified: dir.lastModified
-      }))
+      // Recursively get files from subdirectories
+      for (const dir of contents.directories) {
+        const subFiles = await loadFilesRecursively(dir.path)
+        allFiles = [...allFiles, ...subFiles]
+      }
 
-      setDirectories(transformedDirectories)
-      setFiles(contents.files)
-      setSelectedIndex(0)
+      return allFiles
     } catch (error) {
-      showToast('Error loading directory contents: ' + error, 'error')
-    } finally {
+      console.error('Error loading files recursively:', error)
+      return []
+    }
+  }, [])
+
+  useEffect(() => {
+    let mounted = true
+    const loadFiles = async () => {
+      if (!directoryPath.length || !directoryPath[0]) return
+
+      setIsLoading(true)
+      try {
+        const allFiles = await loadFilesRecursively(directoryPath[0])
+        if (mounted) {
+          setFiles(allFiles)
+        }
+      } catch (error) {
+        console.error('Error loading files:', error)
+      }
+      if (mounted) {
+        setIsLoading(false)
+      }
+    }
+
+    loadFiles()
+    return () => {
+      mounted = false
+    }
+  }, [directoryPath, loadFilesRecursively])
+
+  const handleFileAdded = (file: AudioFile) => {
+    const fileNode: FileNode = {
+      id: file.id,
+      path: file.path,
+      name: path.basename(file.path),
+      type: 'file' as const,
+      directory_path: path.dirname(file.path),
+      hash: file.hash,
+      tags: file.tags,
+      last_modified: file.last_modified
+    }
+    setFiles((prev) => [...prev, fileNode])
+  }
+
+  const handleFileRemoved = (path: string) => {
+    setFiles((prev) => prev.filter((f) => f.path !== path))
+  }
+
+  const handleScanProgress = (progress: typeof scanProgress) => {
+    setScanProgress(progress)
+  }
+
+  const handleScanComplete = () => {
+    setIsScanning(false)
+    setScanProgress(null)
+    setIsLoading(true)
+    const loadFiles = async () => {
+      try {
+        if (directoryPath.length > 0) {
+          const allFiles = await loadFilesRecursively(directoryPath[0])
+          setFiles(allFiles)
+        }
+      } catch (error) {
+        console.error('Error loading files:', error)
+      }
       setIsLoading(false)
     }
+    loadFiles()
+    showToast('Directory scan complete!', 'success')
+  }
+
+  const calculateColumns = () => {
+    if (!gridRef.current) return
+
+    const gridWidth = gridRef.current.clientWidth
+    const columnConfig =
+      COLUMN_WIDTHS.find((config) => gridWidth <= config.maxWidth) ||
+      COLUMN_WIDTHS[COLUMN_WIDTHS.length - 1]
+
+    setGridColumns(columnConfig.columns)
   }
 
   useEffect(() => {
-    const handleFileAdded = (file: AudioFile) => {
-      const fileNode: FileNode = {
-        id: file.id,
-        path: file.path,
-        name: path.basename(file.path),
-        type: 'file' as const,
-        directory_path: path.dirname(file.path),
-        hash: file.hash,
-        tags: file.tags,
-        last_modified: file.last_modified
-      }
-      setFiles((prev) => [...prev, fileNode])
-    }
-
-    const handleFileRemoved = (path: string) => {
-      setFiles((prev) => prev.filter((f) => f.path !== path))
-    }
-
-    const handleScanProgress = (progress: typeof scanProgress) => {
-      setScanProgress(progress)
-    }
-
-    const handleScanComplete = () => {
-      setIsScanning(false)
-      setScanProgress(null)
-      loadDirectoryContents()
-      showToast('Directory scan complete!', 'success')
-    }
-
-    const calculateColumns = () => {
-      if (!gridRef.current) return
-
-      const gridWidth = gridRef.current.clientWidth
-      const columnConfig =
-        COLUMN_WIDTHS.find((config) => gridWidth <= config.maxWidth) ||
-        COLUMN_WIDTHS[COLUMN_WIDTHS.length - 1]
-
-      setGridColumns(columnConfig.columns)
-    }
-
     window.api.onFileAdded(handleFileAdded)
     window.api.onFileRemoved(handleFileRemoved)
     window.api.onScanProgress(handleScanProgress)
@@ -156,10 +228,6 @@ export const FileGrid: React.FC<FileGridProps> = ({
       window.removeEventListener('resize', calculateColumns)
     }
   }, [])
-
-  useEffect(() => {
-    loadDirectoryContents()
-  }, [directoryPath])
 
   const handleNavigate = useCallback(
     (direction: 'up' | 'down' | 'left' | 'right') => {
@@ -187,38 +255,28 @@ export const FileGrid: React.FC<FileGridProps> = ({
         
         // Auto-play the selected audio file if it's an audio file and auto-play is enabled
         const selectedItem = displayItems[newIndex]
-        if (selectedItem && 'type' in selectedItem && selectedItem.type === 'file' && autoPlay) {
-          const fileExtension = selectedItem.path.split('.').pop()?.toLowerCase()
-          if (fileExtension && ['mp3', 'wav', 'ogg', 'aac', 'm4a'].includes(fileExtension)) {
-            playAudio && playAudio(selectedItem.path)
-          }
+        if (
+          selectedItem && 
+          'type' in selectedItem && 
+          selectedItem.type === 'file' && 
+          autoPlay && 
+          isAudioFile(selectedItem.path) && 
+          playAudio
+        ) {
+          onFileClick(selectedItem)
         }
-        
-        // Enhanced scrolling behavior
-        requestAnimationFrame(() => {
-          const element = document.querySelector(`[data-index="${newIndex}"]`)
-          if (!element) return
 
-          const container = gridRef.current
-          if (!container) return
-
-          const elementRect = element.getBoundingClientRect()
-          const containerRect = container.getBoundingClientRect()
-
-          const isAbove = elementRect.top < containerRect.top + 40
-          const isBelow = elementRect.bottom > containerRect.bottom - 40
-
-          if (isAbove || isBelow) {
-            element.scrollIntoView({
-              block: isAbove ? 'start' : 'end',
-              behavior: 'smooth'
-            })
-          }
-        })
+        ensureSelectedItemInView(newIndex)
       }
     },
     [selectedIndex, displayItems.length, gridColumns, autoPlay, playAudio]
   )
+
+  useEffect(() => {
+    if (displayItems.length > 0 && selectedIndex === 0) {
+      ensureSelectedItemInView(0)
+    }
+  }, [displayItems, selectedIndex, ensureSelectedItemInView])
 
   const handlers = useMemo<KeyHandlerMap>(
     () => ({
