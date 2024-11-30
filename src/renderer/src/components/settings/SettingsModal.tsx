@@ -5,6 +5,7 @@ import { KeyBindingMap } from '@renderer/types/keybinds'
 import { defaultKeyBindings } from '@renderer/keybinds/defaults'
 import { useTheme } from '@renderer/context/ThemeContext'
 import { useToast } from '@renderer/context/ToastContext'
+import { useUISettings, ItemSize } from '@renderer/context/UISettingsContext';
 import { X, Gear, Keyboard } from '@phosphor-icons/react'
 import WindowSettings from './WindowSettings'
 import KeybindSettings from './KeybindSettings'
@@ -26,6 +27,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const { isDarkMode } = useTheme()
   const { showToast } = useToast()
+  const { settings, updateSettings } = useUISettings();
 
   useEffect(() => {
     const loadSavedBindings = async (): Promise<void> => {
@@ -149,6 +151,18 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                   <Keyboard size={20} />
                   Keyboard Shortcuts
                 </Tabs.Trigger>
+                <Tabs.Trigger
+                  value="ui-size"
+                  className={`
+                    flex items-center gap-2 px-4 py-2 text-left
+                    focus:outline-none focus:bg-gray-700/10
+                    data-[state=active]:bg-gray-700/20
+                    hover:bg-gray-700/10
+                    transition-colors
+                  `}
+                >
+                  UI Size
+                </Tabs.Trigger>
               </Tabs.List>
             </div>
             <div className="flex-1 flex flex-col h-full">
@@ -165,6 +179,25 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                     keyBindings={keyBindings}
                     onUpdateBindings={(newBindings) => setKeyBindings(newBindings)}
                   />
+                </Tabs.Content>
+                <Tabs.Content value="ui-size" className="outline-none h-full">
+                  <div className="mb-6">
+                    <h3 className="text-lg font-semibold mb-2">UI Size</h3>
+                    <div className="space-y-2">
+                      <label className="block">
+                        <span className="text-sm font-medium">Item Size</span>
+                        <select
+                          value={settings.itemSize}
+                          onChange={(e) => updateSettings({ itemSize: e.target.value as ItemSize })}
+                          className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                        >
+                          <option value="thin">Thin</option>
+                          <option value="normal">Normal</option>
+                          <option value="thick">Thick</option>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
                 </Tabs.Content>
               </div>
 

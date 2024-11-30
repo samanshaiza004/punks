@@ -2,6 +2,7 @@ import React from 'react'
 import FileIcons from '@renderer/components/FileIcons'
 import { FileNode, DirectoryNode, FileSystemNode } from '../../../../types'
 import * as ContextMenu from '@radix-ui/react-context-menu'
+import { useUISettings } from '@renderer/context/UISettingsContext';
 
 interface FileItemProps {
   fileName: string
@@ -20,6 +21,8 @@ export const FileItem: React.FC<FileItemProps> = ({
   isDarkMode,
   onClick
 }) => {
+  const { getSizeClass } = useUISettings();
+
   const handleCopy = () => {
     console.log('Copy:', fileName)
   }
@@ -73,6 +76,7 @@ export const FileItem: React.FC<FileItemProps> = ({
       <ContextMenu.Trigger>
         <div
           className={`
+            ${getSizeClass('file')}
             flex
             items-center
             gap-2

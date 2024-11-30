@@ -33,6 +33,7 @@ interface Tab {
   searchResults: FileNode[]
   fileFilters?: FileFilterOptions
   selectedFolder: string | null
+  title?: string
 }
 
 const tabReducer = (state: TabState, action: TabAction): TabState => {

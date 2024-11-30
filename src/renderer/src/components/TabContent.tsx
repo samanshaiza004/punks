@@ -6,6 +6,15 @@ import SearchBar from './SearchBar'
 import FolderTree from './FolderTree'
 import ResizablePanel from './ResizablePanel'
 
+const defaultFileFilters: FileFilterOptions = {
+  all: true,
+  audio: false,
+  images: false,
+  text: false,
+  video: false,
+  directories: false
+}
+
 const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
   const { state, dispatch } = useTabs()
   const { handleFileClick } = useFileOperations()
@@ -95,15 +104,15 @@ const TabContent: React.FC<{ tabId: string }> = ({ tabId }) => {
               }}
             />
             <FileFilterButtons 
-              filters={tab.fileFilters || {}} 
-              onChange={updateFileFilters}
+              filters={tab.fileFilters || defaultFileFilters} 
+              onFilterChange={updateFileFilters}
             />
           </div>
         </div>
       </div>
 
       <div className="flex flex-grow overflow-hidden">
-        <ResizablePanel className="border-r border-gray-200 dark:border-gray-700">
+        <ResizablePanel>
           <FolderTree />
         </ResizablePanel>
         <div className="flex-1 overflow-auto">

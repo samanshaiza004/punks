@@ -2,12 +2,14 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { ArrowRight, ArrowDown, Folder } from '@phosphor-icons/react';
 import { useTheme } from '@renderer/context/ThemeContext';
 import { useTabs } from '@renderer/context/TabContext';
+import { useUISettings } from '@renderer/context/UISettingsContext';
 
 interface FolderNode {
   name: string;
   path: string;
   children: FolderNode[];
   isExpanded?: boolean;
+  hasChildren?: boolean;
 }
 
 const FolderTreeItem: React.FC<{
@@ -18,6 +20,7 @@ const FolderTreeItem: React.FC<{
   selectedPath: string | null;
 }> = ({ folder, level, onToggle, onSelect, selectedPath }) => {
   const { isDarkMode } = useTheme();
+  const { getSizeClass } = useUISettings();
   const isSelected = selectedPath === folder.path;
 
   const handleClick = (e: React.MouseEvent) => {
@@ -34,7 +37,8 @@ const FolderTreeItem: React.FC<{
     <div className="select-none">
       <div
         className={`
-          flex items-center px-2 py-1 cursor-pointer
+          flex items-center cursor-pointer
+          ${getSizeClass('folder')}
           ${isSelected 
             ? 'bg-blue-500 text-white' 
             : isDarkMode 
@@ -49,7 +53,7 @@ const FolderTreeItem: React.FC<{
           className="p-1 hover:bg-opacity-20 hover:bg-gray-500 rounded"
           onClick={handleToggle}
         >
-          {folder.children.length > 0 && (
+          {(folder.children.length > 0 || folder.hasChildren) && (
             folder.isExpanded ? (
               <ArrowDown className="w-4 h-4" />
             ) : (
@@ -57,7 +61,7 @@ const FolderTreeItem: React.FC<{
             )
           )}
         </div>
-        <Folder className="w-4 h-4 mx-2" />
+        <Folder className="min-w-4 min-h-4 mx-2" />
         <span className="truncate">{folder.name}</span>
       </div>
       {folder.isExpanded && folder.children.map((child) => (
@@ -89,12 +93,14 @@ export const FolderTree: React.FC = () => {
       
       const children = await Promise.all(
         directories.map(async (dir) => {
-          // Important change: Don't recursively build structure unless folder is expanded
+          // Check if this directory has any subdirectories without loading them all
+          const dirContents = await window.api.getDirectoryContents([dir.path]);
           return {
             name: dir.name,
             path: dir.path,
-            children: [], // Initially empty
-            isExpanded: expandedFolders.has(dir.path)
+            children: [], // Still empty, but we'll load them when expanded
+            isExpanded: expandedFolders.has(dir.path),
+            hasChildren: dirContents.directories.length > 0 // Add this flag
           };
         })
       );
@@ -103,7 +109,8 @@ export const FolderTree: React.FC = () => {
         name: path.split('/').pop() || path,
         path: path,
         children: children,
-        isExpanded: expandedFolders.has(path)
+        isExpanded: expandedFolders.has(path),
+        hasChildren: children.length > 0
       };
     } catch (error) {
       console.error('Error building folder structure:', error);
@@ -116,16 +123,21 @@ export const FolderTree: React.FC = () => {
       const contents = await window.api.getDirectoryContents([folder.path]);
       const directories = contents.directories.sort((a, b) => a.name.localeCompare(b.name));
       
-      const children = directories.map(dir => ({
-        name: dir.name,
-        path: dir.path,
-        children: [], // Start with empty children
-        isExpanded: expandedFolders.has(dir.path)
+      const children = await Promise.all(directories.map(async (dir) => {
+        const dirContents = await window.api.getDirectoryContents([dir.path]);
+        return {
+          name: dir.name,
+          path: dir.path,
+          children: [], // Start with empty children
+          isExpanded: expandedFolders.has(dir.path),
+          hasChildren: dirContents.directories.length > 0
+        };
       }));
 
       return {
         ...folder,
-        children: children
+        children: children,
+        hasChildren: children.length > 0
       };
     } catch (error) {
       console.error('Error loading children:', error);

@@ -9,6 +9,7 @@ import { KeyHandlerMap } from '../../types/keybinds'
 import { useKeyBindings } from '@renderer/keybinds/hooks'
 import path from 'path'
 import { FileFilterOptions } from '../FileFilters'
+import { useUISettings } from '@renderer/context/UISettingsContext'
 
 interface FileGridProps {
   directoryPath: string[]
@@ -30,10 +31,9 @@ const isAudioFile = (filePath: string): boolean => {
 const COLUMN_WIDTHS = [
   { maxWidth: 600, columns: 1 },
   { maxWidth: 900, columns: 2 },
-  { maxWidth: 1200, columns: 3 },
-  { maxWidth: Infinity, columns: 4 }
+  { maxWidth: 1600, columns: 3 },
 ]
-
+ 
 export const FileGrid: React.FC<FileGridProps> = ({
   directoryPath,
   onDirectoryClick,
@@ -46,7 +46,8 @@ export const FileGrid: React.FC<FileGridProps> = ({
 }) => {
   const { isDarkMode } = useTheme()
   const { showToast } = useToast()
-  const [directories, setDirectories] = useState<DirectoryNode[]>([])
+  const { getGridConfig } = useUISettings()
+  const [directories, _setDirectories] = useState<DirectoryNode[]>([])
   const [files, setFiles] = useState<FileNode[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isScanning, setIsScanning] = useState(false)
@@ -103,10 +104,8 @@ export const FileGrid: React.FC<FileGridProps> = ({
       const isBelowContainer = elementBottom > containerBottom
 
       if (isAboveContainer) {
-        // Scroll up to show the element
         container.scrollTop = scrollTop + (elementTop - containerTop)
       } else if (isBelowContainer) {
-        // Scroll down to show the element
         container.scrollTop = scrollTop + (elementBottom - containerBottom)
       }
     })
@@ -139,30 +138,30 @@ export const FileGrid: React.FC<FileGridProps> = ({
 
   const currentDirectoryPath = directoryPath[0] || ''
 
-useEffect(() => {
-  let mounted = true
-  const loadFiles = async () => {
-    if (!currentDirectoryPath) return
+  useEffect(() => {
+    let mounted = true
+    const loadFiles = async () => {
+      if (!currentDirectoryPath) return
 
-    setIsLoading(true)
-    try {
-      const allFiles = await loadFilesRecursively(currentDirectoryPath)
-      if (mounted) {
-        setFiles(allFiles)
+      setIsLoading(true)
+      try {
+        const allFiles = await loadFilesRecursively(currentDirectoryPath)
+        if (mounted) {
+          setFiles(allFiles)
+        }
+      } catch (error) {
+        console.error('Error loading files:', error)
       }
-    } catch (error) {
-      console.error('Error loading files:', error)
+      if (mounted) {
+        setIsLoading(false)
+      }
     }
-    if (mounted) {
-      setIsLoading(false)
-    }
-  }
 
-  loadFiles()
-  return () => {
-    mounted = false
-  }
-}, [currentDirectoryPath, loadFilesRecursively])
+    loadFiles()
+    return () => {
+      mounted = false
+    }
+  }, [currentDirectoryPath, loadFilesRecursively])
 
   const handleFileAdded = (file: AudioFile) => {
     const fileNode: FileNode = {
@@ -205,32 +204,41 @@ useEffect(() => {
     showToast('Directory scan complete!', 'success')
   }
 
-  const calculateColumns = () => {
-    if (!gridRef.current) return
-
-    const gridWidth = gridRef.current.clientWidth
-    const columnConfig =
-      COLUMN_WIDTHS.find((config) => gridWidth <= config.maxWidth) ||
-      COLUMN_WIDTHS[COLUMN_WIDTHS.length - 1]
-
-    setGridColumns(columnConfig.columns)
-  }
-
   useEffect(() => {
-    window.api.onFileAdded(handleFileAdded)
-    window.api.onFileRemoved(handleFileRemoved)
-    window.api.onScanProgress(handleScanProgress)
-    window.api.onScanComplete(handleScanComplete)
-
-    calculateColumns()
-
-    window.addEventListener('resize', calculateColumns)
-
+    const updateGridColumns = () => {
+      try {
+        if (!gridRef.current) return
+        const width = gridRef.current.offsetWidth
+        
+        const columnConfig = COLUMN_WIDTHS.find(config => width <= config.maxWidth)
+        const columns = columnConfig ? columnConfig.columns : 1
+        
+        setGridColumns(columns)
+        
+        // Optional: Log for debugging
+        console.debug(`Grid width: ${width}, Columns: ${columns}`)
+      } catch (error) {
+        console.error('Error updating grid columns:', error)
+        // Fallback to a default column count
+        setGridColumns(1)
+      }
+    }
+  
+    const resizeObserver = new ResizeObserver(updateGridColumns)
+    if (gridRef.current) {
+      resizeObserver.observe(gridRef.current)
+    }
+  
+    updateGridColumns() // Initial column calculation
     return () => {
-      window.removeEventListener('resize', calculateColumns)
+      if (gridRef.current) {
+        resizeObserver.unobserve(gridRef.current)
+      }
+      resizeObserver.disconnect()
     }
   }, [])
 
+  const gridConfig = getGridConfig()
   const handleNavigate = useCallback(
     (direction: 'up' | 'down' | 'left' | 'right') => {
       const maxIndex = displayItems.length - 1
@@ -242,7 +250,8 @@ useEffect(() => {
           newIndex = selectedIndex >= gridColumns ? selectedIndex - gridColumns : selectedIndex
           break
         case 'down':
-          newIndex = selectedIndex + gridColumns <= maxIndex ? selectedIndex + gridColumns : selectedIndex
+          newIndex =
+            selectedIndex + gridColumns <= maxIndex ? selectedIndex + gridColumns : selectedIndex
           break
         case 'left':
           newIndex = selectedIndex > 0 ? selectedIndex - 1 : selectedIndex
@@ -254,15 +263,15 @@ useEffect(() => {
 
       if (newIndex !== selectedIndex) {
         setSelectedIndex(newIndex)
-        
+
         // Auto-play the selected audio file if it's an audio file and auto-play is enabled
         const selectedItem = displayItems[newIndex]
         if (
-          selectedItem && 
-          'type' in selectedItem && 
-          selectedItem.type === 'file' && 
-          autoPlay && 
-          isAudioFile(selectedItem.path) && 
+          selectedItem &&
+          'type' in selectedItem &&
+          selectedItem.type === 'file' &&
+          autoPlay &&
+          isAudioFile(selectedItem.path) &&
           playAudio
         ) {
           onFileClick(selectedItem)
@@ -319,9 +328,6 @@ useEffect(() => {
     }
   }
 
-  // Get grid columns class dynamically
-  const gridColumnsClass = useMemo(() => `grid-cols-${gridColumns}`, [gridColumns])
-
   if (isLoading) {
     return (
       <div className="h-full w-full flex items-center justify-center">
@@ -342,14 +348,15 @@ useEffect(() => {
     <div
       ref={gridRef}
       className={`
-        grid
-        p-2
-        auto-rows-[30px]
-        ${gridColumnsClass}
-        h-full
-        w-full
-        overflow-y-auto
+        h-full w-full overflow-y-auto overflow-x-hidden grid
+        ${isDarkMode ? 'bg-gray-900' : 'bg-gray-50'}
       `}
+      style={{
+        gridTemplateColumns: `repeat(${gridColumns}, minmax(${gridConfig.minWidth}, 1fr))`,
+        gap: gridConfig.gap,
+        padding: gridConfig.padding,
+        gridAutoRows: gridConfig.rowHeight
+      }}
       tabIndex={0}
     >
       {displayItems.map((item, index) => (

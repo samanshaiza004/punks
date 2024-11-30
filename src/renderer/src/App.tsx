@@ -16,6 +16,7 @@ import { Gear } from '@phosphor-icons/react/dist/ssr'
 import { useDirectoryOperations } from './hooks/useDirectoryOperations'
 import { useScanProgress } from './context/ScanProgressContext'
 import ScanProgress from './components/ScanProgress'
+import { UISettingsProvider } from './context/UISettingsContext';
 
 interface DirectoryHistoryEntry {
   path: string[]
@@ -87,6 +88,7 @@ export function App() {
               video: false,
               directories: false
             },
+            selectedFolder: null,
             title: 'Home'
           }
         })
@@ -117,38 +119,40 @@ export function App() {
   }, [currentAudio, playAudio])
 
   return (
-    <div
-      className={`h-screen flex flex-col ${
-        isDarkMode ? 'dark bg-gray-900 text-white' : 'bg-white text-gray-900'
-      }`}
-    >
-      <div className="flex-shrink-0 ">
-        <div className="flex items-center space-x-2 mb-2">
-          <Button onClick={() => setIsSettingsOpen(true)} variant="secondary">
-            <Gear size={20} weight="fill" />
-          </Button>
+    <UISettingsProvider>
+      <div
+        className={`h-screen flex flex-col ${
+          isDarkMode ? 'dark bg-gray-900 text-white' : 'bg-white text-gray-900'
+        }`}
+      >
+        <div className="flex-shrink-0 ">
+          <div className="flex items-center space-x-2 mb-2">
+            <Button onClick={() => setIsSettingsOpen(true)} variant="secondary">
+              <Gear size={20} weight="fill" />
+            </Button>
+          </div>
         </div>
-      </div>
-      <TabBar lastSelectedDirectory={lastSelectedDirectory} />
-      <div className="flex-shrink-0 mb-2">
-        <AudioPlayer currentAudio={currentAudio} shouldReplay />
-      </div>
+        <TabBar lastSelectedDirectory={lastSelectedDirectory} />
+        <div className="flex-shrink-0 mb-2">
+          <AudioPlayer currentAudio={currentAudio} shouldReplay />
+        </div>
 
-      <div className="flex-grow overflow-hidden">
-        <TabContainer directory={lastSelectedDirectory} />
+        <div className="flex-grow overflow-hidden">
+          <TabContainer directory={lastSelectedDirectory} />
+        </div>
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          onDirectorySelected={(path: string[]) => handleDirectoryChange(path)}
+          onSave={(_newBindings: any) => {
+            // Handle the new bindings
+            setIsSettingsOpen(false)
+          }}
+        />
+        <UpdateNotification />
+        <ScanProgressOverlay />
       </div>
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        onDirectorySelected={(path: string[]) => handleDirectoryChange(path)}
-        onSave={(_newBindings: any) => {
-          // Handle the new bindings
-          setIsSettingsOpen(false)
-        }}
-      />
-      <UpdateNotification />
-      <ScanProgressOverlay />
-    </div>
+    </UISettingsProvider>
   )
 }
 

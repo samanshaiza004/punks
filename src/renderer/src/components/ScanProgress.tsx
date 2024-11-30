@@ -31,7 +31,7 @@ const ScanProgress: React.FC<ScanProgressProps> = ({ total, processed, percentCo
           {Math.round(percentComplete)}%
         </span>
       </div>
-      
+
       <Progress.Root
         className={`relative overflow-hidden bg-gray-200 rounded-full h-1.5 ${
           isDarkMode ? 'bg-gray-700' : 'bg-gray-200'
