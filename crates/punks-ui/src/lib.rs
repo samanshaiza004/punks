@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use imgui::Key;
-use punks_browser::{PlaybackStatus, SampleBrowser};
+use punks_browser::{LibraryState, PlaybackStatus, SampleBrowser, TagCount};
 use punks_core::config::{Keybinds, PunksConfig};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -114,6 +114,12 @@ const TAB_CLOSE_TEXT: [f32; 4] = [0.70, 0.72, 0.76, 1.0];
 
 const DIR_TEXT_COLOR: [f32; 4] = [0.55, 0.85, 1.0, 1.0];
 
+// Left rail: library status + tag filters live here; tags on rows are pills.
+const SIDEBAR_WIDTH: f32 = 180.0;
+const SIDEBAR_BG: [f32; 4] = [0.09, 0.10, 0.11, 1.0];
+const PILL_BG: [f32; 4] = [0.25, 0.28, 0.34, 1.0];
+const PILL_TEXT: [f32; 4] = [0.80, 0.84, 0.90, 1.0];
+
 // File list lays out entries in width-adaptive columns; each column is at least
 // this wide, so wide windows show 2+ columns and narrow ones collapse to 1.
 const MIN_COLUMN_WIDTH: f32 = 300.0;
@@ -184,6 +190,16 @@ pub struct BrowserPanel {
     /// lets audio play forward instead of re-seeking every frame. `None` when
     /// not scrubbing.
     scrub_last_x: Option<f32>,
+    /// Sidebar "new tag" input buffer.
+    new_tag_buf: String,
+    /// "New tag" buffer inside the per-file tag popup.
+    popup_tag_buf: String,
+    /// File the tag-editor popup is editing (set by right-click on a row).
+    tag_popup_path: Option<PathBuf>,
+    open_tag_editor: bool,
+    /// Tag pending delete confirmation (set by right-click in the sidebar).
+    tag_delete_target: Option<(i64, String)>,
+    open_tag_delete: bool,
 }
 
 impl BrowserPanel {
@@ -200,6 +216,12 @@ impl BrowserPanel {
             volume,
             last_active_tab: 0,
             scrub_last_x: None,
+            new_tag_buf: String::new(),
+            popup_tag_buf: String::new(),
+            tag_popup_path: None,
+            open_tag_editor: false,
+            tag_delete_target: None,
+            open_tag_delete: false,
         }
     }
 
@@ -377,69 +399,85 @@ impl BrowserPanel {
         ui.separator();
 
         let avail = ui.content_region_avail();
-        ui.set_next_item_width(avail[0]);
-        ui.input_text("##search", &mut self.search_buf)
-            .hint("Search...")
-            .build();
-
-        let search_focused = ui.is_item_active();
-
-        if self.search_buf != self.last_typed_query {
-            self.last_typed_query = self.search_buf.clone();
-            self.query_change_time = Instant::now();
-        }
-        if self.query_change_time.elapsed() >= SEARCH_DEBOUNCE
-            && self.last_typed_query != self.last_searched_query
-        {
-            self.last_searched_query = self.last_typed_query.clone();
-            if self.last_searched_query.is_empty() {
-                browser.clear_search();
-            } else {
-                browser.search(&self.last_searched_query);
-            }
-        }
-
-        if browser.is_searching() && !browser.is_in_search_mode() {
-            ui.text_disabled("Searching...");
-        }
-
-        let avail = ui.content_region_avail();
-        // Reserve room below the list for: waveform + metadata line + transport.
-        let list_height = (avail[1] - 132.0).max(100.0);
+        // Reserve room below for: waveform + metadata line + transport row.
+        let body_height = (avail[1] - 132.0).max(120.0);
         let mut drag_requested: Option<PathBuf> = None;
+        let mut search_focused = false;
+        let mut in_search = false;
 
         let up_key = parse_key(&self.prefs.keybinds.navigate_up).unwrap_or(Key::W);
         let down_key = parse_key(&self.prefs.keybinds.navigate_down).unwrap_or(Key::S);
         let back_key = parse_key(&self.prefs.keybinds.navigate_back).unwrap_or(Key::A);
         let conf_key = parse_key(&self.prefs.keybinds.confirm).unwrap_or(Key::D);
 
-        let in_search = browser.is_in_search_mode();
-
-        ui.child_window("file_list")
-            .size([avail[0], list_height])
+        // Left rail: library status + tag filters. Tag display on rows stays
+        // inline (pills); the sidebar is only for filtering and library setup.
+        let sidebar_bg = ui.push_style_color(imgui::StyleColor::ChildBg, SIDEBAR_BG);
+        ui.child_window("sidebar")
+            .size([SIDEBAR_WIDTH, body_height])
             .build(|| {
-                if in_search {
-                    self.draw_search_results(
-                        ui,
-                        browser,
-                        &mut drag_requested,
-                        search_focused,
-                        up_key,
-                        down_key,
-                        back_key,
-                    );
-                } else {
-                    self.draw_browse_list(
-                        ui,
-                        browser,
-                        &mut drag_requested,
-                        search_focused,
-                        up_key,
-                        down_key,
-                        back_key,
-                        conf_key,
-                    );
+                self.draw_sidebar(ui, browser);
+            });
+        sidebar_bg.pop();
+
+        ui.same_line();
+        ui.child_window("content")
+            .size([0.0, body_height])
+            .build(|| {
+                let w = ui.content_region_avail()[0];
+                ui.set_next_item_width(w);
+                ui.input_text("##search", &mut self.search_buf)
+                    .hint("Search...")
+                    .build();
+                let sf = ui.is_item_active();
+                search_focused = sf;
+
+                if self.search_buf != self.last_typed_query {
+                    self.last_typed_query = self.search_buf.clone();
+                    self.query_change_time = Instant::now();
                 }
+                if self.query_change_time.elapsed() >= SEARCH_DEBOUNCE
+                    && self.last_typed_query != self.last_searched_query
+                {
+                    self.last_searched_query = self.last_typed_query.clone();
+                    if self.last_searched_query.is_empty() {
+                        browser.clear_search();
+                    } else {
+                        browser.search(&self.last_searched_query);
+                    }
+                }
+
+                if browser.is_searching() && !browser.is_in_search_mode() {
+                    ui.text_disabled("Searching...");
+                }
+
+                let is = browser.is_in_search_mode();
+                in_search = is;
+
+                ui.child_window("file_list").size([0.0, 0.0]).build(|| {
+                    if is {
+                        self.draw_search_results(
+                            ui,
+                            browser,
+                            &mut drag_requested,
+                            sf,
+                            up_key,
+                            down_key,
+                            back_key,
+                        );
+                    } else {
+                        self.draw_browse_list(
+                            ui,
+                            browser,
+                            &mut drag_requested,
+                            sf,
+                            up_key,
+                            down_key,
+                            back_key,
+                            conf_key,
+                        );
+                    }
+                });
             });
 
         if let Some(path) = drag_requested.as_deref() {
@@ -556,6 +594,138 @@ impl BrowserPanel {
         if let Some(err) = browser.last_error() {
             ui.text_colored([1.0, 0.3, 0.3, 1.0], err);
         }
+
+        // Tag popups live at panel scope so open_popup/popup share an ID
+        // stack; rows and the sidebar only set the request flags.
+        if self.open_tag_editor {
+            self.open_tag_editor = false;
+            ui.open_popup("##tag_editor");
+        }
+        if self.open_tag_delete {
+            self.open_tag_delete = false;
+            ui.open_popup("##tag_delete");
+        }
+
+        ui.popup("##tag_editor", || {
+            if let Some(path) = self.tag_popup_path.clone() {
+                let fname = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                ui.text_disabled(&fname);
+                ui.separator();
+
+                let current = browser.tag_ids_for_path(&path);
+                let tags: Vec<TagCount> = browser.library_tags().to_vec();
+                if tags.is_empty() {
+                    ui.text_disabled("No tags yet.");
+                }
+                for t in &tags {
+                    let mut has = current.contains(&t.id);
+                    if ui.checkbox(format!("{}##ptag{}", t.name, t.id), &mut has) {
+                        if has {
+                            browser.assign_tag(&path, t.id);
+                        } else {
+                            browser.unassign_tag(&path, t.id);
+                        }
+                    }
+                }
+
+                ui.separator();
+                ui.set_next_item_width(150.0);
+                let entered = ui
+                    .input_text("##popup_new_tag", &mut self.popup_tag_buf)
+                    .hint("New tag...")
+                    .enter_returns_true(true)
+                    .build();
+                ui.same_line();
+                let add = ui.small_button("Add##popup_add_tag");
+                if (entered || add) && !self.popup_tag_buf.trim().is_empty() {
+                    let name = self.popup_tag_buf.trim().to_string();
+                    browser.create_and_assign_tag(&path, &name);
+                    self.popup_tag_buf.clear();
+                }
+            }
+        });
+
+        ui.popup("##tag_delete", || {
+            if let Some((id, name)) = self.tag_delete_target.clone() {
+                if ui
+                    .selectable_config(format!("Delete tag \"{name}\""))
+                    .build()
+                {
+                    browser.delete_tag(id);
+                    self.tag_delete_target = None;
+                }
+            }
+        });
+    }
+
+    fn draw_sidebar(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+        ui.spacing();
+        ui.text_disabled("LIBRARY");
+        ui.separator();
+
+        match browser.library_state() {
+            LibraryState::NotALibrary => {
+                if browser.current_directory().is_some() {
+                    ui.text_wrapped("Not a library. Create one to tag and filter samples.");
+                    ui.spacing();
+                    if ui.button("Create library") {
+                        browser.init_library();
+                    }
+                    if ui.is_item_hovered() {
+                        ui.tooltip_text(
+                            "Adds a .punks folder to this root.\nNothing is written until you click.",
+                        );
+                    }
+                } else {
+                    ui.text_disabled("Open a folder first.");
+                }
+            }
+            LibraryState::Scanning => {
+                ui.text_disabled("Scanning folder...");
+            }
+            LibraryState::Ready => {
+                ui.spacing();
+                ui.text_disabled("TAGS");
+                ui.set_next_item_width(-1.0);
+                let entered = ui
+                    .input_text("##new_tag", &mut self.new_tag_buf)
+                    .hint("New tag...")
+                    .enter_returns_true(true)
+                    .build();
+                if entered && !self.new_tag_buf.trim().is_empty() {
+                    let name = self.new_tag_buf.trim().to_string();
+                    browser.create_tag(&name);
+                    self.new_tag_buf.clear();
+                }
+                ui.spacing();
+
+                let filter: Vec<i64> = browser.tag_filter().to_vec();
+                let tags: Vec<TagCount> = browser.library_tags().to_vec();
+                if tags.is_empty() {
+                    ui.text_disabled("No tags yet.");
+                }
+                for t in &tags {
+                    let selected = filter.contains(&t.id);
+                    let label = format!("{}  ({})##sbtag{}", t.name, t.count, t.id);
+                    if ui.selectable_config(&label).selected(selected).build() {
+                        browser.toggle_tag_filter(t.id);
+                    }
+                    if ui.is_item_clicked_with_button(imgui::MouseButton::Right) {
+                        self.tag_delete_target = Some((t.id, t.name.clone()));
+                        self.open_tag_delete = true;
+                    }
+                }
+                if !filter.is_empty() {
+                    ui.spacing();
+                    if ui.small_button("Clear filter") {
+                        browser.clear_tag_filter();
+                    }
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -647,6 +817,14 @@ impl BrowserPanel {
                     .selected(selected == Some(i))
                     .size([col_w - COLUMN_GUTTER, 0.0])
                     .build();
+                let names = browser.tag_names_for_path(&path);
+                if !names.is_empty() {
+                    draw_tag_pills(ui, &names, ui.item_rect_min(), ui.item_rect_max());
+                }
+                if ui.is_item_clicked_with_button(imgui::MouseButton::Right) {
+                    self.tag_popup_path = Some(path.clone());
+                    self.open_tag_editor = true;
+                }
                 if ui.is_item_hovered()
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
@@ -724,9 +902,21 @@ impl BrowserPanel {
             }
         }
 
-        // Re-read selected in case keyboard nav changed it.
+        // Re-read selected AND entry_count: navigate_into/navigate_up above may
+        // have swapped in a different (shorter or longer) directory listing
+        // mid-frame. Indexing browser.entries() below with the stale count
+        // caused an out-of-bounds panic when the new directory had fewer
+        // entries than the one just left.
         let selected = browser.selected();
+        let entry_count = browser.entries().len();
         let mut click_action: Option<(usize, bool, PathBuf)> = None;
+
+        if entry_count == 0 {
+            // Directory navigated to (e.g. via confirm) turned out empty;
+            // nothing to lay out this frame. "Empty directory" text shows on
+            // the next frame via the early return above.
+            return;
+        }
 
         // Lay out entries in width-adaptive columns to use horizontal space.
         // The clipper iterates rows of `cols` items, so off-screen rows are
@@ -777,6 +967,16 @@ impl BrowserPanel {
                         .build()
                 };
 
+                if !is_dir {
+                    let names = browser.tag_names_for_path(&path);
+                    if !names.is_empty() {
+                        draw_tag_pills(ui, &names, ui.item_rect_min(), ui.item_rect_max());
+                    }
+                    if ui.is_item_clicked_with_button(imgui::MouseButton::Right) {
+                        self.tag_popup_path = Some(path.clone());
+                        self.open_tag_editor = true;
+                    }
+                }
                 if !is_dir
                     && ui.is_item_hovered()
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
@@ -894,6 +1094,32 @@ fn color_u32(c: [f32; 4]) -> u32 {
     let b = (c[2] * 255.0) as u32;
     let a = (c[3] * 255.0) as u32;
     (a << 24) | (b << 16) | (g << 8) | r
+}
+
+/// Right-aligned tag pills inside a file row's rect, drawn over the
+/// selectable. Stops before eating the space reserved for the file name.
+fn draw_tag_pills(ui: &imgui::Ui, names: &[String], rect_min: [f32; 2], rect_max: [f32; 2]) {
+    let draw = ui.get_window_draw_list();
+    let bg = color_u32(PILL_BG);
+    let fg = color_u32(PILL_TEXT);
+    let y0 = rect_min[1] + 1.0;
+    let y1 = rect_max[1] - 1.0;
+    // Keep the left part of the row readable for the name.
+    let min_x = rect_min[0] + 160.0;
+    let mut x = rect_max[0] - 4.0;
+    for name in names.iter().rev() {
+        let w = ui.calc_text_size(name)[0] + 10.0;
+        if x - w < min_x {
+            break;
+        }
+        x -= w;
+        draw.add_rect([x, y0], [x + w, y1], bg)
+            .filled(true)
+            .rounding(4.0)
+            .build();
+        draw.add_text([x + 5.0, y0 + 1.0], fg, name);
+        x -= 4.0;
+    }
 }
 
 fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser, scrub_last_x: &mut Option<f32>) {

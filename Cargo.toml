@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/punks-core",
+    "crates/punks-library",
     "crates/punks-playback",
     "crates/punks-browser",
     "crates/punks-ui",

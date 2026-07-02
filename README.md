@@ -14,6 +14,8 @@ A modular sample browser for musicians, built in Rust.
 - Instant replay from an in-memory decode cache when you revisit a sample
 - Volume control for previews, persisted across sessions
 - Recursive filename search from the current directory
+- Opt-in per-folder library (SQLite in a `.punks` folder you create explicitly):
+  tag samples, filter by tags (AND), tags survive file renames and moves
 - Waveform visualizer with a playhead
 - Remappable keybinds and a configurable samples folder via the Settings modal
 - Restores the exact directory you left off in on next launch
