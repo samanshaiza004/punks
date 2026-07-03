@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: punks-standalone-macos.tar.gz
+          - os: ubuntu-latest
+            artifact: punks-standalone-linux.tar.gz
+          - os: windows-latest
+            artifact: punks-standalone-windows.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install audio dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p punks-standalone
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: tar -C target/release -czf ${{ matrix.artifact }} punks-standalone
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path target/release/punks-standalone.exe -DestinationPath ${{ matrix.artifact }}
+
+      - name: Upload to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}

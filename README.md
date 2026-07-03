@@ -33,6 +33,16 @@ cargo build --release -p punks-standalone
 - macOS, Linux, or Windows
 - On Linux: ALSA development libraries (`libasound2-dev` on Debian/Ubuntu)
 
+### Cross-platform builds
+
+- **macOS**: native — `cargo build --release -p punks-standalone`.
+- **Linux, from macOS**: use [`cross`](https://github.com/cross-rs/cross) (Docker-based), since
+  `cpal` needs ALSA headers macOS doesn't have:
+  `cross build --release --target x86_64-unknown-linux-gnu -p punks-standalone`.
+- **Windows, from macOS**: not worth fighting locally — the `wgpu` + MSVC toolchain doesn't
+  cross-compile cleanly. Windows builds run natively on GitHub Actions instead, alongside macOS and
+  Linux, in [`.github/workflows/release.yml`](.github/workflows/release.yml) on every `v*` tag push.
+
 ## Running
 
 ```
