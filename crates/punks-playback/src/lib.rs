@@ -400,7 +400,7 @@ impl PlaybackEngine {
                 let cursor = self.shared.cursor.load(Ordering::Relaxed);
                 let total = self.shared.total_frames.load(Ordering::Relaxed);
                 let channels = self.device_channels as usize;
-                let frame = if channels > 0 { cursor / channels } else { 0 };
+                let frame = cursor.checked_div(channels).unwrap_or(0);
                 let rate = self.device_sample_rate as f64;
                 // Position and duration are SOURCE-relative: the loaded buffer
                 // may be a window starting at `current_window_start` into a
