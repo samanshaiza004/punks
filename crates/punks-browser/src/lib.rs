@@ -5,13 +5,15 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use punks_analysis::AnalysisReport;
 pub use punks_core::config::PunksConfig;
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
 pub use punks_library::{LibraryError, ScanSummary, TagCount};
 pub use punks_playback::{AudioMetadata, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks};
 
+use punks_analysis::AudioBuffer;
 use punks_library::Library;
-use punks_playback::{PlaybackEngine, RequestSlot};
+use punks_playback::{decode_file, PlaybackEngine, RequestSlot};
 
 /// How many buckets a full-source waveform is computed at (matches the preview
 /// waveform's resolution).
@@ -128,6 +130,8 @@ struct LibraryContext {
     assets: Vec<FileEntry>,
     /// Absolute path -> tag ids.
     asset_tags: HashMap<PathBuf, Vec<i64>>,
+    /// Absolute path -> analysis results, filled asynchronously by the worker.
+    analysis: HashMap<PathBuf, AnalysisReport>,
     scanning: bool,
     scan_rx: Option<mpsc::Receiver<Result<ScanSummary, LibraryError>>>,
     scan_progress: Option<Arc<ScanProgress>>,
@@ -184,6 +188,15 @@ impl LibraryContext {
             }
             Err(e) => log::warn!("library asset-tag reload: {e}"),
         }
+        match self.lib.all_analysis() {
+            Ok(rows) => {
+                self.analysis = rows
+                    .into_iter()
+                    .map(|(path, metrics)| (path, AnalysisReport::from_metrics(&metrics)))
+                    .collect();
+            }
+            Err(e) => log::warn!("library analysis reload: {e}"),
+        }
     }
 }
 
@@ -203,11 +216,74 @@ fn spawn_scan(
         let result = Library::open(&root).and_then(|mut lib| {
             let files = punks_library::scan_files(&root)?;
             prog.total.store(files.len(), Ordering::Relaxed);
-            lib.reconcile_with_progress(&files, |done| prog.done.store(done, Ordering::Relaxed))
+            let summary = lib
+                .reconcile_with_progress(&files, |done| prog.done.store(done, Ordering::Relaxed))?;
+            // Queue analysis for everything present at the current pipeline
+            // version (idempotent). The worker drains it after the scan resolves.
+            lib.enqueue_all(punks_analysis::pipeline_version())?;
+            Ok(summary)
         });
         let _ = tx.send(result);
     });
     (rx, progress)
+}
+
+/// The global background analysis worker: one app-lifetime thread that drains a
+/// library's job queue whenever asked. Fed a durable FIFO of roots (every queued
+/// root is drained, unlike the latest-wins peaks `RequestSlot`); reports each
+/// finished asset back so the UI can fill it in. Owns its own `Library`
+/// connection per drain, so it never contends with the UI thread's handle beyond
+/// WAL's normal write serialization.
+fn spawn_analysis_worker() -> (mpsc::Sender<PathBuf>, mpsc::Receiver<PathBuf>) {
+    let (drain_tx, drain_rx) = mpsc::channel::<PathBuf>();
+    let (done_tx, done_rx) = mpsc::channel::<PathBuf>();
+    std::thread::spawn(move || {
+        while let Ok(root) = drain_rx.recv() {
+            let Ok(mut lib) = Library::open(&root) else {
+                continue;
+            };
+            // Requeue anything a prior run left mid-flight before draining.
+            if let Err(e) = lib.reset_running_jobs() {
+                log::warn!("analysis reset ({}): {e}", root.display());
+            }
+            loop {
+                match lib.claim_next_pending() {
+                    Ok(Some(path)) => {
+                        let t = std::time::Instant::now();
+                        match decode_file(&path) {
+                            Ok(d) => {
+                                // Bounded window (decode_file caps long files), so
+                                // worker memory stays bounded.
+                                let buf =
+                                    AudioBuffer::new(&d.interleaved, d.sample_rate, d.channels);
+                                let report = punks_analysis::run_all(&buf);
+                                let dur = t.elapsed().as_millis() as u32;
+                                match lib.store_analysis(&path, &report.metrics(), dur) {
+                                    Ok(()) => {
+                                        if done_tx.send(path).is_err() {
+                                            return; // receiver dropped: app closing
+                                        }
+                                    }
+                                    Err(e) => log::warn!("analysis store {path:?}: {e}"),
+                                }
+                            }
+                            Err(e) => {
+                                if let Err(e2) = lib.fail_analysis(&path, &e.to_string()) {
+                                    log::warn!("analysis fail-mark {path:?}: {e2}");
+                                }
+                            }
+                        }
+                    }
+                    Ok(None) => break, // drained
+                    Err(e) => {
+                        log::warn!("analysis claim ({}): {e}", root.display());
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    (drain_tx, done_rx)
 }
 
 pub struct SampleBrowser {
@@ -223,7 +299,15 @@ pub struct SampleBrowser {
     /// The file we've most recently asked for full peaks, to avoid re-requesting
     /// every frame. Reset when a new clip is played.
     peaks_requested_for: Option<PathBuf>,
+    /// Global background analysis worker: send a library root to drain its job
+    /// queue; receive each finished asset's path to refresh its cached results.
+    analysis_drain_tx: mpsc::Sender<PathBuf>,
+    analysis_done_rx: mpsc::Receiver<PathBuf>,
 }
+
+/// Max analysis completions folded into caches per frame, so a fast worker
+/// finishing thousands of files can't stall a frame. Leftovers arrive next frame.
+const ANALYSIS_DRAIN_PER_FRAME: usize = 32;
 
 impl SampleBrowser {
     /// `cfg` is read once by the caller (see `BrowserPanel::prefs`) rather than
@@ -247,6 +331,8 @@ impl SampleBrowser {
             });
         }
 
+        let (analysis_drain_tx, analysis_done_rx) = spawn_analysis_worker();
+
         let mut browser = SampleBrowser {
             tabs: vec![TabState::default()],
             active_tab: 0,
@@ -256,6 +342,8 @@ impl SampleBrowser {
             peaks_request,
             peaks_result_rx,
             peaks_requested_for: None,
+            analysis_drain_tx,
+            analysis_done_rx,
         };
 
         browser.playback.set_volume(cfg.volume);
@@ -361,6 +449,19 @@ impl SampleBrowser {
                 {
                     self.rebuild_tab_results(i);
                 }
+            }
+            // Jobs were enqueued during the scan; kick the worker to drain them.
+            for &i in &scanned {
+                let _ = self.analysis_drain_tx.send(self.libraries[i].root.clone());
+            }
+        }
+
+        // Fold in finished analysis, capped per frame so a fast worker can't
+        // stall a frame. Each completion refreshes just that asset's cache.
+        for _ in 0..ANALYSIS_DRAIN_PER_FRAME {
+            match self.analysis_done_rx.try_recv() {
+                Ok(path) => self.apply_analysis_done(&path),
+                Err(_) => break,
             }
         }
 
@@ -539,6 +640,64 @@ impl SampleBrowser {
         self.playback.current_info()
     }
 
+    /// The most-specific library owning `path`, if any (longest matching root, so
+    /// a nested library wins over its parent).
+    fn library_for_path(&self, path: &Path) -> Option<&LibraryContext> {
+        self.libraries
+            .iter()
+            .filter(|c| path.starts_with(&c.root))
+            .max_by_key(|c| c.root.as_os_str().len())
+    }
+
+    /// Analysis results for the loaded track, once the worker has computed them.
+    /// `None` outside a library or before results land.
+    pub fn current_analysis(&self) -> Option<AnalysisReport> {
+        let path = self.playback.current_file()?;
+        self.library_for_path(path)?.analysis.get(path).copied()
+    }
+
+    /// Whether the loaded track's analysis is still in flight (queued or running),
+    /// so the UI can show an "analyzing…" placeholder until [`current_analysis`]
+    /// fills in. Reads one indexed job row for the single loaded file.
+    pub fn current_analysis_pending(&self) -> bool {
+        let Some(path) = self.playback.current_file() else {
+            return false;
+        };
+        let Some(ctx) = self.library_for_path(path) else {
+            return false;
+        };
+        if ctx.analysis.contains_key(path) {
+            return false;
+        }
+        matches!(
+            ctx.lib.job_status(path).ok().flatten().as_deref(),
+            Some("pending") | Some("running")
+        )
+    }
+
+    /// Fold one finished analysis into its library's cache, refreshing just that
+    /// asset so the next draw reflects it. Picks the most-specific owning library.
+    fn apply_analysis_done(&mut self, path: &Path) {
+        let Some(i) = self
+            .libraries
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| path.starts_with(&c.root))
+            .max_by_key(|(_, c)| c.root.as_os_str().len())
+            .map(|(i, _)| i)
+        else {
+            return;
+        };
+        let ctx = &mut self.libraries[i];
+        match ctx.lib.analysis_metrics(path) {
+            Ok(metrics) => {
+                ctx.analysis
+                    .insert(path.to_path_buf(), AnalysisReport::from_metrics(&metrics));
+            }
+            Err(e) => log::warn!("analysis refresh {path:?}: {e}"),
+        }
+    }
+
     /// The `(start, duration)` in source seconds the displayed waveform spans,
     /// or `None` when nothing is loaded. The UI maps the playhead and scrub
     /// clicks against this.
@@ -714,6 +873,7 @@ impl SampleBrowser {
             tags: Vec::new(),
             assets: Vec::new(),
             asset_tags: HashMap::new(),
+            analysis: HashMap::new(),
             scanning: true,
             scan_rx: None,
             scan_progress: None,

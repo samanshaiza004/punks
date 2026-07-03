@@ -582,6 +582,22 @@ impl BrowserPanel {
             }
         }
 
+        // Analysis readout for the loaded track: fills in asynchronously as the
+        // background worker completes. A blank line is reserved when absent so the
+        // layout stays put.
+        {
+            if let Some(a) = browser.current_analysis() {
+                ui.text_disabled(format!(
+                    "RMS {:.1} dBFS   \u{b7}   Peak {:.2}   \u{b7}   ZCR {:.3}",
+                    a.rms_dbfs, a.peak, a.zcr
+                ));
+            } else if browser.current_analysis_pending() {
+                ui.text_disabled("analyzing\u{2026}");
+            } else {
+                ui.new_line();
+            }
+        }
+
         // Transport row: volume slider pinned to the right edge of the panel.
         let transport_x = ui.cursor_pos()[0];
         let transport_y = ui.cursor_pos()[1];

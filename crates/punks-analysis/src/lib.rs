@@ -4,6 +4,12 @@
 //! decode audio elsewhere and hand a borrowed [`AudioBuffer`] to a static
 //! `Analyzer::analyze`. Each analyzer type *is* its own output.
 //!
+//! This crate owns the *algorithms*. The orchestrator runs [`run_all`] on a
+//! buffer to get one [`AnalysisReport`], then hands its flattened
+//! [`AnalysisReport::metrics`] to storage — storage never names an analyzer.
+//! [`pipeline_version`] folds every analyzer's `VERSION` so persisted results
+//! invalidate when any algorithm changes.
+//!
 //! Deliberately tiny: no FFT/STFT/windowing/chroma/onset/tempo/key. Shared
 //! spectral infra should wait for a second real need.
 
@@ -32,10 +38,19 @@ impl<'a> AudioBuffer<'a> {
 }
 
 /// A feature analyzer. `analyze` is static — there's no analyzer state to
-/// configure — and returns the analyzer's own result type. `VERSION` bumps
-/// whenever the algorithm changes, so persisted results can be invalidated.
+/// configure — and returns the analyzer's own result type.
+///
+/// - `ID` is the stable string key its metrics are stored under.
+/// - `VERSION` bumps whenever the algorithm changes; folded into
+///   [`pipeline_version`] so persisted results invalidate.
+/// - `DEPENDS_ON` lists the `ID`s of analyzers whose output this one needs. It's
+///   empty for every current analyzer; the field exists so a future scheduler
+///   can topologically order the registry (e.g. key detection → chromagram)
+///   without touching the worker, which only ever calls [`run_all`].
 pub trait Analyzer {
+    const ID: &'static str;
     const VERSION: u32;
+    const DEPENDS_ON: &'static [&'static str] = &[];
     type Output;
     fn analyze(buf: &AudioBuffer) -> Self::Output;
 }
@@ -54,6 +69,7 @@ pub struct Rms {
 }
 
 impl Analyzer for Rms {
+    const ID: &'static str = "rms";
     const VERSION: u32 = 1;
     type Output = Rms;
 
@@ -83,6 +99,7 @@ pub struct Peak {
 }
 
 impl Analyzer for Peak {
+    const ID: &'static str = "peak";
     const VERSION: u32 = 1;
     type Output = Peak;
 
@@ -101,6 +118,7 @@ pub struct Zcr {
 }
 
 impl Analyzer for Zcr {
+    const ID: &'static str = "zcr";
     const VERSION: u32 = 1;
     type Output = Zcr;
 
@@ -126,6 +144,91 @@ impl Analyzer for Zcr {
             value: crossings as f32 / pairs as f32,
         }
     }
+}
+
+/// The registered analyzers as `(id, version)`, in run order. The single place
+/// that knows the analyzer set; [`run_all`] and [`pipeline_version`] read it.
+/// When an analyzer gains a non-empty `DEPENDS_ON`, sort this topologically.
+const PIPELINE: &[(&str, u32)] = &[
+    (Rms::ID, Rms::VERSION),
+    (Peak::ID, Peak::VERSION),
+    (Zcr::ID, Zcr::VERSION),
+];
+
+/// One asset's analysis result. A typed carrier so analyzers stay type-safe,
+/// with [`metrics`](Self::metrics)/[`from_metrics`](Self::from_metrics) as the
+/// only seam to storage — the DB schema can evolve without the analyzers, and
+/// storage never names a field. Grows by adding fields (e.g. `bpm: Option<f32>`,
+/// `key: Option<Key>`) plus a line in each of the two methods; nothing else moves.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AnalysisReport {
+    /// Linear RMS amplitude.
+    pub rms: f32,
+    /// RMS in dBFS (floored finite).
+    pub rms_dbfs: f32,
+    /// Sample peak (max |x|).
+    pub peak: f32,
+    /// Zero-crossing rate in `[0, 1]`.
+    pub zcr: f32,
+}
+
+impl AnalysisReport {
+    /// Flatten to `(metric, value)` pairs for opaque storage.
+    pub fn metrics(&self) -> Vec<(&'static str, f64)> {
+        vec![
+            ("rms", self.rms as f64),
+            ("rms_dbfs", self.rms_dbfs as f64),
+            ("peak", self.peak as f64),
+            ("zcr", self.zcr as f64),
+        ]
+    }
+
+    /// Rebuild from stored pairs; a metric absent from `rows` stays at its
+    /// default (0.0 now; `None` once optional fields exist).
+    pub fn from_metrics(rows: &[(String, f64)]) -> Self {
+        let get = |k: &str| {
+            rows.iter()
+                .find(|(m, _)| m == k)
+                .map(|(_, v)| *v as f32)
+                .unwrap_or_default()
+        };
+        AnalysisReport {
+            rms: get("rms"),
+            rms_dbfs: get("rms_dbfs"),
+            peak: get("peak"),
+            zcr: get("zcr"),
+        }
+    }
+}
+
+/// Run every analyzer over `buf` and assemble one [`AnalysisReport`]. Because the
+/// whole report is produced in a single call, a caller can never persist a
+/// partially-analyzed asset. Gains topological ordering + an intermediate-artifact
+/// map when the first analyzer declares a dependency; callers are unaffected.
+pub fn run_all(buf: &AudioBuffer) -> AnalysisReport {
+    let rms = Rms::analyze(buf);
+    let peak = Peak::analyze(buf);
+    let zcr = Zcr::analyze(buf);
+    AnalysisReport {
+        rms: rms.value,
+        rms_dbfs: rms.dbfs,
+        peak: peak.value,
+        zcr: zcr.value,
+    }
+}
+
+/// A single version for the whole analyzer set: any analyzer added, removed, or
+/// version-bumped changes this, so storage can requeue stale jobs by comparing a
+/// plain `u32`. (FNV-ish fold over each `(id, version)`.)
+pub fn pipeline_version() -> u32 {
+    let mut v: u32 = 0;
+    for (id, ver) in PIPELINE {
+        for b in id.bytes() {
+            v = v.wrapping_mul(31).wrapping_add(b as u32);
+        }
+        v = v.wrapping_mul(31).wrapping_add(*ver);
+    }
+    v
 }
 
 #[cfg(test)]
@@ -204,5 +307,54 @@ mod tests {
         assert_eq!(Rms::VERSION, 1);
         assert_eq!(Peak::VERSION, 1);
         assert_eq!(Zcr::VERSION, 1);
+    }
+
+    #[test]
+    fn run_all_fills_the_whole_report() {
+        let s = sine(1000.0, 48_000, 0.8, 48_000);
+        let buf = AudioBuffer::new(&s, 48_000, 1);
+        let r = run_all(&buf);
+        assert!((r.rms - 0.8 / std::f32::consts::SQRT_2).abs() < 1e-3);
+        assert!((r.peak - 0.8).abs() < 1e-3);
+        assert!((r.zcr - 2.0 * 1000.0 / 48_000.0).abs() < 1e-3);
+        assert!(r.rms_dbfs < 0.0 && r.rms_dbfs.is_finite());
+    }
+
+    #[test]
+    fn metrics_round_trip() {
+        let r = AnalysisReport {
+            rms: 0.5,
+            rms_dbfs: -6.02,
+            peak: 0.9,
+            zcr: 0.1,
+        };
+        // metrics() -> owned pairs -> from_metrics() must reconstruct exactly.
+        let owned: Vec<(String, f64)> = r
+            .metrics()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let back = AnalysisReport::from_metrics(&owned);
+        assert_eq!(r, back);
+        // Missing metrics default rather than panic.
+        let partial = AnalysisReport::from_metrics(&[("peak".to_string(), 0.7)]);
+        assert_eq!(partial.peak, 0.7);
+        assert_eq!(partial.rms, 0.0);
+    }
+
+    #[test]
+    fn pipeline_version_is_stable_and_sensitive() {
+        // Deterministic across calls, and non-trivial (every analyzer folded in).
+        assert_eq!(pipeline_version(), pipeline_version());
+        assert_ne!(pipeline_version(), 0);
+        // Sanity: hand-fold the current PIPELINE and match.
+        let mut v: u32 = 0;
+        for (id, ver) in PIPELINE {
+            for b in id.bytes() {
+                v = v.wrapping_mul(31).wrapping_add(b as u32);
+            }
+            v = v.wrapping_mul(31).wrapping_add(*ver);
+        }
+        assert_eq!(pipeline_version(), v);
     }
 }

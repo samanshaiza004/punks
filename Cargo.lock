@@ -2824,6 +2824,7 @@ name = "punks-browser"
 version = "0.1.0"
 dependencies = [
  "log",
+ "punks-analysis",
  "punks-core",
  "punks-library",
  "punks-playback",
@@ -2845,7 +2846,6 @@ name = "punks-library"
 version = "0.1.0"
 dependencies = [
  "log",
- "punks-analysis",
  "punks-core",
  "rusqlite",
  "sha2",

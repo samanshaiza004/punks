@@ -6,7 +6,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 punks-core = { path = "../punks-core" }
-punks-analysis = { path = "../punks-analysis" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 log = "0.4"

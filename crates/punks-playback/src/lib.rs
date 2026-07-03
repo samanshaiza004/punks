@@ -15,7 +15,7 @@ mod decode;
 pub mod peaks;
 mod resample;
 
-pub use decode::{compute_source_peaks, AudioMetadata};
+pub use decode::{compute_source_peaks, decode_file, AudioMetadata, DecodedAudio};
 pub use peaks::WaveformPeaks;
 
 /// Container-level info about the currently loaded track: free-text metadata,
