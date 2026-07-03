@@ -176,8 +176,22 @@ impl SampleBrowser {
         };
 
         browser.playback.set_volume(cfg.volume);
-        if let Some(dir) = cfg.last_directory.as_deref().filter(|p| p.is_dir()) {
-            let _ = browser.open_directory(dir);
+
+        let (valid_tabs, active_idx) = restore_tab_plan(&cfg.tabs, cfg.active_tab);
+        if valid_tabs.is_empty() {
+            // No persisted tab set (fresh install, a config saved before tabs
+            // existed, or every saved directory has since vanished): fall
+            // back to the single last-opened directory, exactly as before
+            // tabs were persisted.
+            if let Some(dir) = cfg.last_directory.as_deref().filter(|p| p.is_dir()) {
+                let _ = browser.open_directory(dir);
+            }
+        } else {
+            let _ = browser.open_directory(&valid_tabs[0]);
+            for dir in &valid_tabs[1..] {
+                browser.new_tab(Some(dir));
+            }
+            browser.switch_tab(active_idx);
         }
 
         Ok(browser)
@@ -804,6 +818,30 @@ impl SampleBrowser {
     pub fn search_query(&self) -> &str {
         &self.active().search_query
     }
+
+    /// Each tab's current directory, in tab order, blank tabs omitted. Used
+    /// by the UI to detect changes and persist the open tab set.
+    pub fn tab_directories(&self) -> Vec<PathBuf> {
+        self.tabs
+            .iter()
+            .filter_map(|t| t.history.last().cloned())
+            .collect()
+    }
+}
+
+/// Which of `saved_tabs` to restore, and which one was active: keeps only
+/// paths that still exist as directories (a moved/deleted folder is silently
+/// dropped rather than restored as an error), preserving order, and clamps
+/// `saved_active` into range. Pure (does the filesystem check but nothing
+/// else) so it's testable without constructing a `SampleBrowser`, which needs
+/// a real audio device.
+fn restore_tab_plan(saved_tabs: &[PathBuf], saved_active: usize) -> (Vec<PathBuf>, usize) {
+    let valid: Vec<PathBuf> = saved_tabs.iter().filter(|p| p.is_dir()).cloned().collect();
+    if valid.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let active = saved_active.min(valid.len() - 1);
+    (valid, active)
 }
 
 /// Active-tab index after removing the tab at `removed`. `new_len` is the tab
@@ -839,7 +877,73 @@ fn adjust_active_after_reorder(active: usize, from: usize, to: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{adjust_active_after_close, adjust_active_after_reorder};
+    use super::{adjust_active_after_close, adjust_active_after_reorder, restore_tab_plan};
+    use std::path::PathBuf;
+
+    /// A couple of real temp directories plus a path that doesn't exist, for
+    /// exercising restore_tab_plan's filesystem check.
+    struct TempDirs {
+        base: PathBuf,
+        a: PathBuf,
+        b: PathBuf,
+        vanished: PathBuf,
+    }
+    impl TempDirs {
+        fn new(tag: &str) -> Self {
+            let base = std::env::temp_dir().join(format!(
+                "punks2_tabrestore_{}_{tag}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let a = base.join("a");
+            let b = base.join("b");
+            std::fs::create_dir_all(&a).unwrap();
+            std::fs::create_dir_all(&b).unwrap();
+            TempDirs {
+                vanished: base.join("gone"),
+                base,
+                a,
+                b,
+            }
+        }
+    }
+    impl Drop for TempDirs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    #[test]
+    fn restore_tab_plan_skips_vanished_and_clamps_active() {
+        let d = TempDirs::new("skip");
+        // Saved order was [a, gone, b]; "gone" no longer exists on disk.
+        let saved = vec![d.a.clone(), d.vanished.clone(), d.b.clone()];
+        // saved_active=2 pointed at `b` in the original 3-entry list; after
+        // dropping the vanished middle entry there are only 2 valid dirs, so
+        // it clamps to the last one (still `b`, index 1).
+        let (tabs, active) = restore_tab_plan(&saved, 2);
+        assert_eq!(tabs, vec![d.a.clone(), d.b.clone()]);
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn restore_tab_plan_all_vanished_is_empty() {
+        let (tabs, active) = restore_tab_plan(&[PathBuf::from("/does/not/exist")], 5);
+        assert!(tabs.is_empty());
+        assert_eq!(active, 0);
+    }
+
+    #[test]
+    fn restore_tab_plan_in_range_active_is_unchanged() {
+        let d = TempDirs::new("inrange");
+        let saved = vec![d.a.clone(), d.b.clone()];
+        let (tabs, active) = restore_tab_plan(&saved, 0);
+        assert_eq!(tabs, saved);
+        assert_eq!(active, 0);
+    }
 
     #[test]
     fn close_left_of_active_shifts_down() {

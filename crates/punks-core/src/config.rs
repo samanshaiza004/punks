@@ -73,6 +73,16 @@ pub struct PunksConfig {
     pub keybinds: Keybinds,
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Open tab directories, in tab order (blank tabs omitted — there's
+    /// nothing in them worth restoring). Missing in configs saved before
+    /// tabs existed, so `#[serde(default)]` makes an empty list the fallback
+    /// signal to restore from `last_directory` instead.
+    #[serde(default)]
+    pub tabs: Vec<PathBuf>,
+    /// Index into `tabs` of the tab that was active. Clamped on restore, so
+    /// a stale value from before some `tabs` entries vanished is harmless.
+    #[serde(default)]
+    pub active_tab: usize,
 }
 
 impl Default for PunksConfig {
@@ -81,6 +91,8 @@ impl Default for PunksConfig {
             last_directory: None,
             keybinds: Keybinds::default(),
             volume: default_volume(),
+            tabs: Vec::new(),
+            active_tab: 0,
         }
     }
 }
@@ -129,5 +141,34 @@ pub fn save(config: &PunksConfig) {
 
     if let Err(e) = std::fs::write(&path, json) {
         log::warn!("failed to write {}: {e}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_without_tabs_field_deserializes_with_defaults() {
+        // Configs saved before tab persistence existed have no "tabs"/
+        // "active_tab" keys at all; loading one must not fail.
+        let json = r#"{"last_directory": "/some/dir", "volume": 0.5}"#;
+        let cfg: PunksConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.tabs.is_empty());
+        assert_eq!(cfg.active_tab, 0);
+        assert_eq!(cfg.last_directory, Some(PathBuf::from("/some/dir")));
+    }
+
+    #[test]
+    fn tabs_round_trip_through_json() {
+        let cfg = PunksConfig {
+            tabs: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            active_tab: 1,
+            ..PunksConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: PunksConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tabs, cfg.tabs);
+        assert_eq!(back.active_tab, 1);
     }
 }

@@ -124,9 +124,29 @@ const PILL_TEXT: [f32; 4] = [0.80, 0.84, 0.90, 1.0];
 // this wide, so wide windows show 2+ columns and narrow ones collapse to 1.
 const MIN_COLUMN_WIDTH: f32 = 300.0;
 const COLUMN_GUTTER: f32 = 8.0;
+// Small always-visible button at the end of each row that opens the tag
+// popup via left-click. Right-click does the same but isn't reliable on all
+// platforms/input devices (e.g. some macOS trackpad configurations), so
+// tagging must not depend on it exclusively.
+const TAG_BUTTON_WIDTH: f32 = 22.0;
 
 fn column_count(avail_width: f32) -> usize {
     ((avail_width / MIN_COLUMN_WIDTH).floor() as usize).max(1)
+}
+
+/// Scroll the child window (must be the current window) so row `row` is
+/// visible, nudging the minimum distance rather than re-centering — so it
+/// doesn't fight a scroll position the user set deliberately.
+fn scroll_row_into_view(ui: &imgui::Ui, row: usize, row_stride: f32) {
+    let row_top = row as f32 * row_stride;
+    let row_bottom = row_top + row_stride;
+    let view_top = ui.scroll_y();
+    let view_bottom = view_top + ui.window_size()[1];
+    if row_top < view_top {
+        ui.set_scroll_y(row_top);
+    } else if row_bottom > view_bottom {
+        ui.set_scroll_y(row_bottom - ui.window_size()[1]);
+    }
 }
 
 /// Duration as `M:SS` (or `H:MM:SS` past an hour).
@@ -190,11 +210,15 @@ pub struct BrowserPanel {
     /// lets audio play forward instead of re-seeking every frame. `None` when
     /// not scrubbing.
     scrub_last_x: Option<f32>,
+    /// Set when W/S keyboard nav moves the selection; consumed on the next
+    /// list render to scroll the newly selected row into view if it isn't.
+    scroll_to_selected: bool,
     /// Sidebar "new tag" input buffer.
     new_tag_buf: String,
     /// "New tag" buffer inside the per-file tag popup.
     popup_tag_buf: String,
-    /// File the tag-editor popup is editing (set by right-click on a row).
+    /// File the tag-editor popup is editing (set by the row's tag button, or
+    /// by right-click where that works).
     tag_popup_path: Option<PathBuf>,
     open_tag_editor: bool,
     /// Tag pending delete confirmation (set by right-click in the sidebar).
@@ -216,6 +240,7 @@ impl BrowserPanel {
             volume,
             last_active_tab: 0,
             scrub_last_x: None,
+            scroll_to_selected: false,
             new_tag_buf: String::new(),
             popup_tag_buf: String::new(),
             tag_popup_path: None,
@@ -251,17 +276,26 @@ impl BrowserPanel {
             self.last_active_tab = browser.active_tab();
         }
 
-        // Persist the deepest directory the user has navigated into, so the
-        // browser restores exactly where they left off. One check here covers
-        // every navigation path (keyboard, click, breadcrumb, Up, Browse) and
-        // fires at most once per actual directory change. It only ever moves the
-        // saved path forward — it never clobbers a saved location with `None`
-        // when no folder is open (e.g. a temporarily unavailable drive).
-        if let Some(dir) = browser.current_directory() {
-            if self.prefs.last_directory.as_deref() != Some(dir) {
-                self.prefs.last_directory = Some(dir.to_path_buf());
-                punks_core::config::save(&self.prefs);
+        // Persist the open tab set (directories + which one is active), so the
+        // browser restores the same tabs across launches. One check here
+        // covers every path that changes it — navigation (keyboard, click,
+        // breadcrumb, Up, Browse), tab open/close/switch/reorder — and fires
+        // at most once per actual change. `last_directory` rides along as the
+        // active tab's directory: it's the pre-tabs fallback field, so (like
+        // before) it only ever moves forward and is never clobbered with
+        // `None` when the active tab is temporarily blank.
+        let tab_dirs = browser.tab_directories();
+        let active_idx = browser.active_tab();
+        let current_dir = browser.current_directory().map(Path::to_path_buf);
+        let tabs_changed = self.prefs.tabs != tab_dirs || self.prefs.active_tab != active_idx;
+        let dir_changed = current_dir.is_some() && self.prefs.last_directory != current_dir;
+        if tabs_changed || dir_changed {
+            self.prefs.tabs = tab_dirs;
+            self.prefs.active_tab = active_idx;
+            if let Some(dir) = current_dir {
+                self.prefs.last_directory = Some(dir);
             }
+            punks_core::config::save(&self.prefs);
         }
 
         // --- Tab bar: switch / drag-reorder / close / new ------------------
@@ -764,6 +798,7 @@ impl BrowserPanel {
                     let path = e.path.clone();
                     browser.play_file(&path);
                 }
+                self.scroll_to_selected = true;
             }
             if ui.is_key_pressed_no_repeat(down_key) {
                 let idx = (browser.search_selected().unwrap_or(0) + 1).min(count.saturating_sub(1));
@@ -772,6 +807,7 @@ impl BrowserPanel {
                     let path = e.path.clone();
                     browser.play_file(&path);
                 }
+                self.scroll_to_selected = true;
             }
             if ui.is_key_pressed_no_repeat(back_key) {
                 self.search_buf.clear();
@@ -791,8 +827,17 @@ impl BrowserPanel {
         let cols = column_count(avail_w);
         let col_w = avail_w / cols as f32;
         let num_rows = count.div_ceil(cols);
+        let row_stride = ui.text_line_height_with_spacing();
 
-        let clip = imgui::ListClipper::new(num_rows as i32).begin(ui);
+        if std::mem::take(&mut self.scroll_to_selected) {
+            if let Some(sel) = selected {
+                scroll_row_into_view(ui, sel / cols, row_stride);
+            }
+        }
+
+        let clip = imgui::ListClipper::new(num_rows as i32)
+            .items_height(row_stride)
+            .begin(ui);
         'rows: for row in clip.iter() {
             for c in 0..cols {
                 let i = row as usize * cols + c;
@@ -812,20 +857,36 @@ impl BrowserPanel {
                     (label, e.path.clone())
                 };
 
+                let sel_w = col_w - COLUMN_GUTTER - TAG_BUTTON_WIDTH;
                 let clicked = ui
                     .selectable_config(&label)
                     .selected(selected == Some(i))
-                    .size([col_w - COLUMN_GUTTER, 0.0])
+                    .size([sel_w.max(40.0), 0.0])
                     .build();
-                let names = browser.tag_names_for_path(&path);
-                if !names.is_empty() {
-                    draw_tag_pills(ui, &names, ui.item_rect_min(), ui.item_rect_max());
-                }
-                if ui.is_item_clicked_with_button(imgui::MouseButton::Right) {
+                // Capture the row's hover/click/rect state now, before adding
+                // the tag button below shifts what "the last item" refers to.
+                let row_hovered = ui.is_item_hovered();
+                let row_right_clicked = ui.is_item_clicked_with_button(imgui::MouseButton::Right);
+                let row_rect = (ui.item_rect_min(), ui.item_rect_max());
+
+                if row_right_clicked {
                     self.tag_popup_path = Some(path.clone());
                     self.open_tag_editor = true;
                 }
-                if ui.is_item_hovered()
+                let names = browser.tag_names_for_path(&path);
+                if !names.is_empty() {
+                    draw_tag_pills(ui, &names, row_rect.0, row_rect.1);
+                }
+                ui.same_line();
+                if ui.small_button(format!("+##stagbtn{i}")) {
+                    self.tag_popup_path = Some(path.clone());
+                    self.open_tag_editor = true;
+                }
+                if ui.is_item_hovered() {
+                    ui.tooltip_text("Tag this sample");
+                }
+
+                if row_hovered
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
                     *drag_requested = Some(path);
@@ -874,11 +935,13 @@ impl BrowserPanel {
                 let idx = selected.unwrap_or(0).saturating_sub(1);
                 browser.select(idx);
                 browser.play_selected();
+                self.scroll_to_selected = true;
             }
             if ui.is_key_pressed_no_repeat(down_key) {
                 let idx = (selected.unwrap_or(0) + 1).min(entry_count.saturating_sub(1));
                 browser.select(idx);
                 browser.play_selected();
+                self.scroll_to_selected = true;
             }
             if ui.is_key_pressed_no_repeat(back_key) {
                 if let Err(e) = browser.navigate_up() {
@@ -925,8 +988,21 @@ impl BrowserPanel {
         let cols = column_count(avail_w);
         let col_w = avail_w / cols as f32;
         let num_rows = entry_count.div_ceil(cols);
+        let row_stride = ui.text_line_height_with_spacing();
 
-        let clip = imgui::ListClipper::new(num_rows as i32).begin(ui);
+        // W/S nav can select a row outside the visible viewport (the whole
+        // point of the columns+clipper is to not draw off-screen rows), so it
+        // has to be scrolled into view explicitly rather than relying on the
+        // clipper to happen to show it.
+        if std::mem::take(&mut self.scroll_to_selected) {
+            if let Some(sel) = selected {
+                scroll_row_into_view(ui, sel / cols, row_stride);
+            }
+        }
+
+        let clip = imgui::ListClipper::new(num_rows as i32)
+            .items_height(row_stride)
+            .begin(ui);
         'rows: for row in clip.iter() {
             for c in 0..cols {
                 let i = row as usize * cols + c;
@@ -950,7 +1026,14 @@ impl BrowserPanel {
                 };
 
                 let is_selected = selected == Some(i);
-                let size = [col_w - COLUMN_GUTTER, 0.0];
+                // Reserve room for the tag button so it doesn't spill into the
+                // next column.
+                let sel_w = if is_dir {
+                    col_w - COLUMN_GUTTER
+                } else {
+                    col_w - COLUMN_GUTTER - TAG_BUTTON_WIDTH
+                };
+                let size = [sel_w.max(40.0), 0.0];
                 let clicked = if is_dir {
                     let color = ui.push_style_color(imgui::StyleColor::Text, DIR_TEXT_COLOR);
                     let clicked = ui
@@ -966,19 +1049,36 @@ impl BrowserPanel {
                         .size(size)
                         .build()
                 };
+                // Capture the row's hover/click/rect state now, before adding
+                // the tag button below shifts what "the last item" refers to.
+                let row_hovered = ui.is_item_hovered();
+                let row_right_clicked = ui.is_item_clicked_with_button(imgui::MouseButton::Right);
+                let row_rect = (ui.item_rect_min(), ui.item_rect_max());
 
                 if !is_dir {
-                    let names = browser.tag_names_for_path(&path);
-                    if !names.is_empty() {
-                        draw_tag_pills(ui, &names, ui.item_rect_min(), ui.item_rect_max());
-                    }
-                    if ui.is_item_clicked_with_button(imgui::MouseButton::Right) {
+                    // Right-click opens the tag editor where the platform
+                    // delivers it (works on Windows; unreliable on some macOS
+                    // trackpad configurations), so it's a bonus, not the only
+                    // path — see the button below.
+                    if row_right_clicked {
                         self.tag_popup_path = Some(path.clone());
                         self.open_tag_editor = true;
                     }
+                    let names = browser.tag_names_for_path(&path);
+                    if !names.is_empty() {
+                        draw_tag_pills(ui, &names, row_rect.0, row_rect.1);
+                    }
+                    ui.same_line();
+                    if ui.small_button(format!("+##tagbtn{i}")) {
+                        self.tag_popup_path = Some(path.clone());
+                        self.open_tag_editor = true;
+                    }
+                    if ui.is_item_hovered() {
+                        ui.tooltip_text("Tag this sample");
+                    }
                 }
                 if !is_dir
-                    && ui.is_item_hovered()
+                    && row_hovered
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
                     *drag_requested = Some(path);
