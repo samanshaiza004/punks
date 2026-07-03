@@ -17,6 +17,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use punks_analysis::{Analyzer, AudioBuffer, Peak, Rms, Zcr};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
@@ -133,6 +134,30 @@ CREATE TABLE field_values (
 ) WITHOUT ROWID;
 ";
 
+// Migration v2: the analysis jobs queue + results. Both are Generated (a
+// scheduler can re-run them any time), so they cascade away with their asset.
+const SCHEMA_V2: &str = "
+CREATE TABLE analysis_jobs (
+  asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  analyzer   TEXT NOT NULL,                    -- 'rms' | 'peak' | 'zcr'
+  version    INTEGER NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'pending',  -- pending | done | error
+  error      TEXT,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (asset_id, analyzer)
+) WITHOUT ROWID;
+
+CREATE TABLE audio_analysis (
+  asset_id    INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  analyzer    TEXT NOT NULL,
+  version     INTEGER NOT NULL,
+  metric      TEXT NOT NULL,                   -- 'value' | 'dbfs' | ...
+  value       REAL NOT NULL,
+  computed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (asset_id, analyzer, metric)
+) WITHOUT ROWID;
+";
+
 pub struct Library {
     conn: Connection,
     root: PathBuf,
@@ -188,6 +213,10 @@ impl Library {
         if version < 1 {
             conn.execute_batch(SCHEMA_V1)?;
             conn.pragma_update(None, "user_version", 1)?;
+        }
+        if version < 2 {
+            conn.execute_batch(SCHEMA_V2)?;
+            conn.pragma_update(None, "user_version", 2)?;
         }
 
         Ok(Library {
@@ -441,6 +470,93 @@ impl Library {
         Ok(())
     }
 
+    // --- Analysis (jobs queue + results) -----------------------------------
+    //
+    // Generated data. The `run_all` free function is the single place that
+    // knows the analyzer set and how their outputs map to stored (metric,
+    // value) rows, so the punks-analysis `Analyzer` trait stays pure DSP.
+
+    /// Enqueue analysis jobs for `abs_path` (ingesting the asset if needed):
+    /// one `pending` job per analyzer at its current version. Re-queues only if
+    /// the version changed or the job isn't already `done`, so it's cheap to
+    /// call repeatedly.
+    pub fn enqueue_analysis(&self, abs_path: &Path) -> Result<(), LibraryError> {
+        let asset_id = self.ensure_asset(abs_path)?;
+        for (analyzer, version) in analyzer_versions() {
+            self.conn.execute(
+                "INSERT INTO analysis_jobs(asset_id, analyzer, version, status)
+                 VALUES (?1, ?2, ?3, 'pending')
+                 ON CONFLICT(asset_id, analyzer) DO UPDATE SET
+                   version = excluded.version, status = 'pending', error = NULL,
+                   updated_at = unixepoch()
+                 WHERE analysis_jobs.version != excluded.version
+                    OR analysis_jobs.status != 'done'",
+                rusqlite::params![asset_id, analyzer, version],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Run every analyzer inline over `buf`, store the results, and mark the
+    /// jobs `done` — all in one transaction. `buf` is decoded by the caller
+    /// (this crate has no decode dependency).
+    pub fn run_analysis(&mut self, abs_path: &Path, buf: &AudioBuffer) -> Result<(), LibraryError> {
+        let asset_id = self.ensure_asset(abs_path)?;
+        let tx = self.conn.transaction()?;
+        for (analyzer, version, metrics) in run_all(buf) {
+            for (metric, value) in metrics {
+                tx.execute(
+                    "INSERT INTO audio_analysis(asset_id, analyzer, version, metric, value)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(asset_id, analyzer, metric) DO UPDATE SET
+                       version = excluded.version, value = excluded.value,
+                       computed_at = unixepoch()",
+                    rusqlite::params![asset_id, analyzer, version, metric, value],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO analysis_jobs(asset_id, analyzer, version, status)
+                 VALUES (?1, ?2, ?3, 'done')
+                 ON CONFLICT(asset_id, analyzer) DO UPDATE SET
+                   version = excluded.version, status = 'done', error = NULL,
+                   updated_at = unixepoch()",
+                rusqlite::params![asset_id, analyzer, version],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Pending (or errored) jobs as `(asset_id, analyzer)`, for a future
+    /// scheduler to decode and run.
+    pub fn pending_jobs(&self) -> Result<Vec<(i64, String)>, LibraryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT asset_id, analyzer FROM analysis_jobs
+              WHERE status != 'done' ORDER BY asset_id, analyzer",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Read a stored analysis metric, or `None` if it hasn't been computed.
+    pub fn analysis_value(
+        &self,
+        abs_path: &Path,
+        analyzer: &str,
+        metric: &str,
+    ) -> Result<Option<f64>, LibraryError> {
+        let Some(asset_id) = self.asset_id_for(abs_path)? else {
+            return Ok(None);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT value FROM audio_analysis
+              WHERE asset_id = ?1 AND analyzer = ?2 AND metric = ?3",
+        )?;
+        let mut rows =
+            stmt.query_map(rusqlite::params![asset_id, analyzer, metric], |r| r.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
     // --- Reconciliation ----------------------------------------------------
 
     /// Reconcile the database against `files` (the current on-disk state).
@@ -615,6 +731,36 @@ fn row_to_asset(r: &rusqlite::Row) -> Result<Asset, rusqlite::Error> {
         size: r.get::<_, i64>(2)? as u64,
         mtime_ms: r.get(3)?,
     })
+}
+
+/// The analyzer set with their current versions (for enqueuing jobs).
+fn analyzer_versions() -> [(&'static str, u32); 3] {
+    [
+        ("rms", Rms::VERSION),
+        ("peak", Peak::VERSION),
+        ("zcr", Zcr::VERSION),
+    ]
+}
+
+/// One analyzer's run result: its id, version, and its scalar metrics.
+type AnalyzerRun = (&'static str, u32, Vec<(&'static str, f64)>);
+
+/// Run every analyzer over `buf`, returning each as
+/// `(analyzer_id, version, [(metric, value)])`. The single place that maps the
+/// pure `Analyzer` outputs onto the stored scalar metrics.
+fn run_all(buf: &AudioBuffer) -> [AnalyzerRun; 3] {
+    let rms = Rms::analyze(buf);
+    let peak = Peak::analyze(buf);
+    let zcr = Zcr::analyze(buf);
+    [
+        (
+            "rms",
+            Rms::VERSION,
+            vec![("value", rms.value as f64), ("dbfs", rms.dbfs as f64)],
+        ),
+        ("peak", Peak::VERSION, vec![("value", peak.value as f64)]),
+        ("zcr", Zcr::VERSION, vec![("value", zcr.value as f64)]),
+    ]
 }
 
 /// Walk `root` for supported audio files, described cheaply for reconcile.
@@ -988,5 +1134,64 @@ mod tests {
             .unwrap();
         // One report per file, strictly increasing, ending at the count.
         assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn analysis_enqueue_run_read() {
+        use punks_analysis::AudioBuffer;
+
+        let t = TempRoot::new("analysis");
+        let a = write_wav(&t.0, "clip.wav", b"DUMMY");
+        let mut lib = Library::create(&t.0).unwrap();
+
+        // Queue exists: one pending job per analyzer.
+        lib.enqueue_analysis(&a).unwrap();
+        assert_eq!(lib.pending_jobs().unwrap().len(), 3);
+
+        // Run inline over a known buffer: constant 0.5 → RMS/Peak 0.5, ZCR 0.
+        let samples = vec![0.5f32; 1000];
+        let buf = AudioBuffer::new(&samples, 48_000, 1);
+        lib.run_analysis(&a, &buf).unwrap();
+
+        assert!((lib.analysis_value(&a, "rms", "value").unwrap().unwrap() - 0.5).abs() < 1e-6);
+        assert!(lib.analysis_value(&a, "rms", "dbfs").unwrap().unwrap() < 0.0);
+        assert_eq!(lib.analysis_value(&a, "peak", "value").unwrap(), Some(0.5));
+        assert_eq!(lib.analysis_value(&a, "zcr", "value").unwrap(), Some(0.0));
+        // All jobs done now.
+        assert!(lib.pending_jobs().unwrap().is_empty());
+        // Unknown metric → None.
+        assert_eq!(lib.analysis_value(&a, "peak", "dbfs").unwrap(), None);
+    }
+
+    #[test]
+    fn analysis_run_is_idempotent_and_cascades() {
+        use punks_analysis::AudioBuffer;
+
+        let t = TempRoot::new("analysis2");
+        let a = write_wav(&t.0, "x.wav", b"X");
+        let mut lib = Library::create(&t.0).unwrap();
+
+        let samples = vec![0.5f32; 8];
+        let buf = AudioBuffer::new(&samples, 8_000, 1);
+        lib.run_analysis(&a, &buf).unwrap();
+        lib.run_analysis(&a, &buf).unwrap(); // rerun: upsert, no duplicate rows
+
+        let n: i64 = lib
+            .conn
+            .query_row("SELECT COUNT(*) FROM audio_analysis", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 4); // rms(value,dbfs) + peak(value) + zcr(value)
+
+        // Deleting the asset cascades the generated rows away.
+        let asset_id = lib.asset_id_for(&a).unwrap().unwrap();
+        lib.conn
+            .execute("DELETE FROM assets WHERE id = ?1", [asset_id])
+            .unwrap();
+        let n: i64 = lib
+            .conn
+            .query_row("SELECT COUNT(*) FROM audio_analysis", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(lib.pending_jobs().unwrap().is_empty());
     }
 }
