@@ -149,17 +149,6 @@ fn scroll_row_into_view(ui: &imgui::Ui, row: usize, row_stride: f32) {
     }
 }
 
-/// Duration as `M:SS` (or `H:MM:SS` past an hour).
-fn format_hms(secs: f64) -> String {
-    let total = secs.max(0.0) as u64;
-    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
-}
-
 /// bext TimeReference (sample count) as `hh:mm:ss.mmm` start timecode.
 fn format_timecode(samples: u64, sample_rate: u32) -> String {
     if sample_rate == 0 {
@@ -224,6 +213,8 @@ pub struct BrowserPanel {
     /// Tag pending delete confirmation (set by right-click in the sidebar).
     tag_delete_target: Option<(i64, String)>,
     open_tag_delete: bool,
+    /// Request to open the "delete library" confirmation popup.
+    open_delete_library: bool,
 }
 
 impl BrowserPanel {
@@ -247,6 +238,7 @@ impl BrowserPanel {
             open_tag_editor: false,
             tag_delete_target: None,
             open_tag_delete: false,
+            open_delete_library: false,
         }
     }
 
@@ -564,8 +556,10 @@ impl BrowserPanel {
 
         draw_waveform_widget(ui, browser, &mut self.scrub_last_x);
 
-        // Container metadata (BWF bext) + long-file preview indicator, one line.
-        // A blank line is reserved when absent so the layout doesn't jump.
+        // Container metadata (BWF bext), one line. A blank line is reserved
+        // when absent so the layout doesn't jump. (No "preview window"
+        // indicator: the whole source is scrubbable now, so it would describe
+        // a limit that no longer exists.)
         {
             let mut parts: Vec<String> = Vec::new();
             if let Some(info) = browser.current_track_info() {
@@ -578,13 +572,6 @@ impl BrowserPanel {
                     parts.push(format!(
                         "TC {}",
                         format_timecode(tc, info.source_sample_rate)
-                    ));
-                }
-                if info.truncated {
-                    parts.push(format!(
-                        "preview: first {} of {}",
-                        format_hms(info.preview_duration.as_secs_f64()),
-                        format_hms(info.source_duration.as_secs_f64()),
                     ));
                 }
             }
@@ -718,7 +705,26 @@ impl BrowserPanel {
                 }
             }
             LibraryState::Scanning => {
-                ui.text_disabled("Scanning folder...");
+                ui.text_disabled("Scanning library…");
+                match browser.scan_progress() {
+                    Some((_, 0)) | None => {
+                        // Still walking the tree (count unknown): indeterminate
+                        // sweep driven by the frame clock.
+                        let f = (ui.time() as f32).fract();
+                        imgui::ProgressBar::new(f)
+                            .size([-1.0, 14.0])
+                            .overlay_text("Reading files…")
+                            .build(ui);
+                    }
+                    Some((done, total)) => {
+                        let frac = done as f32 / total as f32;
+                        imgui::ProgressBar::new(frac)
+                            .size([-1.0, 14.0])
+                            .overlay_text(format!("{done} / {total}"))
+                            .build(ui);
+                    }
+                }
+                self.draw_delete_library(ui, browser);
             }
             LibraryState::Ready => {
                 ui.spacing();
@@ -758,8 +764,42 @@ impl BrowserPanel {
                         browser.clear_tag_filter();
                     }
                 }
+                self.draw_delete_library(ui, browser);
             }
         }
+    }
+
+    /// Testing convenience pinned to the bottom of the library sidebar: wipe
+    /// the current `.punks` store, behind a confirmation popup.
+    fn draw_delete_library(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+        ui.spacing();
+        ui.separator();
+        let danger = ui.push_style_color(imgui::StyleColor::Text, [0.90, 0.45, 0.45, 1.0]);
+        let clicked = ui.small_button("Delete library");
+        danger.pop();
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Deletes the .punks folder for this root (testing).");
+        }
+        if clicked {
+            self.open_delete_library = true;
+        }
+        if self.open_delete_library {
+            self.open_delete_library = false;
+            ui.open_popup("##delete_library");
+        }
+        ui.popup("##delete_library", || {
+            ui.text("Delete this library's .punks store?");
+            ui.text_disabled("Tags and cached waveforms are lost. Irreversible.");
+            ui.spacing();
+            if ui.button("Delete") {
+                browser.delete_active_library();
+                ui.close_current_popup();
+            }
+            ui.same_line();
+            if ui.button("Cancel") {
+                ui.close_current_popup();
+            }
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -773,6 +813,18 @@ impl BrowserPanel {
         down_key: Key,
         back_key: Key,
     ) {
+        // `A` exits search — tree-style nav that must work regardless of whether
+        // there are results yet (before the count-based early returns below,
+        // which would otherwise leave you unable to key out of a no-match /
+        // still-searching state).
+        if ui.is_window_focused() && !search_focused && ui.is_key_pressed_no_repeat(back_key) {
+            self.search_buf.clear();
+            self.last_typed_query.clear();
+            self.last_searched_query.clear();
+            browser.clear_search();
+            return;
+        }
+
         let count = match browser.search_results() {
             Some(r) if !r.is_empty() => r.len(),
             Some(_) => {
@@ -789,10 +841,12 @@ impl BrowserPanel {
         // handling or the clipper loop.
         let root: Option<PathBuf> = browser.current_directory().map(|p| p.to_path_buf());
 
-        // Keyboard navigation — mutable borrows happen here, before the clipper.
+        // List navigation over results (W/S). `A` was already handled above.
         if ui.is_window_focused() && !search_focused {
             if ui.is_key_pressed_no_repeat(up_key) {
-                let idx = browser.search_selected().unwrap_or(0).saturating_sub(1);
+                let idx = browser
+                    .search_selected()
+                    .map_or(count - 1, |i| i.saturating_sub(1));
                 browser.select_search_result(idx);
                 if let Some(e) = browser.search_results().and_then(|r| r.get(idx)) {
                     let path = e.path.clone();
@@ -801,20 +855,15 @@ impl BrowserPanel {
                 self.scroll_to_selected = true;
             }
             if ui.is_key_pressed_no_repeat(down_key) {
-                let idx = (browser.search_selected().unwrap_or(0) + 1).min(count.saturating_sub(1));
+                let idx = browser
+                    .search_selected()
+                    .map_or(0, |i| (i + 1).min(count - 1));
                 browser.select_search_result(idx);
                 if let Some(e) = browser.search_results().and_then(|r| r.get(idx)) {
                     let path = e.path.clone();
                     browser.play_file(&path);
                 }
                 self.scroll_to_selected = true;
-            }
-            if ui.is_key_pressed_no_repeat(back_key) {
-                self.search_buf.clear();
-                self.last_typed_query.clear();
-                self.last_searched_query.clear();
-                browser.clear_search();
-                return;
             }
         }
 
@@ -916,50 +965,50 @@ impl BrowserPanel {
         back_key: Key,
         conf_key: Key,
     ) {
-        let entry_count = browser.entries().len();
-
-        if entry_count == 0 {
-            if browser.current_directory().is_some() {
-                ui.text_disabled("Empty directory.");
-            } else {
-                ui.text_disabled("No folder open. Click Browse to get started.");
-            }
-            return;
-        }
-
-        // Keyboard navigation — mutable borrows happen here, before the
-        // clipper loop takes short immutable borrows to read entry data.
-        let selected = browser.selected();
+        // Keyboard nav runs first — and BEFORE any empty-directory early return
+        // — decoupled by what each key acts on. `A` (back) is tree navigation:
+        // it moves up the directory stack and needs no list selection, so it
+        // must work even in an empty folder. `W`/`S`/`D` are list navigation:
+        // they self-initialize the selection and no-op when there's nothing to
+        // act on.
         if ui.is_window_focused() && !search_focused {
-            if ui.is_key_pressed_no_repeat(up_key) {
-                let idx = selected.unwrap_or(0).saturating_sub(1);
-                browser.select(idx);
-                browser.play_selected();
-                self.scroll_to_selected = true;
-            }
-            if ui.is_key_pressed_no_repeat(down_key) {
-                let idx = (selected.unwrap_or(0) + 1).min(entry_count.saturating_sub(1));
-                browser.select(idx);
-                browser.play_selected();
-                self.scroll_to_selected = true;
-            }
+            let entry_count = browser.entries().len();
+            let selected = browser.selected();
+
             if ui.is_key_pressed_no_repeat(back_key) {
                 if let Err(e) = browser.navigate_up() {
                     log::error!("navigate_up failed: {e}");
                 }
-            }
-            let confirm = ui.is_key_pressed_no_repeat(conf_key)
-                || ui.is_key_pressed_no_repeat(Key::Enter)
-                || ui.is_key_pressed_no_repeat(Key::KeypadEnter);
-            if confirm {
-                if let Some(i) = selected {
-                    let is_dir = browser.entries().get(i).map(|e| e.is_directory);
-                    if is_dir == Some(true) {
-                        if let Err(e) = browser.navigate_into(i) {
-                            log::error!("navigate_into failed: {e}");
+            } else if entry_count > 0 {
+                // `else if`: `A` may have just changed the directory; don't also
+                // move a selection within the now-different listing this frame.
+                if ui.is_key_pressed_no_repeat(up_key) {
+                    // First press with no selection lands on the last item.
+                    let idx = selected.map_or(entry_count - 1, |i| i.saturating_sub(1));
+                    browser.select(idx);
+                    browser.play_selected();
+                    self.scroll_to_selected = true;
+                }
+                if ui.is_key_pressed_no_repeat(down_key) {
+                    // First press with no selection lands on the first item.
+                    let idx = selected.map_or(0, |i| (i + 1).min(entry_count - 1));
+                    browser.select(idx);
+                    browser.play_selected();
+                    self.scroll_to_selected = true;
+                }
+                let confirm = ui.is_key_pressed_no_repeat(conf_key)
+                    || ui.is_key_pressed_no_repeat(Key::Enter)
+                    || ui.is_key_pressed_no_repeat(Key::KeypadEnter);
+                if confirm {
+                    if let Some(i) = selected {
+                        let is_dir = browser.entries().get(i).map(|e| e.is_directory);
+                        if is_dir == Some(true) {
+                            if let Err(e) = browser.navigate_into(i) {
+                                log::error!("navigate_into failed: {e}");
+                            }
+                        } else if is_dir == Some(false) {
+                            browser.play_selected();
                         }
-                    } else if is_dir == Some(false) {
-                        browser.play_selected();
                     }
                 }
             }
@@ -975,9 +1024,11 @@ impl BrowserPanel {
         let mut click_action: Option<(usize, bool, PathBuf)> = None;
 
         if entry_count == 0 {
-            // Directory navigated to (e.g. via confirm) turned out empty;
-            // nothing to lay out this frame. "Empty directory" text shows on
-            // the next frame via the early return above.
+            if browser.current_directory().is_some() {
+                ui.text_disabled("Empty directory.");
+            } else {
+                ui.text_disabled("No folder open. Click Browse to get started.");
+            }
             return;
         }
 
@@ -1222,7 +1273,11 @@ fn draw_tag_pills(ui: &imgui::Ui, names: &[String], rect_min: [f32; 2], rect_max
     }
 }
 
-fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser, scrub_last_x: &mut Option<f32>) {
+fn draw_waveform_widget(
+    ui: &imgui::Ui,
+    browser: &mut SampleBrowser,
+    scrub_last_x: &mut Option<f32>,
+) {
     let [cx, cy] = ui.cursor_screen_pos();
     let w = ui.content_region_avail()[0];
     const H: f32 = 64.0;
@@ -1231,7 +1286,11 @@ fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser, scrub_last_x: &
     let clicked = ui.invisible_button("##waveform", [w, H]);
     let hovered = ui.is_item_hovered();
     let active = ui.is_item_active();
-    let scrubbable = browser.loaded_duration().is_some();
+    // (start, duration) in SOURCE seconds that the shown waveform spans. The
+    // playhead, hover label and scrub all map against this, so everything is
+    // consistent whether we're showing the whole-file waveform or just a
+    // loaded window while it computes.
+    let axis = browser.waveform_axis();
     let mouse_x = ui.io().mouse_pos[0];
 
     let draw = ui.get_window_draw_list();
@@ -1245,7 +1304,7 @@ fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser, scrub_last_x: &
         .filled(true)
         .build();
 
-    if let Some(peaks) = browser.waveform_peaks() {
+    let has_peaks = if let Some(peaks) = browser.waveform_peaks() {
         let bar_w = (w / peaks.num_buckets as f32).max(1.0);
         let mid_y = cy + H / 2.0;
         let half_h = H / 2.0;
@@ -1258,7 +1317,10 @@ fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser, scrub_last_x: &
                 .filled(true)
                 .build();
         }
-    }
+        true
+    } else {
+        false
+    };
 
     match browser.playback_status() {
         PlaybackStatus::Playing {
@@ -1266,9 +1328,9 @@ fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser, scrub_last_x: &
             position,
             duration,
         } => {
-            let dur_secs = duration.as_secs_f32();
-            if dur_secs > 0.0 {
-                let t = position.as_secs_f32() / dur_secs;
+            // Playhead position mapped onto the displayed axis (source-relative).
+            if let Some((start, dur)) = axis {
+                let t = (((position.as_secs_f64() - start) / dur) as f32).clamp(0.0, 1.0);
                 let px = cx + t * w;
                 draw.add_line([px, cy], [px, cy + H], playhead_color)
                     .build();
@@ -1298,7 +1360,7 @@ fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser, scrub_last_x: &
             );
         }
         PlaybackStatus::Idle => {
-            if browser.waveform_peaks().is_none() {
+            if !has_peaks {
                 draw.add_text(
                     [cx + 4.0, cy + H / 2.0 - 7.0],
                     color_u32([0.5, 0.5, 0.5, 0.7]),
@@ -1309,31 +1371,37 @@ fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser, scrub_last_x: &
     }
 
     // Hover / scrub crosshair + time label at the mouse position.
-    if scrubbable && (hovered || active) {
-        let mx = mouse_x.clamp(cx, cx + w);
-        let hover = color_u32(WAVEFORM_HOVER);
-        draw.add_line([mx, cy], [mx, cy + H], hover).build();
-        let mid = cy + H / 2.0;
-        draw.add_line([mx - 4.0, mid], [mx + 4.0, mid], hover)
-            .build();
-        if let Some(dur) = browser.loaded_duration() {
-            let frac = ((mx - cx) / w).clamp(0.0, 1.0);
-            let t = (dur.as_secs_f64() * frac as f64) as u64;
+    if let Some((start, dur)) = axis {
+        if hovered || active {
+            let mx = mouse_x.clamp(cx, cx + w);
+            let hover = color_u32(WAVEFORM_HOVER);
+            draw.add_line([mx, cy], [mx, cy + H], hover).build();
+            let mid = cy + H / 2.0;
+            draw.add_line([mx - 4.0, mid], [mx + 4.0, mid], hover)
+                .build();
+            let frac = ((mx - cx) / w).clamp(0.0, 1.0) as f64;
+            let t = (start + frac * dur) as u64;
             let label = format!("{}:{:02}", t / 60, t % 60);
             let lx = (mx + 4.0).clamp(cx + 2.0, cx + w - 36.0);
             draw.add_text([lx, cy + 2.0], color_u32(WAVEFORM_TEXT), label);
+            ui.set_mouse_cursor(Some(imgui::MouseCursor::ResizeEW));
         }
-        ui.set_mouse_cursor(Some(imgui::MouseCursor::ResizeEW));
     }
 
     // Click seeks once; drag follows the cursor. Re-seek only when the cursor
     // moved >= 1px since the last seek, so a held-still cursor lets audio play
     // forward instead of re-triggering the same grain every frame.
-    if scrubbable && (active || clicked) {
-        let mx = mouse_x.clamp(cx, cx + w);
-        if scrub_last_x.is_none_or(|lx| (mx - lx).abs() >= 1.0) {
-            browser.seek_fraction((mx - cx) / w);
-            *scrub_last_x = Some(mx);
+    if let Some((start, dur)) = axis {
+        if active || clicked {
+            let mx = mouse_x.clamp(cx, cx + w);
+            if scrub_last_x.is_none_or(|lx| (mx - lx).abs() >= 1.0) {
+                let frac = ((mx - cx) / w).clamp(0.0, 1.0) as f64;
+                let target = (start + frac * dur).max(0.0);
+                browser.seek_to(Duration::from_secs_f64(target));
+                *scrub_last_x = Some(mx);
+            }
+        } else {
+            *scrub_last_x = None;
         }
     } else {
         *scrub_last_x = None;

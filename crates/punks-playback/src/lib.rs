@@ -15,7 +15,7 @@ mod decode;
 pub mod peaks;
 mod resample;
 
-pub use decode::AudioMetadata;
+pub use decode::{compute_source_peaks, AudioMetadata};
 pub use peaks::WaveformPeaks;
 
 /// Container-level info about the currently loaded track: free-text metadata,
@@ -76,33 +76,35 @@ struct PreparedAudio {
     file: PathBuf,
     peaks: WaveformPeaks,
     info: TrackInfo,
+    /// Where in the source this buffer starts (0 for a from-the-start preview).
+    window_start: Duration,
 }
 
 /// A "latest wins" single-slot mailbox: `send` replaces whatever is waiting
 /// (if anything), `recv` blocks until a value is available. This coalesces
-/// rapid decode requests into a single persistent worker thread — if several
-/// `send`s land before the worker is free, only the most recent one is ever
-/// received.
-struct RequestSlot<T> {
+/// rapid requests into a single persistent worker thread — if several `send`s
+/// land before the worker is free, only the most recent one is ever received.
+/// Reused by both the decode worker (here) and the browser's peaks worker.
+pub struct RequestSlot<T> {
     slot: Mutex<Option<T>>,
     cv: Condvar,
 }
 
 impl<T> RequestSlot<T> {
-    fn new() -> Self {
+    pub fn new() -> Self {
         RequestSlot {
             slot: Mutex::new(None),
             cv: Condvar::new(),
         }
     }
 
-    fn send(&self, value: T) {
+    pub fn send(&self, value: T) {
         let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(value);
         self.cv.notify_one();
     }
 
-    fn recv(&self) -> T {
+    pub fn recv(&self) -> T {
         let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if let Some(value) = guard.take() {
@@ -113,7 +115,46 @@ impl<T> RequestSlot<T> {
     }
 }
 
+impl<T> Default for RequestSlot<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 const CACHE_CAPACITY: usize = 10;
+/// Length of an on-demand window decoded when scrubbing past the loaded region
+/// of a long file. Matches the initial preview window for a consistent feel.
+const WINDOW: Duration = Duration::from_secs(120);
+
+/// What the decode worker should produce.
+enum DecodeRequest {
+    /// From-the-start preview (or the whole file, if short).
+    Full(PathBuf),
+    /// A bounded window starting `start` into the source (scrub target).
+    Window { path: PathBuf, start: Duration },
+}
+
+impl DecodeRequest {
+    fn path(&self) -> &Path {
+        match self {
+            DecodeRequest::Full(p) => p,
+            DecodeRequest::Window { path, .. } => path,
+        }
+    }
+    fn window(&self) -> Option<Duration> {
+        match self {
+            DecodeRequest::Full(_) => None,
+            DecodeRequest::Window { start, .. } => Some(*start),
+        }
+    }
+}
+
+/// A decode we're awaiting: its request id (to drop results superseded by a
+/// later request) and the file, for `status()`'s Loading state.
+struct PendingReq {
+    id: u64,
+    file: PathBuf,
+}
 
 pub struct PlaybackEngine {
     shared: Arc<SharedState>,
@@ -122,12 +163,21 @@ pub struct PlaybackEngine {
     device_channels: u16,
     current_file: Option<PathBuf>,
     current_peaks: Option<WaveformPeaks>,
+    /// Full-source waveform (path it belongs to + peaks), computed in the
+    /// background for long files. Preferred over `current_peaks` when it's for
+    /// the current file; lets the waveform show the whole source, not just the
+    /// loaded window.
+    current_full_peaks: Option<(PathBuf, WaveformPeaks)>,
     current_info: Option<TrackInfo>,
-    /// File we're currently awaiting a decode for, if any.
-    pending: Option<PathBuf>,
+    /// Where the loaded buffer starts in the source (0 unless a window was
+    /// decoded on demand).
+    current_window_start: Duration,
+    /// The decode we're awaiting, if any.
+    pending: Option<PendingReq>,
+    next_request_id: u64,
     cache: LruCache<PathBuf, Arc<PreparedAudio>>,
-    decode_request: Arc<RequestSlot<PathBuf>>,
-    decode_result_rx: mpsc::Receiver<(PathBuf, Result<PreparedAudio, PlaybackError>)>,
+    decode_request: Arc<RequestSlot<(u64, DecodeRequest)>>,
+    decode_result_rx: mpsc::Receiver<(u64, Result<PreparedAudio, PlaybackError>)>,
 }
 
 impl PlaybackEngine {
@@ -175,15 +225,16 @@ impl PlaybackEngine {
         // thread per play() call. Rapid navigation (holding W/S) now coalesces
         // into a single in-flight decode via RequestSlot rather than spawning
         // and fully decoding a thread per keypress.
-        let decode_request = Arc::new(RequestSlot::<PathBuf>::new());
+        let decode_request = Arc::new(RequestSlot::<(u64, DecodeRequest)>::new());
         let (result_tx, result_rx) = mpsc::channel();
         {
             let decode_request = Arc::clone(&decode_request);
             let target_channels = channels as usize;
             let target_rate = sample_rate;
             std::thread::spawn(move || loop {
-                let path = decode_request.recv();
-                let result = decode_and_prepare(&path, target_channels, target_rate);
+                let (id, req) = decode_request.recv();
+                let result =
+                    decode_and_prepare(req.path(), target_channels, target_rate, req.window());
                 // ponytail: no explicit shutdown signal. If the engine is
                 // dropped while this thread is between decodes (blocked in
                 // recv()), the thread parks forever rather than exiting.
@@ -192,7 +243,7 @@ impl PlaybackEngine {
                 // reclaims it regardless. Upgrade path if that ever changes:
                 // give RequestSlot a Shutdown variant the worker checks after
                 // waking.
-                if result_tx.send((path, result)).is_err() {
+                if result_tx.send((id, result)).is_err() {
                     break; // receiver dropped; nothing left to report to.
                 }
             });
@@ -205,12 +256,21 @@ impl PlaybackEngine {
             device_channels: channels,
             current_file: None,
             current_peaks: None,
+            current_full_peaks: None,
             current_info: None,
+            current_window_start: Duration::ZERO,
             pending: None,
+            next_request_id: 0,
             cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
             decode_request,
             decode_result_rx: result_rx,
         })
+    }
+
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        id
     }
 
     fn commit(&mut self, audio: &Arc<PreparedAudio>) {
@@ -233,6 +293,7 @@ impl PlaybackEngine {
         self.current_file = Some(audio.file.clone());
         self.current_peaks = Some(audio.peaks.clone());
         self.current_info = Some(audio.info.clone());
+        self.current_window_start = audio.window_start;
         // Release pairs with the Acquire load in audio_callback, so the
         // callback is guaranteed to observe cursor=0 and the new samples
         // whenever it sees playing==true.
@@ -249,6 +310,8 @@ impl PlaybackEngine {
         self.shared.playing.store(false, Ordering::SeqCst);
 
         let path_buf = path.to_path_buf();
+        // New clip: drop the previous file's full-source waveform.
+        self.current_full_peaks = None;
 
         if let Some(cached) = self.cache.get(&path_buf) {
             let cached = Arc::clone(cached);
@@ -260,11 +323,16 @@ impl PlaybackEngine {
         self.current_peaks = None;
         self.current_info = None;
 
-        // If a decode is already in flight, this replaces the queued path —
+        // If a decode is already in flight, this replaces the queued request —
         // RequestSlot coalesces to the latest — so rapid navigation collapses
         // into a single decode instead of spawning a thread per keypress.
-        self.decode_request.send(path_buf.clone());
-        self.pending = Some(path_buf);
+        let id = self.alloc_id();
+        self.pending = Some(PendingReq {
+            id,
+            file: path_buf.clone(),
+        });
+        self.decode_request
+            .send((id, DecodeRequest::Full(path_buf)));
     }
 
     pub fn poll(&mut self) -> Option<PlaybackError> {
@@ -272,19 +340,18 @@ impl PlaybackEngine {
 
         loop {
             match self.decode_result_rx.try_recv() {
-                Ok((path, result)) => {
-                    // A result for a request superseded by a later play() call
-                    // (or abandoned for a cache hit) — discard and keep
-                    // draining rather than returning it.
-                    if self.pending.as_deref() != Some(path.as_path()) {
+                Ok((id, result)) => {
+                    // A result for a request superseded by a later play()/seek
+                    // (or abandoned for a cache hit) — discard and keep draining.
+                    if self.pending.as_ref().map(|p| p.id) != Some(id) {
                         continue;
                     }
                     return match result {
                         Ok(audio) => {
                             let arc = Arc::new(audio);
-                            // Previews of long files are large and re-auditioned
-                            // rarely; keep them out of the cache so it stays
-                            // full of small one-shots.
+                            // Previews/windows of long files are large and
+                            // re-auditioned rarely; keep them out of the cache
+                            // so it stays full of small one-shots.
                             if !arc.info.truncated {
                                 self.cache.put(arc.file.clone(), Arc::clone(&arc));
                             }
@@ -318,8 +385,10 @@ impl PlaybackEngine {
     }
 
     pub fn status(&self) -> PlaybackStatus {
-        if let Some(file) = &self.pending {
-            return PlaybackStatus::Loading { file: file.clone() };
+        if let Some(p) = &self.pending {
+            return PlaybackStatus::Loading {
+                file: p.file.clone(),
+            };
         }
 
         if !self.shared.playing.load(Ordering::Relaxed) {
@@ -333,56 +402,124 @@ impl PlaybackEngine {
                 let channels = self.device_channels as usize;
                 let frame = if channels > 0 { cursor / channels } else { 0 };
                 let rate = self.device_sample_rate as f64;
+                // Position and duration are SOURCE-relative: the loaded buffer
+                // may be a window starting at `current_window_start` into a
+                // longer source, so the playhead and time readout track the
+                // whole file, not just the buffer.
+                let within = frame as f64 / rate;
+                let position = self.current_window_start + Duration::from_secs_f64(within);
+                let duration = self
+                    .current_info
+                    .as_ref()
+                    .map(|i| i.source_duration)
+                    .unwrap_or_else(|| Duration::from_secs_f64(total as f64 / rate));
 
                 PlaybackStatus::Playing {
                     file: file.clone(),
-                    position: Duration::from_secs_f64(frame as f64 / rate),
-                    duration: Duration::from_secs_f64(total as f64 / rate),
+                    position,
+                    duration,
                 }
             }
             None => PlaybackStatus::Idle,
         }
     }
 
+    pub fn current_file(&self) -> Option<&Path> {
+        self.current_file.as_deref()
+    }
+
+    /// True when the full-source waveform for the current file is available and
+    /// shown (so the waveform axis spans the whole source, not just a window).
+    fn showing_full(&self) -> bool {
+        matches!(
+            (&self.current_full_peaks, &self.current_file),
+            (Some((p, _)), Some(f)) if p == f
+        )
+    }
+
     pub fn waveform_peaks(&self) -> Option<&WaveformPeaks> {
+        if let (Some((p, peaks)), Some(f)) = (&self.current_full_peaks, &self.current_file) {
+            if p == f {
+                return Some(peaks);
+            }
+        }
         self.current_peaks.as_ref()
+    }
+
+    /// The `(start, duration)` region of the SOURCE, in seconds, that the
+    /// waveform returned by [`waveform_peaks`] represents. The UI maps the
+    /// playhead and scrub clicks against this. `None` when nothing is loaded.
+    pub fn waveform_axis(&self) -> Option<(f64, f64)> {
+        let info = self.current_info.as_ref()?;
+        if self.showing_full() {
+            Some((0.0, info.source_duration.as_secs_f64().max(1e-9)))
+        } else {
+            let total = self.shared.total_frames.load(Ordering::Relaxed);
+            if total == 0 {
+                return None;
+            }
+            let loaded = (total as f64 / self.device_sample_rate as f64).max(1e-9);
+            Some((self.current_window_start.as_secs_f64(), loaded))
+        }
     }
 
     pub fn current_info(&self) -> Option<&TrackInfo> {
         self.current_info.as_ref()
     }
 
-    /// Playable duration of the currently loaded buffer (device rate), or
-    /// `None` when nothing is loaded. Used by the UI to label scrub positions.
-    pub fn loaded_duration(&self) -> Option<Duration> {
-        let total = self.shared.total_frames.load(Ordering::Relaxed);
-        (total > 0).then(|| Duration::from_secs_f64(total as f64 / self.device_sample_rate as f64))
+    /// Attach a full-source waveform for `path`, if it's still the current file
+    /// (a scan that finished after the user moved on is dropped).
+    pub fn set_full_peaks(&mut self, path: &Path, peaks: WaveformPeaks) {
+        if self.current_file.as_deref() == Some(path) {
+            self.current_full_peaks = Some((path.to_path_buf(), peaks));
+        }
     }
 
-    /// Seek to `fraction` (0..1) of the loaded buffer and (re)start playback
-    /// from there. No re-decode: the whole clip is already in `shared.samples`,
-    /// so this just repositions the cursor.
+    /// Seek to `target` seconds into the SOURCE and play from there. If the
+    /// loaded buffer already covers `target`, this just moves the cursor
+    /// (instant). Otherwise it requests an on-demand window decode at `target`
+    /// (scrubbing a long file past its loaded region) — playback resumes when
+    /// that window commits via [`poll`].
     ///
-    /// `&self` — atomics only, like `set_volume`. Ordering mirrors `commit`:
-    /// the `cursor` store is published by the `Release` store of `playing`,
-    /// which the audio callback loads with `Acquire`, so a seek from a stopped
-    /// or finished clip never reads a stale position. Seeking mid-playback is
-    /// also safe — `cursor` is a single coherent atomic and the callback
-    /// re-checks bounds every buffer.
-    ///
-    /// Note: this operates on whatever is currently loaded. While a new clip is
-    /// still decoding, that is the *previous* clip's buffer (poll/commit and
-    /// this call are both on the main thread, so there is no race — just the
-    /// previous buffer until the new one commits).
-    pub fn seek_fraction(&self, fraction: f32) {
+    /// `&mut self` because the out-of-window case enqueues a decode. The
+    /// in-window fast path is atomics only; its `cursor` store is published by
+    /// the `Release` store of `playing`, which the callback loads with
+    /// `Acquire`, so a seek never reads a stale position.
+    pub fn seek_to(&mut self, target: Duration) {
         let total = self.shared.total_frames.load(Ordering::Relaxed);
         if total == 0 {
             return;
         }
-        let frame = frame_for_fraction(total, fraction);
-        let channels = self.device_channels.max(1) as usize;
-        self.shared.cursor.store(frame * channels, Ordering::SeqCst);
-        self.shared.playing.store(true, Ordering::Release);
+        let rate = self.device_sample_rate as f64;
+        let loaded = total as f64 / rate;
+        let ws = self.current_window_start.as_secs_f64();
+        let t = target.as_secs_f64();
+
+        if t >= ws && t < ws + loaded {
+            let within = t - ws;
+            let frame = ((within * rate) as usize).min(total - 1);
+            let channels = self.device_channels.max(1) as usize;
+            self.shared.cursor.store(frame * channels, Ordering::SeqCst);
+            self.shared.playing.store(true, Ordering::Release);
+            return;
+        }
+
+        let Some(file) = self.current_file.clone() else {
+            return;
+        };
+        self.shared.playing.store(false, Ordering::SeqCst);
+        let id = self.alloc_id();
+        self.pending = Some(PendingReq {
+            id,
+            file: file.clone(),
+        });
+        self.decode_request.send((
+            id,
+            DecodeRequest::Window {
+                path: file,
+                start: target,
+            },
+        ));
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -400,8 +537,12 @@ fn decode_and_prepare(
     path: &Path,
     target_channels: usize,
     target_rate: u32,
+    window: Option<Duration>,
 ) -> Result<PreparedAudio, PlaybackError> {
-    let decoded = decode::decode_file(path)?;
+    let decoded = match window {
+        None => decode::decode_file(path)?,
+        Some(start) => decode::decode_window(path, start, WINDOW)?,
+    };
 
     let waveform_peaks = peaks::compute_peaks(
         &decoded.interleaved,
@@ -437,6 +578,7 @@ fn decode_and_prepare(
         file: path.to_path_buf(),
         peaks: waveform_peaks,
         info,
+        window_start: decoded.window_start,
     })
 }
 
@@ -472,16 +614,6 @@ fn audio_callback(data: &mut [f32], shared: &SharedState) {
     }
 }
 
-/// Map a 0..1 scrub fraction to a frame index in a buffer of `total_frames`.
-/// Clamps out-of-range fractions and never returns `>= total_frames`.
-fn frame_for_fraction(total_frames: usize, fraction: f32) -> usize {
-    if total_frames == 0 {
-        return 0;
-    }
-    let f = fraction.clamp(0.0, 1.0);
-    ((total_frames as f32 * f) as usize).min(total_frames - 1)
-}
-
 fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
     if from == to || from == 0 || to == 0 {
         return samples.to_vec();
@@ -513,19 +645,9 @@ fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_for_fraction, RequestSlot};
+    use super::RequestSlot;
     use std::sync::Arc;
     use std::time::Duration;
-
-    #[test]
-    fn frame_for_fraction_maps_and_clamps() {
-        assert_eq!(frame_for_fraction(1000, 0.0), 0);
-        assert_eq!(frame_for_fraction(1000, 0.5), 500);
-        assert_eq!(frame_for_fraction(1000, 1.0), 999); // never == total
-        assert_eq!(frame_for_fraction(1000, -1.0), 0); // clamps low
-        assert_eq!(frame_for_fraction(1000, 2.0), 999); // clamps high
-        assert_eq!(frame_for_fraction(0, 0.5), 0); // empty buffer
-    }
 
     #[test]
     fn request_slot_coalesces_to_latest() {

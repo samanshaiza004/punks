@@ -379,6 +379,68 @@ impl Library {
         Ok(rel_to_str(rel))
     }
 
+    // --- Waveform cache (Generated / disposable) ---------------------------
+    //
+    // Full-source waveform peaks are expensive to compute (one whole-file
+    // stream-decode) but cheap to store, so they're cached on disk, named by
+    // the asset's stable UUID, under `.punks/waveforms/`. This is Generated
+    // data: deleting the folder just forces a recompute, never loses anything.
+
+    fn asset_uuid(&self, abs_path: &Path) -> Result<Option<String>, LibraryError> {
+        let rel = self.rel_str(abs_path)?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uuid FROM assets WHERE relative_path = ?1")?;
+        let mut rows = stmt.query_map([rel], |r| r.get::<_, String>(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
+    fn waveform_bin_path(&self, uuid: &str) -> PathBuf {
+        self.root
+            .join(".punks")
+            .join("waveforms")
+            .join(format!("{uuid}.bin"))
+    }
+
+    /// Load cached waveform peaks for `abs_path`, or `None` if there's no
+    /// cache entry or it's stale. Staleness is a cheap size+mtime check (the
+    /// same fast-path signal used for asset identity): a file touched but
+    /// unchanged triggers a harmless recompute, never a wrong waveform.
+    pub fn load_waveform(&self, abs_path: &Path) -> Result<Option<Vec<(f32, f32)>>, LibraryError> {
+        let Some(uuid) = self.asset_uuid(abs_path)? else {
+            return Ok(None);
+        };
+        let bin = self.waveform_bin_path(&uuid);
+        let bytes = match std::fs::read(&bin) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(LibraryError::Io(e.to_string())),
+        };
+        let meta = std::fs::metadata(abs_path)?;
+        Ok(decode_waveform_bin(&bytes, meta.len(), mtime_ms(&meta)))
+    }
+
+    /// Cache waveform peaks for `abs_path`. Ingests the asset if it hasn't been
+    /// scanned yet, so a first-audition waveform is cached without a full scan.
+    pub fn store_waveform(
+        &self,
+        abs_path: &Path,
+        peaks: &[(f32, f32)],
+    ) -> Result<(), LibraryError> {
+        self.ensure_asset(abs_path)?;
+        let uuid = self
+            .asset_uuid(abs_path)?
+            .ok_or_else(|| LibraryError::Db("asset uuid missing after ingest".into()))?;
+        let bin = self.waveform_bin_path(&uuid);
+        if let Some(parent) = bin.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let meta = std::fs::metadata(abs_path)?;
+        let bytes = encode_waveform_bin(peaks, meta.len(), mtime_ms(&meta));
+        std::fs::write(&bin, bytes)?;
+        Ok(())
+    }
+
     // --- Reconciliation ----------------------------------------------------
 
     /// Reconcile the database against `files` (the current on-disk state).
@@ -393,6 +455,17 @@ impl Library {
     /// Assets no longer on disk are marked missing, never deleted: tags are
     /// user data and must survive a file that comes back later.
     pub fn reconcile(&mut self, files: &[ScannedFile]) -> Result<ScanSummary, LibraryError> {
+        self.reconcile_with_progress(files, |_| {})
+    }
+
+    /// As [`reconcile`](Self::reconcile), calling `on_progress(done)` after each
+    /// file is considered (1..=files.len()) so a UI can show scan progress. The
+    /// per-file hashing is the slow part, so this is the useful granularity.
+    pub fn reconcile_with_progress(
+        &mut self,
+        files: &[ScannedFile],
+        mut on_progress: impl FnMut(usize),
+    ) -> Result<ScanSummary, LibraryError> {
         struct Row {
             id: i64,
             path: String,
@@ -430,7 +503,8 @@ impl Library {
             files.iter().map(|f| rel_to_str(&f.relative_path)).collect();
         let mut seen: HashSet<i64> = HashSet::new();
 
-        for f in files {
+        for (fi, f) in files.iter().enumerate() {
+            on_progress(fi + 1);
             let key = rel_to_str(&f.relative_path);
             let abs = self.root.join(&f.relative_path);
 
@@ -572,6 +646,61 @@ fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+// Waveform cache binary format:
+//   magic "PKWF" (4) | version u8 | num_buckets u32 LE |
+//   source_size u64 LE | source_mtime_ms i64 LE |    <- validity stamp
+//   num_buckets * (lo f32 LE, hi f32 LE)
+const WAVEFORM_MAGIC: &[u8; 4] = b"PKWF";
+const WAVEFORM_VERSION: u8 = 1;
+const WAVEFORM_HEADER_LEN: usize = 4 + 1 + 4 + 8 + 8;
+
+fn encode_waveform_bin(peaks: &[(f32, f32)], source_size: u64, source_mtime_ms: i64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(WAVEFORM_HEADER_LEN + peaks.len() * 8);
+    out.extend_from_slice(WAVEFORM_MAGIC);
+    out.push(WAVEFORM_VERSION);
+    out.extend_from_slice(&(peaks.len() as u32).to_le_bytes());
+    out.extend_from_slice(&source_size.to_le_bytes());
+    out.extend_from_slice(&source_mtime_ms.to_le_bytes());
+    for &(lo, hi) in peaks {
+        out.extend_from_slice(&lo.to_le_bytes());
+        out.extend_from_slice(&hi.to_le_bytes());
+    }
+    out
+}
+
+/// Returns the peaks only if the file is well-formed AND its validity stamp
+/// matches the current source size/mtime; any mismatch (stale, corrupt, wrong
+/// version) yields `None` so the caller recomputes.
+fn decode_waveform_bin(
+    bytes: &[u8],
+    source_size: u64,
+    source_mtime_ms: i64,
+) -> Option<Vec<(f32, f32)>> {
+    if bytes.len() < WAVEFORM_HEADER_LEN
+        || &bytes[0..4] != WAVEFORM_MAGIC
+        || bytes[4] != WAVEFORM_VERSION
+    {
+        return None;
+    }
+    let num_buckets = u32::from_le_bytes(bytes[5..9].try_into().ok()?) as usize;
+    let size = u64::from_le_bytes(bytes[9..17].try_into().ok()?);
+    let mtime = i64::from_le_bytes(bytes[17..25].try_into().ok()?);
+    if size != source_size || mtime != source_mtime_ms {
+        return None; // stale: file changed since the waveform was computed.
+    }
+    if bytes.len() != WAVEFORM_HEADER_LEN + num_buckets * 8 {
+        return None;
+    }
+    let mut peaks = Vec::with_capacity(num_buckets);
+    for i in 0..num_buckets {
+        let base = WAVEFORM_HEADER_LEN + i * 8;
+        let lo = f32::from_le_bytes(bytes[base..base + 4].try_into().ok()?);
+        let hi = f32::from_le_bytes(bytes[base + 4..base + 8].try_into().ok()?);
+        peaks.push((lo, hi));
+    }
+    Some(peaks)
 }
 
 /// Store relative paths with `/` separators so the DB is portable across
@@ -811,5 +940,53 @@ mod tests {
         lib.assign_tag(&a, tag.id).unwrap();
         assert_eq!(lib.tags_for_asset(&a).unwrap().len(), 1);
         assert_eq!(lib.list_assets().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn waveform_cache_round_trips() {
+        let t = TempRoot::new("wave");
+        let a = write_wav(&t.0, "loop.wav", b"AUDIO-BYTES");
+        let lib = Library::create(&t.0).unwrap();
+        assert!(lib.load_waveform(&a).unwrap().is_none()); // nothing cached yet
+
+        let peaks = vec![(-0.5, 0.5), (-1.0, 1.0), (0.0, 0.25)];
+        lib.store_waveform(&a, &peaks).unwrap();
+        assert_eq!(lib.load_waveform(&a).unwrap(), Some(peaks));
+    }
+
+    #[test]
+    fn waveform_cache_invalidates_on_change() {
+        let t = TempRoot::new("wavestale");
+        let a = write_wav(&t.0, "clip.wav", b"V1");
+        let lib = Library::create(&t.0).unwrap();
+        lib.store_waveform(&a, &[(-0.1, 0.1)]).unwrap();
+        assert!(lib.load_waveform(&a).unwrap().is_some());
+
+        // Rewrite with different length + a fresh mtime → stamp mismatch → miss.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&a, b"V2 is longer than before").unwrap();
+        assert!(lib.load_waveform(&a).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_waveform_bin_rejects_junk() {
+        assert!(super::decode_waveform_bin(b"nope", 0, 0).is_none());
+    }
+
+    #[test]
+    fn reconcile_reports_monotonic_progress() {
+        let t = TempRoot::new("progress");
+        for i in 0..5 {
+            write_wav(&t.0, &format!("s{i}.wav"), format!("DATA-{i}").as_bytes());
+        }
+        let mut lib = Library::create(&t.0).unwrap();
+        let files = scan_files(lib.root().to_path_buf().as_path()).unwrap();
+        assert_eq!(files.len(), 5);
+
+        let mut seen = Vec::new();
+        lib.reconcile_with_progress(&files, |done| seen.push(done))
+            .unwrap();
+        // One report per file, strictly increasing, ending at the count.
+        assert_eq!(seen, vec![1, 2, 3, 4, 5]);
     }
 }

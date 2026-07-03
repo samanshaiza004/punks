@@ -4,12 +4,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::codecs::{CodecParameters, DecoderOptions};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use crate::peaks::WaveformPeaks;
 use crate::PlaybackError;
 
 /// Free-text metadata read from a file's container, kept domain-neutral so it
@@ -35,7 +36,10 @@ pub struct DecodedAudio {
     pub source_duration: Duration,
     /// Duration actually decoded (== `source_duration` unless `truncated`).
     pub preview_duration: Duration,
-    /// True if only a bounded preview window was decoded (long file).
+    /// Where in the source this buffer begins. 0 for a from-the-start preview;
+    /// non-zero for an on-demand window decoded by [`decode_window`].
+    pub window_start: Duration,
+    /// True if only a bounded window of a longer source was decoded.
     pub truncated: bool,
 }
 
@@ -240,20 +244,20 @@ fn extract_ogg_in_wav(raw: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Decode an RF64 file. symphonia can't read the RF64 container, so we
-/// synthesize a valid `RIFF` header (with the true sizes from the `ds64` chunk,
-/// capped for the preview) and chain it in front of the file's `data` region —
-/// symphonia then decodes the PCM as an ordinary WAV.
-fn decode_rf64(
-    path: &Path,
-    prefix: &[u8],
-    metadata: AudioMetadata,
-    threshold: Duration,
-    window: Duration,
-) -> Result<DecodedAudio, PlaybackError> {
-    let mut data_size: Option<u64> = None; // real data-chunk size from ds64
+/// Parsed pieces of an RF64 container needed to synthesize a plain RIFF stream.
+struct Rf64Info {
+    sample_rate: u32,
+    block_align: u64,
+    data_offset: u64, // file offset of the data payload
+    data_size: u64,   // true data-chunk size in bytes (from ds64)
+    source_frames: u64,
+    fmt_chunk: Vec<u8>, // "fmt " + len + payload (+ pad), copied verbatim
+}
+
+fn parse_rf64(prefix: &[u8]) -> Result<Rf64Info, PlaybackError> {
+    let mut data_size: Option<u64> = None;
     let mut fmt_range: Option<(usize, usize)> = None; // (start, total len incl header + pad)
-    let mut data_offset: Option<usize> = None; // file offset of the data payload
+    let mut data_offset: Option<usize> = None;
 
     let mut pos = 12;
     while pos + 8 <= prefix.len() {
@@ -301,37 +305,113 @@ fn decode_rf64(
     let block_align =
         u16::from_le_bytes(prefix[fb + 12..fb + 14].try_into().unwrap()).max(1) as u64;
 
-    let source_frames = data_size / block_align;
-    let budget = preview_budget_frames(source_frames, sample_rate, threshold, window);
-    let data_bytes = match budget {
-        Some(b) => (b * block_align).min(data_size),
-        None => data_size,
+    Ok(Rf64Info {
+        sample_rate,
+        block_align,
+        data_offset: data_offset as u64,
+        data_size,
+        source_frames: data_size / block_align,
+        fmt_chunk: prefix[fmt_start..(fmt_start + fmt_total).min(prefix.len())].to_vec(),
+    })
+}
+
+/// Build a plain-`RIFF` `MediaSourceStream` over the RF64 file's data region,
+/// starting at frame `start_frame` and covering at most `max_frames` (all
+/// remaining if `None`). symphonia can't read RF64, so we synthesize a valid
+/// header and chain it in front of the raw PCM. The stream is forward-only
+/// (`ReadOnlySource`); to decode a window at an offset we position the file
+/// itself here rather than relying on symphonia to seek.
+fn build_rf64_stream(
+    path: &Path,
+    rf64: &Rf64Info,
+    start_frame: u64,
+    max_frames: Option<u64>,
+) -> Result<MediaSourceStream, PlaybackError> {
+    let byte_off = start_frame * rf64.block_align;
+    let remaining = rf64.data_size.saturating_sub(byte_off);
+    let data_bytes = match max_frames {
+        Some(m) => (m * rf64.block_align).min(remaining),
+        None => remaining,
     };
-    // Fits u32: an untruncated file is < 4 GB; a truncated window is far smaller.
+    // Fits u32: an untruncated file is < 4 GB; a window is far smaller.
     let data_size_u32 = data_bytes.min(u32::MAX as u64) as u32;
 
-    // Synthetic header: RIFF <sz> WAVE <fmt chunk verbatim> data <size>.
-    let fmt_chunk = &prefix[fmt_start..(fmt_start + fmt_total).min(prefix.len())];
     let riff_size =
-        (4 + fmt_chunk.len() + 8 + data_size_u32 as usize).min(u32::MAX as usize) as u32;
-    let mut header = Vec::with_capacity(12 + fmt_chunk.len() + 8);
+        (4 + rf64.fmt_chunk.len() + 8 + data_size_u32 as usize).min(u32::MAX as usize) as u32;
+    let mut header = Vec::with_capacity(12 + rf64.fmt_chunk.len() + 8);
     header.extend_from_slice(b"RIFF");
     header.extend_from_slice(&riff_size.to_le_bytes());
     header.extend_from_slice(b"WAVE");
-    header.extend_from_slice(fmt_chunk);
+    header.extend_from_slice(&rf64.fmt_chunk);
     header.extend_from_slice(b"data");
     header.extend_from_slice(&data_size_u32.to_le_bytes());
 
     let mut file =
         File::open(path).map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
-    file.seek(SeekFrom::Start(data_offset as u64))
+    file.seek(SeekFrom::Start(rf64.data_offset + byte_off))
         .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
     let reader = Cursor::new(header).chain(file.take(data_bytes));
-    let mss = MediaSourceStream::new(Box::new(ReadOnlySource::new(reader)), Default::default());
+    Ok(MediaSourceStream::new(
+        Box::new(ReadOnlySource::new(reader)),
+        Default::default(),
+    ))
+}
 
+/// Decode the from-the-start preview of an RF64 file.
+fn decode_rf64(
+    path: &Path,
+    prefix: &[u8],
+    metadata: AudioMetadata,
+    threshold: Duration,
+    window: Duration,
+) -> Result<DecodedAudio, PlaybackError> {
+    let rf64 = parse_rf64(prefix)?;
+    let budget = preview_budget_frames(rf64.source_frames, rf64.sample_rate, threshold, window);
+    let mss = build_rf64_stream(path, &rf64, 0, budget)?;
     let mut hint = Hint::new();
     hint.with_extension("wav");
-    decode_from_stream(mss, &hint, metadata, Some(source_frames), threshold, window)
+    decode_from_stream(
+        mss,
+        &hint,
+        metadata,
+        Some(rf64.source_frames),
+        threshold,
+        window,
+    )
+}
+
+/// Open a `MediaSourceStream` over the WHOLE source (no preview budget), plus
+/// its format hint and a known source-frame count when the container tells us
+/// (RF64). Used by full-file peaks and by the seek path for the window decode.
+fn full_source_stream(
+    path: &Path,
+    prefix: &[u8],
+) -> Result<(MediaSourceStream, Hint, Option<u64>), PlaybackError> {
+    if prefix.len() >= 12 && &prefix[0..4] == b"RF64" && &prefix[8..12] == b"WAVE" {
+        let rf64 = parse_rf64(prefix)?;
+        let mss = build_rf64_stream(path, &rf64, 0, None)?;
+        let mut hint = Hint::new();
+        hint.with_extension("wav");
+        return Ok((mss, hint, Some(rf64.source_frames)));
+    }
+    if riff_fmt_tag(prefix) == Some(WAVE_FORMAT_OGG_VORBIS) {
+        let raw = std::fs::read(path)
+            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+        if let Some(ogg) = extract_ogg_in_wav(&raw) {
+            let mss = MediaSourceStream::new(Box::new(Cursor::new(ogg)), Default::default());
+            let mut hint = Hint::new();
+            hint.with_extension("ogg");
+            return Ok((mss, hint, None));
+        }
+    }
+    let file =
+        File::open(path).map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    Ok((mss, hint, None))
 }
 
 /// The preview frame budget for a source of `source_frames` at `sample_rate`,
@@ -353,7 +433,102 @@ fn preview_budget_frames(
     }
 }
 
-/// Probe and decode an already-built stream into interleaved f32 samples. For
+/// A probed stream ready to decode: the format reader plus the default track's
+/// parameters, pulled out so callers can seek before decoding.
+struct Probed {
+    format: Box<dyn FormatReader>,
+    track_id: u32,
+    codec_params: CodecParameters,
+    sample_rate: u32,
+    channels: u16,
+    n_frames: Option<u64>,
+}
+
+fn probe_format(mss: MediaSourceStream, hint: &Hint) -> Result<Probed, PlaybackError> {
+    let probed = symphonia::default::get_probe()
+        .format(
+            hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| PlaybackError::DecodeError(format!("unsupported audio format: {e}")))?;
+    let format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| PlaybackError::DecodeError("no audio track found".into()))?;
+    let track_id = track.id;
+    let codec_params = track.codec_params.clone();
+    let sample_rate = codec_params
+        .sample_rate
+        .ok_or_else(|| PlaybackError::DecodeError("unknown sample rate".into()))?;
+    let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
+    let n_frames = codec_params.n_frames;
+    Ok(Probed {
+        format,
+        track_id,
+        codec_params,
+        sample_rate,
+        channels,
+        n_frames,
+    })
+}
+
+/// Decode interleaved f32 samples from `probed`, stopping after `max_frames`
+/// (all remaining if `None`). Decode starts wherever `probed.format` is
+/// currently positioned, so callers may seek first.
+fn decode_pcm(
+    probed: &mut Probed,
+    max_frames: Option<u64>,
+) -> Result<(Vec<f32>, u64), PlaybackError> {
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&probed.codec_params, &DecoderOptions::default())
+        .map_err(|e| PlaybackError::DecodeError(format!("codec init failed: {e}")))?;
+
+    let mut all_samples: Vec<f32> = Vec::new();
+    let mut decoded_frames: u64 = 0;
+
+    loop {
+        let packet = match probed.format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(ref e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(symphonia::core::errors::Error::ResetRequired) => break,
+            Err(e) => return Err(PlaybackError::DecodeError(format!("packet read: {e}"))),
+        };
+        if packet.track_id() != probed.track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(symphonia::core::errors::Error::DecodeError(e)) => {
+                log::warn!("decode error (skipping packet): {e}");
+                continue;
+            }
+            Err(e) => return Err(PlaybackError::DecodeError(format!("decode: {e}"))),
+        };
+        let spec = *decoded.spec();
+        let num_frames = decoded.frames();
+        if num_frames == 0 {
+            continue;
+        }
+        let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
+        sample_buf.copy_interleaved_ref(decoded);
+        all_samples.extend_from_slice(sample_buf.samples());
+        decoded_frames += num_frames as u64;
+        if let Some(b) = max_frames {
+            if decoded_frames >= b {
+                break;
+            }
+        }
+    }
+    Ok((all_samples, decoded_frames))
+}
+
+/// Probe and decode an already-built stream into a from-the-start preview. For
 /// sources longer than `threshold`, only the first `window` is decoded and
 /// `truncated` is set. `source_frames_override` supplies the true length when
 /// the stream's own header was rewritten (RF64 preview).
@@ -365,90 +540,11 @@ fn decode_from_stream(
     threshold: Duration,
     window: Duration,
 ) -> Result<DecodedAudio, PlaybackError> {
-    let probed = symphonia::default::get_probe()
-        .format(
-            hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| PlaybackError::DecodeError(format!("unsupported audio format: {e}")))?;
+    let mut probed = probe_format(mss, hint)?;
+    let source_frames_hint = source_frames_override.or(probed.n_frames).unwrap_or(0);
+    let budget = preview_budget_frames(source_frames_hint, probed.sample_rate, threshold, window);
 
-    let mut format = probed.format;
-
-    let track = format
-        .default_track()
-        .ok_or_else(|| PlaybackError::DecodeError("no audio track found".into()))?;
-
-    let track_id = track.id;
-    let codec_params = track.codec_params.clone();
-
-    let sample_rate = codec_params
-        .sample_rate
-        .ok_or_else(|| PlaybackError::DecodeError("unknown sample rate".into()))?;
-
-    let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
-
-    let source_frames_hint = source_frames_override
-        .or(codec_params.n_frames)
-        .unwrap_or(0);
-    let budget = preview_budget_frames(source_frames_hint, sample_rate, threshold, window);
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&codec_params, &DecoderOptions::default())
-        .map_err(|e| PlaybackError::DecodeError(format!("codec init failed: {e}")))?;
-
-    let mut all_samples: Vec<f32> = Vec::new();
-    let mut decoded_frames: u64 = 0;
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(symphonia::core::errors::Error::ResetRequired) => {
-                break;
-            }
-            Err(e) => return Err(PlaybackError::DecodeError(format!("packet read: {e}"))),
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(symphonia::core::errors::Error::DecodeError(e)) => {
-                log::warn!("decode error (skipping packet): {e}");
-                continue;
-            }
-            Err(e) => return Err(PlaybackError::DecodeError(format!("decode: {e}"))),
-        };
-
-        let spec = *decoded.spec();
-        let num_frames = decoded.frames();
-
-        if num_frames == 0 {
-            continue;
-        }
-
-        let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
-        sample_buf.copy_interleaved_ref(decoded);
-
-        all_samples.extend_from_slice(sample_buf.samples());
-        decoded_frames += num_frames as u64;
-
-        // Stop once the preview window is filled (long files).
-        if let Some(b) = budget {
-            if decoded_frames >= b {
-                break;
-            }
-        }
-    }
-
+    let (all_samples, decoded_frames) = decode_pcm(&mut probed, budget)?;
     if all_samples.is_empty() {
         return Err(PlaybackError::DecodeError("no audio data decoded".into()));
     }
@@ -458,16 +554,191 @@ fn decode_from_stream(
     } else {
         decoded_frames
     };
-
+    let rate = probed.sample_rate as f64;
     Ok(DecodedAudio {
         interleaved: all_samples,
-        channels,
-        sample_rate,
+        channels: probed.channels,
+        sample_rate: probed.sample_rate,
         metadata,
-        source_duration: Duration::from_secs_f64(source_frames as f64 / sample_rate as f64),
-        preview_duration: Duration::from_secs_f64(decoded_frames as f64 / sample_rate as f64),
+        source_duration: Duration::from_secs_f64(source_frames as f64 / rate),
+        preview_duration: Duration::from_secs_f64(decoded_frames as f64 / rate),
+        window_start: Duration::ZERO,
         truncated: budget.is_some(),
     })
+}
+
+/// Decode a bounded `window` of the source starting near `start`. Used for
+/// on-demand scrubbing into a long file past its loaded preview. The returned
+/// `window_start` is where the decode actually landed (seeks snap to a
+/// packet/block boundary).
+pub fn decode_window(
+    path: &Path,
+    start: Duration,
+    window: Duration,
+) -> Result<DecodedAudio, PlaybackError> {
+    let prefix = read_header_prefix(path, HEADER_PREFIX_MAX)?;
+    let metadata = parse_riff_metadata(&prefix);
+
+    // RF64: its stream is forward-only, so position the file at the window
+    // rather than asking symphonia to seek.
+    if prefix.len() >= 12 && &prefix[0..4] == b"RF64" && &prefix[8..12] == b"WAVE" {
+        let rf64 = parse_rf64(&prefix)?;
+        let start_frame = ((start.as_secs_f64() * rf64.sample_rate as f64) as u64)
+            .min(rf64.source_frames.saturating_sub(1));
+        let window_frames = ((window.as_secs_f64() * rf64.sample_rate as f64) as u64).max(1);
+        let mss = build_rf64_stream(path, &rf64, start_frame, Some(window_frames))?;
+        let mut hint = Hint::new();
+        hint.with_extension("wav");
+        let mut probed = probe_format(mss, &hint)?;
+        let (samples, decoded_frames) = decode_pcm(&mut probed, Some(window_frames))?;
+        if samples.is_empty() {
+            return Err(PlaybackError::DecodeError("no audio data decoded".into()));
+        }
+        let rate = probed.sample_rate as f64;
+        return Ok(DecodedAudio {
+            interleaved: samples,
+            channels: probed.channels,
+            sample_rate: probed.sample_rate,
+            metadata,
+            source_duration: Duration::from_secs_f64(rf64.source_frames as f64 / rate),
+            preview_duration: Duration::from_secs_f64(decoded_frames as f64 / rate),
+            window_start: Duration::from_secs_f64(start_frame as f64 / rate),
+            truncated: true,
+        });
+    }
+
+    // Normal / Ogg-in-WAV: probe the full source, then seek.
+    let (mss, hint, sfo) = full_source_stream(path, &prefix)?;
+    let mut probed = probe_format(mss, &hint)?;
+    let source_frames = sfo.or(probed.n_frames).unwrap_or(0);
+    let window_frames = ((window.as_secs_f64() * probed.sample_rate as f64) as u64).max(1);
+
+    let track_id = probed.track_id;
+    let actual_ts = match probed.format.seek(
+        SeekMode::Accurate,
+        SeekTo::Time {
+            time: start.into(),
+            track_id: Some(track_id),
+        },
+    ) {
+        Ok(seeked) => seeked.actual_ts,
+        Err(e) => {
+            log::warn!("seek failed, decoding from start: {e}");
+            0
+        }
+    };
+
+    let (samples, decoded_frames) = decode_pcm(&mut probed, Some(window_frames))?;
+    if samples.is_empty() {
+        return Err(PlaybackError::DecodeError("no audio data decoded".into()));
+    }
+    let rate = probed.sample_rate as f64;
+    let src = if source_frames > 0 {
+        source_frames
+    } else {
+        actual_ts + decoded_frames
+    };
+    Ok(DecodedAudio {
+        interleaved: samples,
+        channels: probed.channels,
+        sample_rate: probed.sample_rate,
+        metadata,
+        source_duration: Duration::from_secs_f64(src as f64 / rate),
+        preview_duration: Duration::from_secs_f64(decoded_frames as f64 / rate),
+        window_start: Duration::from_secs_f64(actual_ts as f64 / rate),
+        truncated: true,
+    })
+}
+
+/// Compute waveform peaks over the ENTIRE source with O(num_buckets) memory:
+/// stream-decode chunk by chunk, fold each frame into its bucket's min/max,
+/// discard the samples. Requires a known source length; returns an error for
+/// the rare unknown-length source (some header-less MP3) so the caller can
+/// keep the preview peaks.
+pub fn compute_source_peaks(
+    path: &Path,
+    num_buckets: usize,
+) -> Result<WaveformPeaks, PlaybackError> {
+    let num_buckets = num_buckets.max(1);
+    let prefix = read_header_prefix(path, HEADER_PREFIX_MAX)?;
+    let (mss, hint, sfo) = full_source_stream(path, &prefix)?;
+    let mut probed = probe_format(mss, &hint)?;
+    let source_frames = sfo.or(probed.n_frames).unwrap_or(0);
+    if source_frames == 0 {
+        return Err(PlaybackError::DecodeError(
+            "unknown source length; full-file peaks unavailable".into(),
+        ));
+    }
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&probed.codec_params, &DecoderOptions::default())
+        .map_err(|e| PlaybackError::DecodeError(format!("codec init failed: {e}")))?;
+
+    let mut mins = vec![f32::MAX; num_buckets];
+    let mut maxs = vec![f32::MIN; num_buckets];
+    let mut frame_idx: u64 = 0;
+
+    loop {
+        let packet = match probed.format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(ref e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(symphonia::core::errors::Error::ResetRequired) => break,
+            Err(e) => return Err(PlaybackError::DecodeError(format!("packet read: {e}"))),
+        };
+        if packet.track_id() != probed.track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(symphonia::core::errors::Error::DecodeError(e)) => {
+                log::warn!("decode error (skipping packet): {e}");
+                continue;
+            }
+            Err(e) => return Err(PlaybackError::DecodeError(format!("decode: {e}"))),
+        };
+        let spec = *decoded.spec();
+        let num_frames = decoded.frames();
+        if num_frames == 0 {
+            continue;
+        }
+        let ch = spec.channels.count().max(1);
+        let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
+        sample_buf.copy_interleaved_ref(decoded);
+        let samples = sample_buf.samples();
+        let inv_ch = 1.0 / ch as f32;
+        for f in 0..num_frames {
+            let base = f * ch;
+            let mut mono = 0.0f32;
+            for c in 0..ch {
+                mono += samples[base + c];
+            }
+            mono *= inv_ch;
+            let bucket = ((frame_idx.saturating_mul(num_buckets as u64) / source_frames) as usize)
+                .min(num_buckets - 1);
+            if mono < mins[bucket] {
+                mins[bucket] = mono;
+            }
+            if mono > maxs[bucket] {
+                maxs[bucket] = mono;
+            }
+            frame_idx += 1;
+        }
+    }
+
+    let peaks = (0..num_buckets)
+        .map(|b| {
+            if mins[b] == f32::MAX {
+                (0.0, 0.0)
+            } else {
+                (mins[b].clamp(-1.0, 1.0), maxs[b].clamp(-1.0, 1.0))
+            }
+        })
+        .collect();
+    Ok(WaveformPeaks { peaks, num_buckets })
 }
 
 #[cfg(test)]
@@ -681,5 +952,57 @@ mod tests {
         assert_eq!(out.sample_rate, 8_000);
         assert_eq!(out.interleaved.len(), frames.len());
         assert!(!out.truncated);
+    }
+
+    /// Write bytes to a unique temp file; caller removes it.
+    fn temp_wav(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "punks2_{tag}_{}_{}.wav",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn compute_source_peaks_bucket_count() {
+        // 1 s mono @ 8 kHz of silence.
+        let path = temp_wav("peaks", &pcm_wav(8_000, 8_000));
+        let peaks = compute_source_peaks(&path, 64);
+        let _ = std::fs::remove_file(&path);
+        let peaks = peaks.expect("peaks");
+        assert_eq!(peaks.num_buckets, 64);
+        assert_eq!(peaks.peaks.len(), 64);
+        // Silence -> every bucket flat at zero.
+        assert!(peaks.peaks.iter().all(|&(lo, hi)| lo == 0.0 && hi == 0.0));
+    }
+
+    #[test]
+    fn decode_window_lands_near_offset() {
+        // 1 s mono @ 8 kHz; grab a 200 ms window starting at 500 ms.
+        let path = temp_wav("window", &pcm_wav(8_000, 8_000));
+        let out = decode_window(
+            &path,
+            Duration::from_millis(500),
+            Duration::from_millis(200),
+        );
+        let _ = std::fs::remove_file(&path);
+        let out = out.expect("window");
+
+        // Seeks snap to a PCM packet boundary at or just before the request
+        // (symphonia's 1152-frame packets = 144 ms at this 8 kHz test rate;
+        // ~24 ms at 48 kHz), so 0.5 s lands at 0.432 s.
+        let ws = out.window_start.as_secs_f64();
+        assert!((0.35..=0.5).contains(&ws), "window_start = {ws}");
+        // True source length is still the whole 1 s.
+        assert!((out.source_duration.as_secs_f64() - 1.0).abs() < 0.02);
+        // At least the requested ~1600 frames, rounded up to a packet boundary.
+        let frames = out.interleaved.len() / out.channels as usize;
+        assert!((1600..3000).contains(&frames), "frames = {frames}");
+        assert!(out.truncated);
     }
 }

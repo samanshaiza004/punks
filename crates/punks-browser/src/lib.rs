@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
 
 pub use punks_core::config::PunksConfig;
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
@@ -9,7 +11,42 @@ pub use punks_library::{LibraryError, ScanSummary, TagCount};
 pub use punks_playback::{AudioMetadata, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks};
 
 use punks_library::Library;
-use punks_playback::PlaybackEngine;
+use punks_playback::{PlaybackEngine, RequestSlot};
+
+/// How many buckets a full-source waveform is computed at (matches the preview
+/// waveform's resolution).
+const WAVEFORM_BUCKETS: usize = 512;
+
+/// Compute (or load from cache) the full-source waveform for `path`, cache it
+/// under the file's library if any, and return it. Runs on the peaks worker.
+fn compute_and_cache_peaks(path: &Path) -> Option<WaveformPeaks> {
+    let root = path.parent().and_then(Library::find_root);
+    let lib = root.as_deref().and_then(|r| Library::open(r).ok());
+
+    if let Some(lib) = &lib {
+        if let Ok(Some(pairs)) = lib.load_waveform(path) {
+            let num_buckets = pairs.len();
+            return Some(WaveformPeaks {
+                peaks: pairs,
+                num_buckets,
+            });
+        }
+    }
+    match punks_playback::compute_source_peaks(path, WAVEFORM_BUCKETS) {
+        Ok(peaks) => {
+            if let Some(lib) = &lib {
+                if let Err(e) = lib.store_waveform(path, &peaks.peaks) {
+                    log::warn!("waveform cache write: {e}");
+                }
+            }
+            Some(peaks)
+        }
+        Err(e) => {
+            log::warn!("full-source peaks for {}: {e}", path.display());
+            None
+        }
+    }
+}
 
 /// Whether the active tab's directory tree has a library attached.
 /// Browsing always works; library features (tags, filters) light up only when
@@ -93,6 +130,15 @@ struct LibraryContext {
     asset_tags: HashMap<PathBuf, Vec<i64>>,
     scanning: bool,
     scan_rx: Option<mpsc::Receiver<Result<ScanSummary, LibraryError>>>,
+    scan_progress: Option<Arc<ScanProgress>>,
+}
+
+/// Live progress of a background scan, shared with the scan thread.
+/// `total == 0` means the directory tree is still being walked (count unknown).
+#[derive(Default)]
+struct ScanProgress {
+    total: std::sync::atomic::AtomicUsize,
+    done: std::sync::atomic::AtomicUsize,
 }
 
 impl LibraryContext {
@@ -141,16 +187,27 @@ impl LibraryContext {
     }
 }
 
-fn spawn_scan(root: PathBuf) -> mpsc::Receiver<Result<ScanSummary, LibraryError>> {
+fn spawn_scan(
+    root: PathBuf,
+) -> (
+    mpsc::Receiver<Result<ScanSummary, LibraryError>>,
+    Arc<ScanProgress>,
+) {
+    use std::sync::atomic::Ordering;
+    let progress = Arc::new(ScanProgress::default());
     let (tx, rx) = mpsc::channel();
+    let prog = Arc::clone(&progress);
     std::thread::spawn(move || {
         // The scan gets its own connection (WAL journal) so the UI thread's
         // reads never block on it.
-        let result = Library::open(&root)
-            .and_then(|mut lib| punks_library::scan_files(&root).and_then(|f| lib.reconcile(&f)));
+        let result = Library::open(&root).and_then(|mut lib| {
+            let files = punks_library::scan_files(&root)?;
+            prog.total.store(files.len(), Ordering::Relaxed);
+            lib.reconcile_with_progress(&files, |done| prog.done.store(done, Ordering::Relaxed))
+        });
         let _ = tx.send(result);
     });
-    rx
+    (rx, progress)
 }
 
 pub struct SampleBrowser {
@@ -159,6 +216,13 @@ pub struct SampleBrowser {
     playback: PlaybackEngine,
     last_error: Option<String>,
     libraries: Vec<LibraryContext>,
+    /// Persistent background worker computing full-source waveforms (latest
+    /// request wins, so scrolling past files doesn't queue up work).
+    peaks_request: Arc<RequestSlot<PathBuf>>,
+    peaks_result_rx: mpsc::Receiver<(PathBuf, Option<WaveformPeaks>)>,
+    /// The file we've most recently asked for full peaks, to avoid re-requesting
+    /// every frame. Reset when a new clip is played.
+    peaks_requested_for: Option<PathBuf>,
 }
 
 impl SampleBrowser {
@@ -167,12 +231,31 @@ impl SampleBrowser {
     /// config instead of once per component that needs it.
     pub fn new(cfg: &PunksConfig) -> Result<Self, BrowserError> {
         let playback = PlaybackEngine::new()?;
+
+        // Persistent peaks worker: one full-source waveform computation at a
+        // time, latest request wins.
+        let peaks_request = Arc::new(RequestSlot::<PathBuf>::new());
+        let (peaks_tx, peaks_result_rx) = mpsc::channel();
+        {
+            let peaks_request = Arc::clone(&peaks_request);
+            std::thread::spawn(move || loop {
+                let path = peaks_request.recv();
+                let peaks = compute_and_cache_peaks(&path);
+                if peaks_tx.send((path, peaks)).is_err() {
+                    break; // receiver dropped
+                }
+            });
+        }
+
         let mut browser = SampleBrowser {
             tabs: vec![TabState::default()],
             active_tab: 0,
             playback,
             last_error: None,
             libraries: Vec::new(),
+            peaks_request,
+            peaks_result_rx,
+            peaks_requested_for: None,
         };
 
         browser.playback.set_volume(cfg.volume);
@@ -244,6 +327,7 @@ impl SampleBrowser {
                 Ok(result) => {
                     ctx.scan_rx = None;
                     ctx.scanning = false;
+                    ctx.scan_progress = None;
                     match result {
                         Ok(s) => {
                             log::info!(
@@ -259,6 +343,7 @@ impl SampleBrowser {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     ctx.scan_rx = None;
                     ctx.scanning = false;
+                    ctx.scan_progress = None;
                     scan_errors.push("scan thread terminated unexpectedly".into());
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
@@ -276,6 +361,32 @@ impl SampleBrowser {
                 {
                     self.rebuild_tab_results(i);
                 }
+            }
+        }
+
+        self.poll_full_peaks();
+    }
+
+    /// Kick off / receive the full-source waveform for the current clip. A long
+    /// file only shows its preview peaks until this fills in the whole shape,
+    /// which is also what makes the entire source scrubbable.
+    fn poll_full_peaks(&mut self) {
+        // Request once per truncated clip. Short clips already decode whole, so
+        // their preview peaks are the full waveform — no scan needed.
+        if let (Some(info), Some(file)) =
+            (self.playback.current_info(), self.playback.current_file())
+        {
+            if info.truncated && self.peaks_requested_for.as_deref() != Some(file) {
+                self.peaks_requested_for = Some(file.to_path_buf());
+                self.peaks_request.send(file.to_path_buf());
+            }
+        }
+
+        // Apply any finished waveform to the engine (dropped if it no longer
+        // matches the current file — the user moved on).
+        while let Ok((path, peaks)) = self.peaks_result_rx.try_recv() {
+            if let Some(peaks) = peaks {
+                self.playback.set_full_peaks(&path, peaks);
             }
         }
     }
@@ -396,11 +507,13 @@ impl SampleBrowser {
         };
 
         self.last_error = None;
+        self.peaks_requested_for = None;
         self.playback.play(&path);
     }
 
     pub fn play_file(&mut self, path: &Path) {
         self.last_error = None;
+        self.peaks_requested_for = None;
         self.playback.play(path);
     }
 
@@ -426,14 +539,17 @@ impl SampleBrowser {
         self.playback.current_info()
     }
 
-    /// Playable duration of the loaded clip, or `None` when nothing is loaded.
-    pub fn loaded_duration(&self) -> Option<std::time::Duration> {
-        self.playback.loaded_duration()
+    /// The `(start, duration)` in source seconds the displayed waveform spans,
+    /// or `None` when nothing is loaded. The UI maps the playhead and scrub
+    /// clicks against this.
+    pub fn waveform_axis(&self) -> Option<(f64, f64)> {
+        self.playback.waveform_axis()
     }
 
-    /// Seek to `fraction` (0..1) of the loaded clip and play from there.
-    pub fn seek_fraction(&self, fraction: f32) {
-        self.playback.seek_fraction(fraction);
+    /// Seek to `target` seconds into the source and play from there (decoding
+    /// an on-demand window if it's past the loaded region).
+    pub fn seek_to(&mut self, target: Duration) {
+        self.playback.seek_to(target);
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -600,9 +716,12 @@ impl SampleBrowser {
             asset_tags: HashMap::new(),
             scanning: true,
             scan_rx: None,
+            scan_progress: None,
         };
         ctx.reload();
-        ctx.scan_rx = Some(spawn_scan(root));
+        let (rx, progress) = spawn_scan(root);
+        ctx.scan_rx = Some(rx);
+        ctx.scan_progress = Some(progress);
         self.libraries.push(ctx);
         self.libraries.len() - 1
     }
@@ -613,6 +732,20 @@ impl SampleBrowser {
             Some(i) if self.libraries[i].scanning => LibraryState::Scanning,
             Some(_) => LibraryState::Ready,
         }
+    }
+
+    /// Live scan progress `(done, total)` for the active library, or `None` when
+    /// not scanning. `total == 0` means the tree is still being walked.
+    pub fn scan_progress(&self) -> Option<(usize, usize)> {
+        use std::sync::atomic::Ordering;
+        let ctx = &self.libraries[self.active().library_idx?];
+        let p = ctx.scan_progress.as_ref()?;
+        ctx.scanning.then(|| {
+            (
+                p.done.load(Ordering::Relaxed),
+                p.total.load(Ordering::Relaxed),
+            )
+        })
     }
 
     /// Explicitly create a library rooted at the current directory. The only
@@ -631,6 +764,40 @@ impl SampleBrowser {
                 self.active_mut().library_idx = Some(idx);
             }
             Err(e) => self.last_error = Some(e.to_string()),
+        }
+    }
+
+    /// Delete the active tab's library store (`.punks/`) from disk. A testing
+    /// convenience — destructive and irreversible; the UI gates it behind a
+    /// confirmation.
+    pub fn delete_active_library(&mut self) {
+        let Some(li) = self.active().library_idx else {
+            return;
+        };
+        let root = self.libraries[li].root.clone();
+        // Drop the LibraryContext (closing its SQLite connection and the scan
+        // receiver) before touching the folder on disk.
+        self.libraries.remove(li);
+        // Re-point tabs, same shift logic as closing a tab: those inside the
+        // removed library detach; those after it shift down one.
+        for tab in &mut self.tabs {
+            match tab.library_idx {
+                Some(x) if x == li => {
+                    tab.library_idx = None;
+                    tab.tag_filter.clear();
+                }
+                Some(x) if x > li => tab.library_idx = Some(x - 1),
+                _ => {}
+            }
+        }
+        // ponytail: on Windows a mid-flight scan/peaks worker connection can
+        // block this delete; fine on unix (unlink-while-open). Upgrade path:
+        // quiesce workers before removing.
+        if let Err(e) = std::fs::remove_dir_all(root.join(".punks")) {
+            self.last_error = Some(format!("delete library: {e}"));
+        }
+        for i in 0..self.tabs.len() {
+            self.rebuild_tab_results(i);
         }
     }
 
