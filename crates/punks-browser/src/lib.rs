@@ -5,13 +5,13 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use punks_analysis::AnalysisReport;
+pub use punks_analysis::{amp_to_dbfs, AnalysisReport};
 pub use punks_core::config::PunksConfig;
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
 pub use punks_library::{LibraryError, ScanSummary, TagCount};
 pub use punks_playback::{AudioMetadata, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks};
 
-use punks_analysis::AudioBuffer;
+use punks_analysis::{AnalysisContext, AudioBuffer};
 use punks_library::Library;
 use punks_playback::{decode_file, PlaybackEngine, RequestSlot};
 
@@ -253,10 +253,18 @@ fn spawn_analysis_worker() -> (mpsc::Sender<PathBuf>, mpsc::Receiver<PathBuf>) {
                         match decode_file(&path) {
                             Ok(d) => {
                                 // Bounded window (decode_file caps long files), so
-                                // worker memory stays bounded.
-                                let buf =
-                                    AudioBuffer::new(&d.interleaved, d.sample_rate, d.channels);
-                                let report = punks_analysis::run_all(&buf);
+                                // worker memory stays bounded. The context also
+                                // carries the *true* source length so Duration is
+                                // correct even when `audio` is a preview window.
+                                let ctx = AnalysisContext {
+                                    audio: AudioBuffer::new(
+                                        &d.interleaved,
+                                        d.sample_rate,
+                                        d.channels,
+                                    ),
+                                    source_duration: d.source_duration,
+                                };
+                                let report = punks_analysis::run_all(&ctx);
                                 let dur = t.elapsed().as_millis() as u32;
                                 match lib.store_analysis(&path, &report.metrics(), dur) {
                                     Ok(()) => {

@@ -149,6 +149,18 @@ fn scroll_row_into_view(ui: &imgui::Ui, row: usize, row_stride: f32) {
     }
 }
 
+/// Track length for the analysis readout. Sample libraries are mostly sub-second
+/// one-shots, so show tenths under a minute (`0.3s`, `12.4s`) and `m:ss` above.
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else {
+        let total = secs as u64;
+        format!("{}:{:02}", total / 60, total % 60)
+    }
+}
+
 /// bext TimeReference (sample count) as `hh:mm:ss.mmm` start timecode.
 fn format_timecode(samples: u64, sample_rate: u32) -> String {
     if sample_rate == 0 {
@@ -587,9 +599,14 @@ impl BrowserPanel {
         // layout stays put.
         {
             if let Some(a) = browser.current_analysis() {
+                // Length first (most-useful), peak shown in dB (audio people don't
+                // think in linear amplitude); peak stays stored linear.
                 ui.text_disabled(format!(
-                    "RMS {:.1} dBFS   \u{b7}   Peak {:.2}   \u{b7}   ZCR {:.3}",
-                    a.rms_dbfs, a.peak, a.zcr
+                    "{}   \u{b7}   Peak {:.1} dB   \u{b7}   RMS {:.1} dBFS   \u{b7}   ZCR {:.3}",
+                    format_duration(a.duration),
+                    punks_browser::amp_to_dbfs(a.peak),
+                    a.rms_dbfs,
+                    a.zcr
                 ));
             } else if browser.current_analysis_pending() {
                 ui.text_disabled("analyzing\u{2026}");

@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use punks_analysis::{run_all, AnalysisReport, AudioBuffer};
+use punks_analysis::{run_all, AnalysisContext, AnalysisReport, AudioBuffer};
 use punks_library::Library;
 use punks_playback::decode_file;
 
@@ -56,8 +56,11 @@ fn worker_chain_decodes_analyzes_and_stores() {
     let claimed = lib.claim_next_pending().unwrap().expect("a pending job");
     assert_eq!(claimed, wav);
     let decoded = decode_file(&claimed).unwrap();
-    let buf = AudioBuffer::new(&decoded.interleaved, decoded.sample_rate, decoded.channels);
-    let report = run_all(&buf);
+    let ctx = AnalysisContext {
+        audio: AudioBuffer::new(&decoded.interleaved, decoded.sample_rate, decoded.channels),
+        source_duration: decoded.source_duration,
+    };
+    let report = run_all(&ctx);
     lib.store_analysis(&claimed, &report.metrics(), 7).unwrap();
     assert!(lib.claim_next_pending().unwrap().is_none()); // queue drained
 
@@ -75,6 +78,12 @@ fn worker_chain_decodes_analyzes_and_stores() {
         (stored.zcr - 2.0 * 1000.0 / sr as f32).abs() < 1e-2,
         "zcr {}",
         stored.zcr
+    );
+    // 1 s WAV → duration ≈ 1.0 s, round-tripped through storage.
+    assert!(
+        (stored.duration.as_secs_f64() - 1.0).abs() < 1e-3,
+        "duration {:?}",
+        stored.duration
     );
     assert_eq!(lib.job_status(&wav).unwrap().as_deref(), Some("done"));
 
