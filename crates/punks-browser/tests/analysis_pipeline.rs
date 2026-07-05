@@ -122,6 +122,49 @@ fn worker_chain_decodes_analyzes_and_stores() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The priority path (`claim_path`) lets the worker fully decode/analyze/store
+/// a specific asset out of FIFO order — the mechanism behind "jump the backlog
+/// to whatever the user just selected."
+#[test]
+fn priority_claim_completes_out_of_fifo_order() {
+    let dir = std::env::temp_dir().join(format!("punks_pipe_prio_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sr = 8_000;
+    let a = dir.join("a.wav");
+    let b = dir.join("b.wav");
+    write_sine_wav(&a, sr, 440.0, 0.5, sr as usize / 10);
+    write_sine_wav(&b, sr, 440.0, 0.5, sr as usize / 10);
+
+    let mut lib = Library::create(&dir).unwrap();
+    lib.reconcile(&punks_library::scan_files(&dir).unwrap())
+        .unwrap();
+    lib.enqueue_all(punks_analysis::pipeline_version()).unwrap();
+
+    // Jump straight to "b" via claim_path — the same call the worker makes for
+    // a priority request — bypassing claim_next_pending's FIFO order entirely,
+    // and run it through the full decode/analyze/store chain.
+    let claimed = lib.claim_path(&b).unwrap().expect("b claimable");
+    assert_eq!(claimed, b);
+    let decoded = decode_file(&claimed).unwrap();
+    let ctx = AnalysisContext {
+        audio: AudioBuffer::new(&decoded.interleaved, decoded.sample_rate, decoded.channels),
+        source_duration: decoded.source_duration,
+        file_stem: claimed.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+    };
+    let report = run_all(&ctx);
+    store_report(&mut lib, &claimed, &report, 1);
+
+    // "b" is done without ever touching claim_next_pending; "a" is untouched.
+    assert_eq!(lib.job_status(&b).unwrap().as_deref(), Some("done"));
+    assert_eq!(lib.job_status(&a).unwrap().as_deref(), Some("pending"));
+
+    // FIFO backlog still picks up "a" normally afterwards.
+    assert_eq!(lib.claim_next_pending().unwrap(), Some(a));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A file that won't decode is marked `error`, not left spinning in the queue.
 #[test]
 fn undecodable_file_is_failed_not_reclaimed() {

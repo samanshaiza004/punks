@@ -608,6 +608,25 @@ impl Library {
         Ok(Some(self.root.join(str_to_rel(&rel))))
     }
 
+    /// Claim one specific asset out of order (e.g. the file the user just
+    /// selected, jumping a FIFO backlog) — same `running` transition as
+    /// [`claim_next_pending`](Self::claim_next_pending), but only if it's
+    /// currently `pending`. Returns `None` (a no-op) if it's already
+    /// running/done/error, or has no job at all — never re-claims finished work.
+    pub fn claim_path(&mut self, abs_path: &Path) -> Result<Option<PathBuf>, LibraryError> {
+        let Some(asset_id) = self.asset_id_for(abs_path)? else {
+            return Ok(None);
+        };
+        let updated = self.conn.execute(
+            "UPDATE analysis_jobs SET status = 'running', started_at = unixepoch(),
+               finished_at = NULL, duration_ms = NULL, error = NULL,
+               updated_at = unixepoch()
+             WHERE asset_id = ?1 AND status = 'pending'",
+            rusqlite::params![asset_id],
+        )?;
+        Ok((updated > 0).then(|| abs_path.to_path_buf()))
+    }
+
     /// Store an asset's analysis facts (opaque `(metric, Fact)` pairs, e.g. from
     /// the caller's report) and mark its job `done` with the elapsed
     /// `duration_ms` — one transaction. Upserts, so re-running is idempotent.
@@ -1399,6 +1418,42 @@ mod tests {
             rusqlite::params![id],
         );
         assert!(none.is_err());
+    }
+
+    #[test]
+    fn claim_path_jumps_a_specific_asset_and_is_idempotent() {
+        let t = TempRoot::new("claim_path");
+        let a = write_wav(&t.0, "a.wav", b"A");
+        let b = write_wav(&t.0, "b.wav", b"B");
+        let mut lib = Library::create(&t.0).unwrap();
+        lib.reconcile(&scan_files(&t.0).unwrap()).unwrap();
+        lib.enqueue_all(1).unwrap();
+
+        // Directory walk order (and so asset_id / FIFO order) isn't guaranteed;
+        // pin down which asset FIFO would serve first, then jump the *other* one.
+        let id_a = lib.asset_id_for(&a).unwrap().unwrap();
+        let id_b = lib.asset_id_for(&b).unwrap().unwrap();
+        let (fifo_first, jump) = if id_a < id_b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        };
+
+        let claimed = lib.claim_path(&jump).unwrap();
+        assert_eq!(claimed, Some(jump.clone()));
+        assert_eq!(jobs_in(&lib, "running"), 1);
+        assert_eq!(jobs_in(&lib, "pending"), 1); // the FIFO-first asset untouched
+
+        // FIFO backlog still serves the earlier asset normally afterwards.
+        let next = lib.claim_next_pending().unwrap();
+        assert_eq!(next, Some(fifo_first));
+
+        // Re-claiming the jumped asset while it's already running is a no-op.
+        assert_eq!(lib.claim_path(&jump).unwrap(), None);
+
+        // A path outside the library (no asset/job) is a no-op, not an error.
+        let outside = t.0.join("nonexistent.wav");
+        assert_eq!(lib.claim_path(&outside).unwrap(), None);
     }
 
     #[test]

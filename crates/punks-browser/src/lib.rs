@@ -258,17 +258,105 @@ fn facts_to_report(facts: Vec<(String, Fact)>) -> AnalysisReport {
     AnalysisReport::from_facts(&numeric, &text)
 }
 
+/// A message to the global analysis worker.
+enum AnalysisMsg {
+    /// A library root whose backlog should be (re-)drained (e.g. a scan just
+    /// finished and enqueued jobs).
+    Drain(PathBuf),
+    /// Jump the backlog for one specific asset — the file the user just
+    /// selected/played — so it doesn't wait behind everything queued ahead of
+    /// it in FIFO order.
+    Priority { root: PathBuf, path: PathBuf },
+}
+
+/// Decode, analyze, and store results for one already-claimed asset (its job is
+/// already `running`); on decode failure, mark it `error` instead. Shared by
+/// both the FIFO backlog loop and priority jumps so claiming and analyzing stay
+/// decoupled — only *how* a path was selected differs between callers.
+fn analyze_claimed(lib: &mut Library, path: &Path, done_tx: &mpsc::Sender<PathBuf>) {
+    let t = std::time::Instant::now();
+    match decode_file(path) {
+        Ok(d) => {
+            // Bounded window (decode_file caps long files), so worker memory
+            // stays bounded. The context also carries the *true* source length
+            // and the file name, so Duration/Filename facts are correct.
+            let ctx = AnalysisContext {
+                audio: AudioBuffer::new(&d.interleaved, d.sample_rate, d.channels),
+                source_duration: d.source_duration,
+                file_stem: path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default(),
+            };
+            let report = punks_analysis::run_all(&ctx);
+            let dur = t.elapsed().as_millis() as u32;
+            let facts = report_to_facts(&report);
+            match lib.store_analysis(path, &facts, dur) {
+                Ok(()) => {
+                    let _ = done_tx.send(path.to_path_buf()); // receiver dropped: app closing
+                }
+                Err(e) => log::warn!("analysis store {path:?}: {e}"),
+            }
+        }
+        Err(e) => {
+            if let Err(e2) = lib.fail_analysis(path, &e.to_string()) {
+                log::warn!("analysis fail-mark {path:?}: {e2}");
+            }
+        }
+    }
+}
+
+/// Claim-and-analyze a priority path, opening `root` if it isn't already the
+/// open connection.
+fn handle_priority(
+    open: &mut Option<(PathBuf, Library)>,
+    root: PathBuf,
+    path: PathBuf,
+    done_tx: &mpsc::Sender<PathBuf>,
+) {
+    if open.as_ref().is_none_or(|(r, _)| *r != root) {
+        *open = Library::open(&root).ok().map(|lib| (root, lib));
+    }
+    let Some((_, lib)) = open else { return };
+    match lib.claim_path(&path) {
+        Ok(Some(claimed)) => analyze_claimed(lib, &claimed, done_tx),
+        Ok(None) => {} // already done/running/error, or no job — nothing to jump
+        Err(e) => log::warn!("analysis priority claim {path:?}: {e}"),
+    }
+}
+
 /// The global background analysis worker: one app-lifetime thread that drains a
 /// library's job queue whenever asked. Fed a durable FIFO of roots (every queued
 /// root is drained, unlike the latest-wins peaks `RequestSlot`); reports each
 /// finished asset back so the UI can fill it in. Owns its own `Library`
 /// connection per drain, so it never contends with the UI thread's handle beyond
 /// WAL's normal write serialization.
-fn spawn_analysis_worker() -> (mpsc::Sender<PathBuf>, mpsc::Receiver<PathBuf>) {
-    let (drain_tx, drain_rx) = mpsc::channel::<PathBuf>();
+///
+/// [`AnalysisMsg::Priority`] jumps the backlog: checked before every backlog
+/// claim, so the file the user is looking at right now is never stuck behind a
+/// large library's worth of queued work. `Drain` messages that arrive while a
+/// different root's backlog is being processed are queued, not lost.
+fn spawn_analysis_worker() -> (mpsc::Sender<AnalysisMsg>, mpsc::Receiver<PathBuf>) {
+    let (tx, rx) = mpsc::channel::<AnalysisMsg>();
     let (done_tx, done_rx) = mpsc::channel::<PathBuf>();
     std::thread::spawn(move || {
-        while let Ok(root) = drain_rx.recv() {
+        let mut pending_roots: std::collections::VecDeque<PathBuf> =
+            std::collections::VecDeque::new();
+        loop {
+            let root = if let Some(r) = pending_roots.pop_front() {
+                r
+            } else {
+                match rx.recv() {
+                    Ok(AnalysisMsg::Drain(root)) => root,
+                    Ok(AnalysisMsg::Priority { root, path }) => {
+                        let mut open = None;
+                        handle_priority(&mut open, root, path, &done_tx);
+                        continue;
+                    }
+                    Err(_) => return, // channel closed: app shutting down
+                }
+            };
+
             let Ok(mut lib) = Library::open(&root) else {
                 continue;
             };
@@ -277,46 +365,25 @@ fn spawn_analysis_worker() -> (mpsc::Sender<PathBuf>, mpsc::Receiver<PathBuf>) {
                 log::warn!("analysis reset ({}): {e}", root.display());
             }
             loop {
-                match lib.claim_next_pending() {
-                    Ok(Some(path)) => {
-                        let t = std::time::Instant::now();
-                        match decode_file(&path) {
-                            Ok(d) => {
-                                // Bounded window (decode_file caps long files), so
-                                // worker memory stays bounded. The context also
-                                // carries the *true* source length and the file
-                                // name, so Duration/Filename facts are correct.
-                                let ctx = AnalysisContext {
-                                    audio: AudioBuffer::new(
-                                        &d.interleaved,
-                                        d.sample_rate,
-                                        d.channels,
-                                    ),
-                                    source_duration: d.source_duration,
-                                    file_stem: path
-                                        .file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or_default(),
-                                };
-                                let report = punks_analysis::run_all(&ctx);
-                                let dur = t.elapsed().as_millis() as u32;
-                                let facts = report_to_facts(&report);
-                                match lib.store_analysis(&path, &facts, dur) {
-                                    Ok(()) => {
-                                        if done_tx.send(path).is_err() {
-                                            return; // receiver dropped: app closing
-                                        }
-                                    }
-                                    Err(e) => log::warn!("analysis store {path:?}: {e}"),
+                // Priority requests jump the backlog: drain them before every
+                // claim so a big backlog can't starve the file being looked at.
+                let mut priority_lib = None;
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        AnalysisMsg::Priority { root: proot, path } => {
+                            if proot == root {
+                                if let Ok(Some(claimed)) = lib.claim_path(&path) {
+                                    analyze_claimed(&mut lib, &claimed, &done_tx);
                                 }
-                            }
-                            Err(e) => {
-                                if let Err(e2) = lib.fail_analysis(&path, &e.to_string()) {
-                                    log::warn!("analysis fail-mark {path:?}: {e2}");
-                                }
+                            } else {
+                                handle_priority(&mut priority_lib, proot, path, &done_tx);
                             }
                         }
+                        AnalysisMsg::Drain(r) => pending_roots.push_back(r),
                     }
+                }
+                match lib.claim_next_pending() {
+                    Ok(Some(path)) => analyze_claimed(&mut lib, &path, &done_tx),
                     Ok(None) => break, // drained
                     Err(e) => {
                         log::warn!("analysis claim ({}): {e}", root.display());
@@ -326,7 +393,7 @@ fn spawn_analysis_worker() -> (mpsc::Sender<PathBuf>, mpsc::Receiver<PathBuf>) {
             }
         }
     });
-    (drain_tx, done_rx)
+    (tx, done_rx)
 }
 
 pub struct SampleBrowser {
@@ -342,9 +409,10 @@ pub struct SampleBrowser {
     /// The file we've most recently asked for full peaks, to avoid re-requesting
     /// every frame. Reset when a new clip is played.
     peaks_requested_for: Option<PathBuf>,
-    /// Global background analysis worker: send a library root to drain its job
-    /// queue; receive each finished asset's path to refresh its cached results.
-    analysis_drain_tx: mpsc::Sender<PathBuf>,
+    /// Global background analysis worker: send it a root to drain or a specific
+    /// path to jump the backlog for; receive each finished asset's path to
+    /// refresh its cached results.
+    analysis_tx: mpsc::Sender<AnalysisMsg>,
     analysis_done_rx: mpsc::Receiver<PathBuf>,
 }
 
@@ -374,7 +442,7 @@ impl SampleBrowser {
             });
         }
 
-        let (analysis_drain_tx, analysis_done_rx) = spawn_analysis_worker();
+        let (analysis_tx, analysis_done_rx) = spawn_analysis_worker();
 
         let mut browser = SampleBrowser {
             tabs: vec![TabState::default()],
@@ -385,7 +453,7 @@ impl SampleBrowser {
             peaks_request,
             peaks_result_rx,
             peaks_requested_for: None,
-            analysis_drain_tx,
+            analysis_tx,
             analysis_done_rx,
         };
 
@@ -495,7 +563,9 @@ impl SampleBrowser {
             }
             // Jobs were enqueued during the scan; kick the worker to drain them.
             for &i in &scanned {
-                let _ = self.analysis_drain_tx.send(self.libraries[i].root.clone());
+                let _ = self
+                    .analysis_tx
+                    .send(AnalysisMsg::Drain(self.libraries[i].root.clone()));
             }
         }
 
@@ -652,13 +722,27 @@ impl SampleBrowser {
 
         self.last_error = None;
         self.peaks_requested_for = None;
+        self.prioritize_analysis(&path);
         self.playback.play(&path);
     }
 
     pub fn play_file(&mut self, path: &Path) {
         self.last_error = None;
         self.peaks_requested_for = None;
+        self.prioritize_analysis(path);
         self.playback.play(path);
+    }
+
+    /// Ask the analysis worker to jump its backlog for `path` — the file the
+    /// user just selected — so its facts don't wait behind a large library's
+    /// FIFO queue. A no-op outside a library or once already analyzed.
+    fn prioritize_analysis(&self, path: &Path) {
+        if let Some(root) = self.library_for_path(path).map(|c| c.root.clone()) {
+            let _ = self.analysis_tx.send(AnalysisMsg::Priority {
+                root,
+                path: path.to_path_buf(),
+            });
+        }
     }
 
     pub fn stop(&mut self) {
