@@ -116,6 +116,9 @@ const DIR_TEXT_COLOR: [f32; 4] = [0.55, 0.85, 1.0, 1.0];
 
 // Left rail: library status + tag filters live here; tags on rows are pills.
 const SIDEBAR_WIDTH: f32 = 180.0;
+/// Height of the waveform strip. Shared so the panel can reserve exactly the
+/// right room below the file list for it + the metadata lines + transport row.
+const WAVEFORM_HEIGHT: f32 = 64.0;
 const SIDEBAR_BG: [f32; 4] = [0.09, 0.10, 0.11, 1.0];
 const PILL_BG: [f32; 4] = [0.25, 0.28, 0.34, 1.0];
 const PILL_TEXT: [f32; 4] = [0.80, 0.84, 0.90, 1.0];
@@ -146,6 +149,15 @@ fn scroll_row_into_view(ui: &imgui::Ui, row: usize, row_stride: f32) {
         ui.set_scroll_y(row_top);
     } else if row_bottom > view_bottom {
         ui.set_scroll_y(row_bottom - ui.window_size()[1]);
+    }
+}
+
+/// Uppercase the first character (canonical instruments are stored lowercase).
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -437,8 +449,14 @@ impl BrowserPanel {
         ui.separator();
 
         let avail = ui.content_region_avail();
-        // Reserve room below for: waveform + metadata line + transport row.
-        let body_height = (avail[1] - 132.0).max(120.0);
+        // Reserve exact room below the file list for: waveform + 3 metadata lines
+        // (bext, facts, levels) + the transport/volume row + a line of slack (for
+        // the error line / spacing). Derived from font metrics so it stays correct
+        // if the font size changes — a fixed pixel guess pushed the volume slider
+        // off-screen.
+        let line_h = ui.text_line_height_with_spacing();
+        let reserved = WAVEFORM_HEIGHT + 3.0 * line_h + ui.frame_height_with_spacing() + line_h;
+        let body_height = (avail[1] - reserved).max(120.0);
         let mut drag_requested: Option<PathBuf> = None;
         let mut search_focused = false;
         let mut in_search = false;
@@ -447,6 +465,12 @@ impl BrowserPanel {
         let down_key = parse_key(&self.prefs.keybinds.navigate_down).unwrap_or(Key::S);
         let back_key = parse_key(&self.prefs.keybinds.navigate_back).unwrap_or(Key::A);
         let conf_key = parse_key(&self.prefs.keybinds.confirm).unwrap_or(Key::D);
+
+        // Ctrl/Cmd+F jumps straight to the search box (browser-style). Detected
+        // at panel scope, applied inside the content child right before the input.
+        let focus_search = ui.is_window_focused()
+            && (ui.io().key_ctrl || ui.io().key_super)
+            && ui.is_key_pressed_no_repeat(Key::F);
 
         // Left rail: library status + tag filters. Tag display on rows stays
         // inline (pills); the sidebar is only for filtering and library setup.
@@ -463,6 +487,9 @@ impl BrowserPanel {
             .size([0.0, body_height])
             .build(|| {
                 let w = ui.content_region_avail()[0];
+                if focus_search {
+                    ui.set_keyboard_focus_here();
+                }
                 ui.set_next_item_width(w);
                 ui.input_text("##search", &mut self.search_buf)
                     .hint("Search...")
@@ -595,12 +622,28 @@ impl BrowserPanel {
         }
 
         // Analysis readout for the loaded track: fills in asynchronously as the
-        // background worker completes. A blank line is reserved when absent so the
-        // layout stays put.
+        // background worker completes. Two lines (facts + levels); blanks are
+        // reserved when absent so the layout stays put.
         {
             if let Some(a) = browser.current_analysis() {
-                // Length first (most-useful), peak shown in dB (audio people don't
-                // think in linear amplitude); peak stays stored linear.
+                // Facts line: what the sound *is* (name-derived), most identifying.
+                let mut facts: Vec<String> = Vec::new();
+                if let Some(i) = &a.instrument {
+                    facts.push(capitalize(i));
+                }
+                if let Some(b) = a.bpm {
+                    facts.push(format!("{} BPM", b as u32));
+                }
+                if let Some(k) = &a.key {
+                    facts.push(k.clone());
+                }
+                if facts.is_empty() {
+                    ui.new_line();
+                } else {
+                    ui.text_disabled(facts.join("   \u{b7}   "));
+                }
+                // Levels line: length first, peak in dB (audio people don't think
+                // in linear amplitude); peak stays stored linear.
                 ui.text_disabled(format!(
                     "{}   \u{b7}   Peak {:.1} dB   \u{b7}   RMS {:.1} dBFS   \u{b7}   ZCR {:.3}",
                     format_duration(a.duration),
@@ -609,8 +652,13 @@ impl BrowserPanel {
                     a.zcr
                 ));
             } else if browser.current_analysis_pending() {
-                ui.text_disabled("analyzing\u{2026}");
+                // Animated so a slow/queued analysis reads as "working", not
+                // frozen. ASCII dots (the pixel font lacks a `…` glyph).
+                let dots = (ui.time() * 2.0) as usize % 4;
+                ui.new_line();
+                ui.text_disabled(format!("analyzing{}", ".".repeat(dots)));
             } else {
+                ui.new_line();
                 ui.new_line();
             }
         }
@@ -875,8 +923,10 @@ impl BrowserPanel {
         let root: Option<PathBuf> = browser.current_directory().map(|p| p.to_path_buf());
 
         // List navigation over results (W/S). `A` was already handled above.
+        // `is_key_pressed` (not `_no_repeat`) applies imgui's normal key-repeat,
+        // so holding W/S steps rapidly through results instead of moving once.
         if ui.is_window_focused() && !search_focused {
-            if ui.is_key_pressed_no_repeat(up_key) {
+            if ui.is_key_pressed(up_key) {
                 let idx = browser
                     .search_selected()
                     .map_or(count - 1, |i| i.saturating_sub(1));
@@ -887,7 +937,7 @@ impl BrowserPanel {
                 }
                 self.scroll_to_selected = true;
             }
-            if ui.is_key_pressed_no_repeat(down_key) {
+            if ui.is_key_pressed(down_key) {
                 let idx = browser
                     .search_selected()
                     .map_or(0, |i| (i + 1).min(count - 1));
@@ -1015,14 +1065,18 @@ impl BrowserPanel {
             } else if entry_count > 0 {
                 // `else if`: `A` may have just changed the directory; don't also
                 // move a selection within the now-different listing this frame.
-                if ui.is_key_pressed_no_repeat(up_key) {
+                if ui.is_key_pressed(up_key) {
                     // First press with no selection lands on the last item.
+                    // `is_key_pressed` (not `_no_repeat`) applies imgui's normal
+                    // key-repeat (io.key_repeat_delay/_rate): a tap moves one row,
+                    // holding rapidly steps through the list like an OS text
+                    // cursor instead of moving once.
                     let idx = selected.map_or(entry_count - 1, |i| i.saturating_sub(1));
                     browser.select(idx);
                     browser.play_selected();
                     self.scroll_to_selected = true;
                 }
-                if ui.is_key_pressed_no_repeat(down_key) {
+                if ui.is_key_pressed(down_key) {
                     // First press with no selection lands on the first item.
                     let idx = selected.map_or(0, |i| (i + 1).min(entry_count - 1));
                     browser.select(idx);
@@ -1313,7 +1367,7 @@ fn draw_waveform_widget(
 ) {
     let [cx, cy] = ui.cursor_screen_pos();
     let w = ui.content_region_avail()[0];
-    const H: f32 = 64.0;
+    const H: f32 = WAVEFORM_HEIGHT;
 
     // Interactive hit area (replaces the passive dummy) for hover + scrub.
     let clicked = ui.invisible_button("##waveform", [w, H]);

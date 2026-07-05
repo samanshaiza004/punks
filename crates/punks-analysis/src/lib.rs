@@ -6,10 +6,11 @@
 //! *is* its own output.
 //!
 //! This crate owns the *algorithms*. The orchestrator runs [`run_all`] on a
-//! buffer to get one [`AnalysisReport`], then hands its flattened
-//! [`AnalysisReport::metrics`] to storage — storage never names an analyzer.
-//! [`pipeline_version`] folds every analyzer's `VERSION` so persisted results
-//! invalidate when any algorithm changes.
+//! context to get one [`AnalysisReport`], then hands its flattened facts
+//! ([`AnalysisReport::numeric_facts`] / [`AnalysisReport::text_facts`]) to
+//! storage — storage never names an analyzer. [`pipeline_version`] folds every
+//! analyzer's `VERSION` so persisted results invalidate when any algorithm
+//! changes.
 //!
 //! Deliberately tiny: no FFT/STFT/windowing/chroma/onset/tempo/key. Shared
 //! spectral infra should wait for a second real need.
@@ -55,6 +56,9 @@ pub struct AnalysisContext<'a> {
     /// True source length, even when `audio` is a bounded preview window of a
     /// longer file. From the decoder — not derivable from `audio`.
     pub source_duration: std::time::Duration,
+    /// The file name without extension, for name-derived facts (instrument, BPM,
+    /// key). The one non-audio input — analyzers that read it don't touch DSP.
+    pub file_stem: &'a str,
 }
 
 /// A feature analyzer. `analyze` is static — there's no analyzer state to
@@ -204,6 +208,183 @@ impl Analyzer for Duration {
     }
 }
 
+/// Facts read from the file *name* (no DSP): instrument, tempo, musical key.
+/// Deterministic observations — the parser is deliberately conservative, each
+/// rule is a named function ([`instrument_rule`], [`bpm_rule`], [`key_rule`]), and
+/// the negative guards (drum-machine numbers, indexes, sample rates) matter as
+/// much as the matches. See the `filename` tests.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Filename {
+    /// Canonical instrument/type (e.g. `"kick"`), if a token matched the dict.
+    pub instrument: Option<&'static str>,
+    pub bpm: Option<f32>,
+    /// Normalized musical key (e.g. `"F#min"`, `"Amin"`, `"9B"`).
+    pub key: Option<String>,
+}
+
+impl Analyzer for Filename {
+    const ID: &'static str = "filename";
+    const VERSION: u32 = 1;
+    type Output = Filename;
+
+    fn analyze(ctx: &AnalysisContext) -> Filename {
+        let tokens = tokenize(ctx.file_stem);
+        Filename {
+            instrument: instrument_rule(&tokens),
+            bpm: bpm_rule(&tokens),
+            key: key_rule(&tokens),
+        }
+    }
+}
+
+/// Split a stem into lowercase tokens on real separators only (`_ - . space`),
+/// keeping `#` so sharps survive (`F#min`) and Camelot codes stay glued (`9B`).
+/// Glued cases like `128bpm` / `Kick128` are handled inside the rules.
+fn tokenize(stem: &str) -> Vec<String> {
+    stem.split(|c: char| c == '_' || c == '-' || c == '.' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect()
+}
+
+/// InstrumentAliasRule: first token matching an alias → canonical name. Also
+/// tries the token with trailing digits trimmed, so `Kick128` still matches.
+fn instrument_rule(tokens: &[String]) -> Option<&'static str> {
+    // (canonical, aliases). First matching token (in name order) wins.
+    const DICT: &[(&str, &[&str])] = &[
+        ("kick", &["kick", "kik", "bd", "bassdrum"]),
+        ("snare", &["snare", "snr", "sd"]),
+        ("clap", &["clap", "clp"]),
+        ("hihat", &["hihat", "hats", "hat", "hh"]),
+        ("openhat", &["openhat", "ohh", "oh"]),
+        ("tom", &["tom", "toms"]),
+        ("crash", &["crash", "cymbal", "cym"]),
+        ("ride", &["ride"]),
+        ("rim", &["rim", "rimshot"]),
+        ("shaker", &["shaker", "shake"]),
+        ("perc", &["perc", "percussion"]),
+        ("bass", &["bass", "sub", "808"]),
+        ("lead", &["lead"]),
+        ("pad", &["pad", "pads"]),
+        ("pluck", &["pluck"]),
+        ("vocal", &["vocal", "vocals", "vox"]),
+        ("fx", &["fx", "sfx"]),
+        ("riser", &["riser", "rise", "uplifter"]),
+        ("sweep", &["sweep"]),
+    ];
+    let lookup = |t: &str| {
+        DICT.iter()
+            .find(|(_, aliases)| aliases.contains(&t))
+            .map(|(canonical, _)| *canonical)
+    };
+    tokens.iter().find_map(|tok| {
+        lookup(tok).or_else(|| {
+            let trimmed = tok.trim_end_matches(|c: char| c.is_ascii_digit());
+            (trimmed != tok).then(|| lookup(trimmed)).flatten()
+        })
+    })
+}
+
+/// Numbers that look like tempos but aren't: classic drum machines.
+const DRUM_MACHINES: &[u32] = &[808, 909, 707, 606, 505, 727, 626];
+
+/// BpmKeywordRule (high confidence) then BpmStandaloneRule (medium, guarded):
+/// a `bpm`-tagged number wins; else a lone plausible tempo if unambiguous.
+fn bpm_rule(tokens: &[String]) -> Option<f32> {
+    for (i, tok) in tokens.iter().enumerate() {
+        // Glued: "128bpm".
+        if let Some(digits) = tok.strip_suffix("bpm") {
+            if let Some(n) = parse_tempo(digits) {
+                return Some(n as f32);
+            }
+        }
+        // Separated: a number adjacent to a "bpm" token.
+        if tok == "bpm" {
+            let neighbor = i
+                .checked_sub(1)
+                .and_then(|j| tokens.get(j))
+                .or_else(|| tokens.get(i + 1));
+            if let Some(n) = neighbor.and_then(|t| parse_tempo(t)) {
+                return Some(n as f32);
+            }
+        }
+    }
+    // BpmStandaloneRule: unique plausible tempo. Ambiguous (≥2) → None.
+    let mut candidates = tokens.iter().filter_map(|t| plausible_tempo(t));
+    match (candidates.next(), candidates.next()) {
+        (Some(n), None) => Some(n as f32),
+        _ => None,
+    }
+}
+
+/// A 2–3 digit tempo token in the broad BPM range (for keyword-tagged numbers).
+fn parse_tempo(tok: &str) -> Option<u32> {
+    if !(2..=3).contains(&tok.len()) || !tok.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    tok.parse::<u32>().ok().filter(|&n| (30..=300).contains(&n))
+}
+
+/// A standalone number allowed to be a tempo: index guard (leading zero) +
+/// DrumMachineGuard + a tighter musical range than the keyword case.
+fn plausible_tempo(tok: &str) -> Option<u32> {
+    if tok.starts_with('0') {
+        return None; // "04" is an index, not a tempo
+    }
+    let n = parse_tempo(tok)?;
+    if DRUM_MACHINES.contains(&n) || !(60..=200).contains(&n) {
+        return None;
+    }
+    Some(n)
+}
+
+/// MusicalKeyRule / CamelotKeyRule: a token is a key only with an explicit
+/// accidental/quality (`Cmaj`, `F#min`, `Am`, `Bb`) or Camelot (`9B`). A bare
+/// letter is rejected — precision over recall.
+fn key_rule(tokens: &[String]) -> Option<String> {
+    tokens
+        .iter()
+        .find_map(|t| musical_key(t).or_else(|| camelot_key(t)))
+}
+
+fn musical_key(tok: &str) -> Option<String> {
+    let note = tok.bytes().next().filter(|b| (b'a'..=b'g').contains(b))?;
+    let mut rest = &tok[1..];
+    let mut acc = "";
+    if let Some(r) = rest.strip_prefix('#') {
+        (acc, rest) = ("#", r);
+    } else if let Some(r) = rest.strip_prefix('b') {
+        (acc, rest) = ("b", r);
+    }
+    let quality = match rest {
+        "" => "",
+        "m" | "min" | "minor" => "min",
+        "maj" | "major" => "maj",
+        _ => return None, // trailing junk → not a key
+    };
+    // Require a disambiguator (accidental or quality); bare "c" is rejected.
+    if acc.is_empty() && quality.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}{}{}",
+        (note as char).to_ascii_uppercase(),
+        acc,
+        quality
+    ))
+}
+
+fn camelot_key(tok: &str) -> Option<String> {
+    let (num, letter) = tok.split_at(tok.len().checked_sub(1)?);
+    let letter = match letter {
+        "a" => "A",
+        "b" => "B",
+        _ => return None,
+    };
+    let n: u32 = num.parse().ok()?;
+    (1..=12).contains(&n).then(|| format!("{n}{letter}"))
+}
+
 /// The registered analyzers as `(id, version)`, in run order. The single place
 /// that knows the analyzer set; [`run_all`] and [`pipeline_version`] read it.
 /// When an analyzer gains a non-empty `DEPENDS_ON`, sort this topologically.
@@ -212,14 +393,16 @@ const PIPELINE: &[(&str, u32)] = &[
     (Peak::ID, Peak::VERSION),
     (Zcr::ID, Zcr::VERSION),
     (Duration::ID, Duration::VERSION),
+    (Filename::ID, Filename::VERSION),
 ];
 
-/// One asset's analysis result. A typed carrier so analyzers stay type-safe,
-/// with [`metrics`](Self::metrics)/[`from_metrics`](Self::from_metrics) as the
-/// only seam to storage — the DB schema can evolve without the analyzers, and
-/// storage never names a field. Grows by adding fields (e.g. `bpm: Option<f32>`,
-/// `key: Option<Key>`) plus a line in each of the two methods; nothing else moves.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+/// One asset's analysis facts. A typed carrier so analyzers stay type-safe, with
+/// [`numeric_facts`](Self::numeric_facts)/[`text_facts`](Self::text_facts) /
+/// [`from_facts`](Self::from_facts) as the only seam to storage — the DB schema
+/// can evolve without the analyzers, and storage never names a field. Grows by
+/// adding a field plus a line in the seam methods; nothing else moves. Optional
+/// fields are absent from the flattened facts when `None` (not defaulted).
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AnalysisReport {
     /// Linear RMS amplitude.
     pub rms: f32,
@@ -231,25 +414,49 @@ pub struct AnalysisReport {
     pub zcr: f32,
     /// True source length (the strong type; flattened to seconds only in storage).
     pub duration: std::time::Duration,
+    /// Tempo parsed from the file name, if found.
+    pub bpm: Option<f32>,
+    /// Instrument/type parsed from the file name (canonical), if found.
+    pub instrument: Option<String>,
+    /// Musical key parsed from the file name (normalized), if found.
+    pub key: Option<String>,
 }
 
 impl AnalysisReport {
-    /// Flatten to `(metric, value)` pairs for opaque storage.
-    pub fn metrics(&self) -> Vec<(&'static str, f64)> {
-        vec![
+    /// Flatten numeric facts to `(metric, value)` pairs. Optional numeric facts
+    /// (`bpm`) appear only when present.
+    pub fn numeric_facts(&self) -> Vec<(&'static str, f64)> {
+        let mut out = vec![
             ("rms", self.rms as f64),
             ("rms_dbfs", self.rms_dbfs as f64),
             ("peak", self.peak as f64),
             ("zcr", self.zcr as f64),
             ("duration", self.duration.as_secs_f64()),
-        ]
+        ];
+        if let Some(bpm) = self.bpm {
+            out.push(("bpm", bpm as f64));
+        }
+        out
     }
 
-    /// Rebuild from stored pairs; a metric absent from `rows` stays at its
-    /// default (0 now; `None` once optional fields exist).
-    pub fn from_metrics(rows: &[(String, f64)]) -> Self {
-        let raw = |k: &str| rows.iter().find(|(m, _)| m == k).map(|(_, v)| *v);
+    /// Flatten text facts to `(metric, value)` pairs — only the present ones.
+    pub fn text_facts(&self) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        if let Some(i) = &self.instrument {
+            out.push(("instrument", i.clone()));
+        }
+        if let Some(k) = &self.key {
+            out.push(("key", k.clone()));
+        }
+        out
+    }
+
+    /// Rebuild from stored numeric + text facts. Always-present numeric facts
+    /// default to 0 when absent; optional facts stay `None`.
+    pub fn from_facts(numeric: &[(String, f64)], text: &[(String, String)]) -> Self {
+        let raw = |k: &str| numeric.iter().find(|(m, _)| m == k).map(|(_, v)| *v);
         let get = |k: &str| raw(k).map(|v| v as f32).unwrap_or_default();
+        let text_of = |k: &str| text.iter().find(|(m, _)| m == k).map(|(_, v)| v.clone());
         AnalysisReport {
             rms: get("rms"),
             rms_dbfs: get("rms_dbfs"),
@@ -261,6 +468,9 @@ impl AnalysisReport {
                     .filter(|v| v.is_finite() && *v >= 0.0)
                     .unwrap_or(0.0),
             ),
+            bpm: raw("bpm").map(|v| v as f32),
+            instrument: text_of("instrument"),
+            key: text_of("key"),
         }
     }
 }
@@ -274,12 +484,16 @@ pub fn run_all(ctx: &AnalysisContext) -> AnalysisReport {
     let peak = Peak::analyze(ctx);
     let zcr = Zcr::analyze(ctx);
     let duration = Duration::analyze(ctx);
+    let fname = Filename::analyze(ctx);
     AnalysisReport {
         rms: rms.value,
         rms_dbfs: rms.dbfs,
         peak: peak.value,
         zcr: zcr.value,
         duration: duration.value,
+        bpm: fname.bpm,
+        instrument: fname.instrument.map(String::from),
+        key: fname.key,
     }
 }
 
@@ -314,7 +528,17 @@ mod tests {
         AnalysisContext {
             audio: AudioBuffer::new(samples, sr, ch),
             source_duration: StdDuration::from_secs_f64(frames as f64 / sr as f64),
+            file_stem: "",
         }
+    }
+
+    /// Parse just a file stem (no audio needed).
+    fn parse(stem: &str) -> Filename {
+        Filename::analyze(&AnalysisContext {
+            audio: AudioBuffer::new(&[], 48_000, 1),
+            source_duration: StdDuration::ZERO,
+            file_stem: stem,
+        })
     }
 
     #[test]
@@ -387,6 +611,7 @@ mod tests {
         let c = AnalysisContext {
             audio: AudioBuffer::new(&s, 48_000, 1),
             source_duration: long,
+            file_stem: "",
         };
         assert_eq!(Duration::analyze(&c).value, long);
         assert_eq!(run_all(&c).duration, long);
@@ -405,42 +630,108 @@ mod tests {
         assert_eq!(Peak::VERSION, 1);
         assert_eq!(Zcr::VERSION, 1);
         assert_eq!(Duration::VERSION, 1);
+        assert_eq!(Filename::VERSION, 1);
     }
 
     #[test]
     fn run_all_fills_the_whole_report() {
         let s = sine(1000.0, 48_000, 0.8, 48_000);
-        let c = ctx(&s, 48_000, 1);
+        let mut c = ctx(&s, 48_000, 1);
+        c.file_stem = "Kick_128";
         let r = run_all(&c);
         assert!((r.rms - 0.8 / std::f32::consts::SQRT_2).abs() < 1e-3);
         assert!((r.peak - 0.8).abs() < 1e-3);
         assert!((r.zcr - 2.0 * 1000.0 / 48_000.0).abs() < 1e-3);
         assert!(r.rms_dbfs < 0.0 && r.rms_dbfs.is_finite());
         assert!((r.duration.as_secs_f64() - 1.0).abs() < 1e-6); // 1s buffer
+        assert_eq!(r.instrument.as_deref(), Some("kick"));
+        assert_eq!(r.bpm, Some(128.0));
+    }
+
+    // --- Filename parser (each rule named; negatives are the point) ---
+
+    #[test]
+    fn instrument_alias_rule() {
+        assert_eq!(parse("Kick").instrument, Some("kick"));
+        assert_eq!(parse("vocal_loop").instrument, Some("vocal"));
+        assert_eq!(parse("hihat_closed").instrument, Some("hihat"));
+        assert_eq!(parse("Kick128").instrument, Some("kick")); // glued trailing digits
+        assert_eq!(parse("mysound").instrument, None);
     }
 
     #[test]
-    fn metrics_round_trip() {
+    fn bpm_keyword_rule() {
+        assert_eq!(parse("loop_128bpm").bpm, Some(128.0)); // glued
+        assert_eq!(parse("loop_90_bpm").bpm, Some(90.0)); // adjacent
+                                                          // Keyword wins even when a decoy standalone is present.
+        assert_eq!(parse("vocal_150_128bpm").bpm, Some(128.0));
+    }
+
+    #[test]
+    fn bpm_standalone_rule_and_guards() {
+        assert_eq!(parse("Kick_128").bpm, Some(128.0));
+        assert_eq!(parse("Snare_04").bpm, None); // leading-zero index
+        assert_eq!(parse("808_Bass").bpm, None); // DrumMachineGuard
+        assert_eq!(parse("track_44100_24_128").bpm, Some(128.0)); // rate/bits out of range
+        assert_eq!(parse("loop_120_140").bpm, None); // ambiguous → None
+    }
+
+    #[test]
+    fn musical_and_camelot_key_rules() {
+        assert_eq!(parse("Lead_Am").key.as_deref(), Some("Amin"));
+        assert_eq!(parse("pad_Cmaj").key.as_deref(), Some("Cmaj"));
+        assert_eq!(parse("vox_F#min").key.as_deref(), Some("F#min"));
+        assert_eq!(parse("bass_Bb").key.as_deref(), Some("Bb"));
+        assert_eq!(parse("loop_9B").key.as_deref(), Some("9B")); // Camelot
+        assert_eq!(parse("take_C").key, None); // bare letter rejected
+        assert_eq!(parse("mysound").key, None);
+    }
+
+    #[test]
+    fn combined_facts() {
+        let f = parse("808_Bass_Cmin");
+        assert_eq!(f.instrument, Some("bass"));
+        assert_eq!(f.bpm, None); // 808 guarded
+        assert_eq!(f.key.as_deref(), Some("Cmin"));
+
+        let f = parse("vocal_loop_90bpm_F#min");
+        assert_eq!(f.instrument, Some("vocal"));
+        assert_eq!(f.bpm, Some(90.0));
+        assert_eq!(f.key.as_deref(), Some("F#min"));
+    }
+
+    #[test]
+    fn facts_round_trip() {
         let r = AnalysisReport {
             rms: 0.5,
             rms_dbfs: -6.02,
             peak: 0.9,
             zcr: 0.1,
             duration: StdDuration::from_secs_f64(3.482),
+            bpm: Some(128.0),
+            instrument: Some("kick".into()),
+            key: Some("F#min".into()),
         };
-        // metrics() -> owned pairs -> from_metrics() must reconstruct exactly.
-        let owned: Vec<(String, f64)> = r
-            .metrics()
+        let numeric: Vec<(String, f64)> = r
+            .numeric_facts()
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect();
-        let back = AnalysisReport::from_metrics(&owned);
-        assert_eq!(r, back);
-        // Missing metrics default rather than panic.
-        let partial = AnalysisReport::from_metrics(&[("peak".to_string(), 0.7)]);
+        let text: Vec<(String, String)> = r
+            .text_facts()
+            .into_iter()
+            .map(|(k, v)| (k.into(), v))
+            .collect();
+        assert_eq!(AnalysisReport::from_facts(&numeric, &text), r);
+
+        // Optionals absent from storage → None; always-present numeric defaults.
+        let partial = AnalysisReport::from_facts(&[("peak".to_string(), 0.7)], &[]);
         assert_eq!(partial.peak, 0.7);
         assert_eq!(partial.rms, 0.0);
         assert_eq!(partial.duration, StdDuration::ZERO);
+        assert_eq!(partial.bpm, None);
+        assert_eq!(partial.instrument, None);
+        assert_eq!(partial.key, None);
     }
 
     #[test]

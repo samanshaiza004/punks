@@ -12,7 +12,7 @@ pub use punks_library::{LibraryError, ScanSummary, TagCount};
 pub use punks_playback::{AudioMetadata, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks};
 
 use punks_analysis::{AnalysisContext, AudioBuffer};
-use punks_library::Library;
+use punks_library::{Fact, Library};
 use punks_playback::{decode_file, PlaybackEngine, RequestSlot};
 
 /// How many buckets a full-source waveform is computed at (matches the preview
@@ -188,11 +188,11 @@ impl LibraryContext {
             }
             Err(e) => log::warn!("library asset-tag reload: {e}"),
         }
-        match self.lib.all_analysis() {
+        match self.lib.all_facts() {
             Ok(rows) => {
                 self.analysis = rows
                     .into_iter()
-                    .map(|(path, metrics)| (path, AnalysisReport::from_metrics(&metrics)))
+                    .map(|(path, facts)| (path, facts_to_report(facts)))
                     .collect();
             }
             Err(e) => log::warn!("library analysis reload: {e}"),
@@ -228,6 +228,36 @@ fn spawn_scan(
     (rx, progress)
 }
 
+/// Bridge: a report's typed facts → the library's storage `Fact`s. The browser
+/// is the only place the analysis report and the library's storage vocabulary
+/// meet, so `punks_library::Fact` never enters `punks-analysis`.
+fn report_to_facts(report: &AnalysisReport) -> Vec<(&'static str, Fact)> {
+    let mut facts: Vec<(&'static str, Fact)> = report
+        .numeric_facts()
+        .into_iter()
+        .map(|(k, v)| (k, Fact::Real(v)))
+        .collect();
+    for (k, v) in report.text_facts() {
+        facts.push((k, Fact::Text(v)));
+    }
+    facts
+}
+
+/// Bridge the other way: stored `Fact`s → a typed report for the UI cache. Blob
+/// facts are ignored — no report field consumes one yet.
+fn facts_to_report(facts: Vec<(String, Fact)>) -> AnalysisReport {
+    let mut numeric: Vec<(String, f64)> = Vec::new();
+    let mut text: Vec<(String, String)> = Vec::new();
+    for (metric, fact) in facts {
+        match fact {
+            Fact::Real(v) => numeric.push((metric, v)),
+            Fact::Text(s) => text.push((metric, s)),
+            Fact::Blob(_) => {}
+        }
+    }
+    AnalysisReport::from_facts(&numeric, &text)
+}
+
 /// The global background analysis worker: one app-lifetime thread that drains a
 /// library's job queue whenever asked. Fed a durable FIFO of roots (every queued
 /// root is drained, unlike the latest-wins peaks `RequestSlot`); reports each
@@ -254,8 +284,8 @@ fn spawn_analysis_worker() -> (mpsc::Sender<PathBuf>, mpsc::Receiver<PathBuf>) {
                             Ok(d) => {
                                 // Bounded window (decode_file caps long files), so
                                 // worker memory stays bounded. The context also
-                                // carries the *true* source length so Duration is
-                                // correct even when `audio` is a preview window.
+                                // carries the *true* source length and the file
+                                // name, so Duration/Filename facts are correct.
                                 let ctx = AnalysisContext {
                                     audio: AudioBuffer::new(
                                         &d.interleaved,
@@ -263,10 +293,15 @@ fn spawn_analysis_worker() -> (mpsc::Sender<PathBuf>, mpsc::Receiver<PathBuf>) {
                                         d.channels,
                                     ),
                                     source_duration: d.source_duration,
+                                    file_stem: path
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or_default(),
                                 };
                                 let report = punks_analysis::run_all(&ctx);
                                 let dur = t.elapsed().as_millis() as u32;
-                                match lib.store_analysis(&path, &report.metrics(), dur) {
+                                let facts = report_to_facts(&report);
+                                match lib.store_analysis(&path, &facts, dur) {
                                     Ok(()) => {
                                         if done_tx.send(path).is_err() {
                                             return; // receiver dropped: app closing
@@ -661,7 +696,7 @@ impl SampleBrowser {
     /// `None` outside a library or before results land.
     pub fn current_analysis(&self) -> Option<AnalysisReport> {
         let path = self.playback.current_file()?;
-        self.library_for_path(path)?.analysis.get(path).copied()
+        self.library_for_path(path)?.analysis.get(path).cloned()
     }
 
     /// Whether the loaded track's analysis is still in flight (queued or running),
@@ -697,10 +732,10 @@ impl SampleBrowser {
             return;
         };
         let ctx = &mut self.libraries[i];
-        match ctx.lib.analysis_metrics(path) {
-            Ok(metrics) => {
+        match ctx.lib.facts(path) {
+            Ok(facts) => {
                 ctx.analysis
-                    .insert(path.to_path_buf(), AnalysisReport::from_metrics(&metrics));
+                    .insert(path.to_path_buf(), facts_to_report(facts));
             }
             Err(e) => log::warn!("analysis refresh {path:?}: {e}"),
         }

@@ -8,8 +8,35 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use punks_analysis::{run_all, AnalysisContext, AnalysisReport, AudioBuffer};
-use punks_library::Library;
+use punks_library::{Fact, Library};
 use punks_playback::decode_file;
+
+/// Store a report's typed facts, then read them back into a report (the same
+/// numeric/text split the browser's bridge does, via public API only).
+fn store_report(lib: &mut Library, path: &Path, report: &AnalysisReport, dur: u32) {
+    let mut facts: Vec<(&str, Fact)> = report
+        .numeric_facts()
+        .into_iter()
+        .map(|(k, v)| (k, Fact::Real(v)))
+        .collect();
+    for (k, v) in report.text_facts() {
+        facts.push((k, Fact::Text(v)));
+    }
+    lib.store_analysis(path, &facts, dur).unwrap();
+}
+
+fn read_report(lib: &Library, path: &Path) -> AnalysisReport {
+    let mut numeric = Vec::new();
+    let mut text = Vec::new();
+    for (m, f) in lib.facts(path).unwrap() {
+        match f {
+            Fact::Real(v) => numeric.push((m, v)),
+            Fact::Text(s) => text.push((m, s)),
+            Fact::Blob(_) => {}
+        }
+    }
+    AnalysisReport::from_facts(&numeric, &text)
+}
 
 /// Write a mono 16-bit PCM WAV of `freq` Hz at `amp` for `frames` samples.
 fn write_sine_wav(path: &Path, sample_rate: u32, freq: f32, amp: f32, frames: usize) {
@@ -44,7 +71,8 @@ fn worker_chain_decodes_analyzes_and_stores() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let sr = 48_000;
-    let wav = dir.join("tone.wav");
+    // Name carries facts (instrument/BPM) the Filename analyzer must recover.
+    let wav = dir.join("kick_120bpm.wav");
     write_sine_wav(&wav, sr, 1000.0, 0.8, sr as usize); // 1s of 1 kHz
 
     let mut lib = Library::create(&dir).unwrap();
@@ -59,15 +87,16 @@ fn worker_chain_decodes_analyzes_and_stores() {
     let ctx = AnalysisContext {
         audio: AudioBuffer::new(&decoded.interleaved, decoded.sample_rate, decoded.channels),
         source_duration: decoded.source_duration,
+        file_stem: claimed.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
     };
     let report = run_all(&ctx);
-    lib.store_analysis(&claimed, &report.metrics(), 7).unwrap();
+    store_report(&mut lib, &claimed, &report, 7);
     assert!(lib.claim_next_pending().unwrap().is_none()); // queue drained
 
     // Read back through the same seam the UI cache uses.
-    let stored = AnalysisReport::from_metrics(&lib.analysis_metrics(&wav).unwrap());
+    let stored = read_report(&lib, &wav);
     assert_eq!(stored, report);
-    // Sanity on the numbers: 1 kHz sine at amp 0.8.
+    // DSP facts: 1 kHz sine at amp 0.8.
     assert!((stored.peak - 0.8).abs() < 0.02, "peak {}", stored.peak);
     assert!(
         (stored.rms - 0.8 / std::f32::consts::SQRT_2).abs() < 0.02,
@@ -85,6 +114,9 @@ fn worker_chain_decodes_analyzes_and_stores() {
         "duration {:?}",
         stored.duration
     );
+    // Filename facts recovered end-to-end, stored as text/numeric, read back.
+    assert_eq!(stored.instrument.as_deref(), Some("kick"));
+    assert_eq!(stored.bpm, Some(120.0));
     assert_eq!(lib.job_status(&wav).unwrap().as_deref(), Some("done"));
 
     let _ = std::fs::remove_dir_all(&dir);

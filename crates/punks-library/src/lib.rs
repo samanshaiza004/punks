@@ -65,11 +65,6 @@ pub struct TagCount {
     pub count: usize,
 }
 
-/// One asset's stored analysis, as opaque `(metric, value)` pairs keyed by
-/// absolute path. The caller (which owns the analyzers) reconstructs a typed
-/// report from these; the library stays analyzer-agnostic.
-pub type AssetAnalysis = (PathBuf, Vec<(String, f64)>);
-
 #[derive(Debug, Clone)]
 pub struct Asset {
     pub id: i64,
@@ -192,6 +187,41 @@ CREATE TABLE audio_analysis (
 ) WITHOUT ROWID;
 ";
 
+// Migration v4: results become typed *facts* — each row holds exactly one of a
+// real, text, or blob value, so analyzers can emit categorical observations
+// (filename → instrument/key) beside scalars. `blob_value` is unused today but
+// present so fingerprints/embeddings never need another migration. Generated /
+// disposable → safe DROP+CREATE (the worker recomputes everything next scan).
+const SCHEMA_V4: &str = "
+DROP TABLE IF EXISTS audio_analysis;
+
+CREATE TABLE audio_analysis (
+  asset_id    INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  metric      TEXT NOT NULL,
+  real_value  REAL,
+  text_value  TEXT,
+  blob_value  BLOB,
+  computed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (asset_id, metric),
+  CHECK ((real_value IS NOT NULL) + (text_value IS NOT NULL) + (blob_value IS NOT NULL) = 1)
+) WITHOUT ROWID;
+";
+
+/// A typed analysis fact — the value an analyzer observed for a metric. The
+/// library's storage vocabulary; it names no analyzer, so the library stays
+/// analyzer-agnostic. `Blob` is for future compact descriptors (fingerprints,
+/// embeddings).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fact {
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+/// One asset's stored facts, keyed by absolute path. The caller (which owns the
+/// analyzers) reconstructs a typed report from these.
+pub type AssetFacts = (PathBuf, Vec<(String, Fact)>);
+
 pub struct Library {
     conn: Connection,
     root: PathBuf,
@@ -255,6 +285,10 @@ impl Library {
         if version < 3 {
             conn.execute_batch(SCHEMA_V3)?;
             conn.pragma_update(None, "user_version", 3)?;
+        }
+        if version < 4 {
+            conn.execute_batch(SCHEMA_V4)?;
+            conn.pragma_update(None, "user_version", 4)?;
         }
 
         Ok(Library {
@@ -574,24 +608,31 @@ impl Library {
         Ok(Some(self.root.join(str_to_rel(&rel))))
     }
 
-    /// Store an asset's analysis results (opaque `(metric, value)` pairs, e.g.
-    /// from `AnalysisReport::metrics`) and mark its job `done` with the elapsed
+    /// Store an asset's analysis facts (opaque `(metric, Fact)` pairs, e.g. from
+    /// the caller's report) and mark its job `done` with the elapsed
     /// `duration_ms` — one transaction. Upserts, so re-running is idempotent.
     pub fn store_analysis(
         &mut self,
         abs_path: &Path,
-        metrics: &[(&str, f64)],
+        facts: &[(&str, Fact)],
         duration_ms: u32,
     ) -> Result<(), LibraryError> {
         let asset_id = self.ensure_asset(abs_path)?;
         let tx = self.conn.transaction()?;
-        for (metric, value) in metrics {
+        for (metric, fact) in facts {
+            // Exactly one column is non-null per the table CHECK.
+            let (real, text, blob): (Option<f64>, Option<&str>, Option<&[u8]>) = match fact {
+                Fact::Real(v) => (Some(*v), None, None),
+                Fact::Text(s) => (None, Some(s.as_str()), None),
+                Fact::Blob(b) => (None, None, Some(b.as_slice())),
+            };
             tx.execute(
-                "INSERT INTO audio_analysis(asset_id, metric, value)
-                 VALUES (?1, ?2, ?3)
+                "INSERT INTO audio_analysis(asset_id, metric, real_value, text_value, blob_value)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(asset_id, metric) DO UPDATE SET
-                   value = excluded.value, computed_at = unixepoch()",
-                rusqlite::params![asset_id, metric, value],
+                   real_value = excluded.real_value, text_value = excluded.text_value,
+                   blob_value = excluded.blob_value, computed_at = unixepoch()",
+                rusqlite::params![asset_id, metric, real, text, blob],
             )?;
         }
         // Normal flow: claim already created this row (with the right
@@ -624,23 +665,26 @@ impl Library {
         Ok(())
     }
 
-    /// This asset's stored `(metric, value)` pairs (empty if none computed).
-    pub fn analysis_metrics(&self, abs_path: &Path) -> Result<Vec<(String, f64)>, LibraryError> {
+    /// This asset's stored `(metric, Fact)` pairs (empty if none computed).
+    pub fn facts(&self, abs_path: &Path) -> Result<Vec<(String, Fact)>, LibraryError> {
         let Some(asset_id) = self.asset_id_for(abs_path)? else {
             return Ok(Vec::new());
         };
-        let mut stmt = self
-            .conn
-            .prepare("SELECT metric, value FROM audio_analysis WHERE asset_id = ?1")?;
-        let rows = stmt.query_map(rusqlite::params![asset_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT metric, real_value, text_value, blob_value
+               FROM audio_analysis WHERE asset_id = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![asset_id], |r| {
+            Ok((r.get::<_, String>(0)?, row_to_fact_at(r, 1)?))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Every present asset's metrics, grouped by absolute path, for a display
-    /// cache reload. Mirrors [`all_asset_tags`](Self::all_asset_tags).
-    pub fn all_analysis(&self) -> Result<Vec<AssetAnalysis>, LibraryError> {
+    /// Every present asset's facts, grouped by absolute path, for a display cache
+    /// reload. Mirrors [`all_asset_tags`](Self::all_asset_tags).
+    pub fn all_facts(&self) -> Result<Vec<AssetFacts>, LibraryError> {
         let mut stmt = self.conn.prepare(
-            "SELECT a.relative_path, m.metric, m.value
+            "SELECT a.relative_path, m.metric, m.real_value, m.text_value, m.blob_value
                FROM audio_analysis m JOIN assets a ON a.id = m.asset_id
               WHERE a.missing = 0
               ORDER BY a.relative_path",
@@ -649,17 +693,17 @@ impl Library {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, f64>(2)?,
+                row_to_fact_at(r, 2)?,
             ))
         })?;
         // Rows are ordered by path, so consecutive same-path rows group.
-        let mut out: Vec<AssetAnalysis> = Vec::new();
+        let mut out: Vec<AssetFacts> = Vec::new();
         for row in rows {
-            let (rel, metric, value) = row?;
+            let (rel, metric, fact) = row?;
             let path = self.root.join(str_to_rel(&rel));
             match out.last_mut() {
-                Some((p, v)) if *p == path => v.push((metric, value)),
-                _ => out.push((path, vec![(metric, value)])),
+                Some((p, v)) if *p == path => v.push((metric, fact)),
+                _ => out.push((path, vec![(metric, fact)])),
             }
         }
         Ok(out)
@@ -852,6 +896,18 @@ fn row_to_asset(r: &rusqlite::Row) -> Result<Asset, rusqlite::Error> {
         size: r.get::<_, i64>(2)? as u64,
         mtime_ms: r.get(3)?,
     })
+}
+
+/// Read a `Fact` from three consecutive columns (real, text, blob) starting at
+/// `base`. Exactly one is non-null (enforced by the table CHECK).
+fn row_to_fact_at(r: &rusqlite::Row, base: usize) -> Result<Fact, rusqlite::Error> {
+    if let Some(v) = r.get::<_, Option<f64>>(base)? {
+        Ok(Fact::Real(v))
+    } else if let Some(s) = r.get::<_, Option<String>>(base + 1)? {
+        Ok(Fact::Text(s))
+    } else {
+        Ok(Fact::Blob(r.get::<_, Vec<u8>>(base + 2)?))
+    }
 }
 
 /// Walk `root` for supported audio files, described cheaply for reconcile.
@@ -1270,14 +1326,13 @@ mod tests {
         // Queue is now empty of pending work.
         assert!(lib.claim_next_pending().unwrap().is_none());
 
-        // Store opaque metrics (as AnalyzerReport::metrics would produce).
-        let metrics: &[(&str, f64)] = &[
-            ("rms", 0.5),
-            ("rms_dbfs", -6.02),
-            ("peak", 0.5),
-            ("zcr", 0.0),
+        // Store typed facts: numeric (rms/peak) + text (instrument) coexist.
+        let facts: &[(&str, Fact)] = &[
+            ("rms", Fact::Real(0.5)),
+            ("peak", Fact::Real(0.5)),
+            ("instrument", Fact::Text("kick".into())),
         ];
-        lib.store_analysis(&a, metrics, 12).unwrap();
+        lib.store_analysis(&a, facts, 12).unwrap();
         assert_eq!(jobs_in(&lib, "done"), 1);
         assert_eq!(jobs_in(&lib, "running"), 0);
         // duration_ms was recorded.
@@ -1287,27 +1342,63 @@ mod tests {
             .unwrap();
         assert_eq!(dur, 12);
 
-        // Read back, order-independent.
-        let mut got = lib.analysis_metrics(&a).unwrap();
+        // Read back, order-independent — real and text facts both round-trip.
+        let mut got = lib.facts(&a).unwrap();
         got.sort_by(|x, y| x.0.cmp(&y.0));
         assert_eq!(
             got,
             vec![
-                ("peak".to_string(), 0.5),
-                ("rms".to_string(), 0.5),
-                ("rms_dbfs".to_string(), -6.02),
-                ("zcr".to_string(), 0.0),
+                ("instrument".to_string(), Fact::Text("kick".into())),
+                ("peak".to_string(), Fact::Real(0.5)),
+                ("rms".to_string(), Fact::Real(0.5)),
             ]
         );
         assert_eq!(lib.job_status(&a).unwrap().as_deref(), Some("done"));
 
-        // Re-store is idempotent: same 4 rows, not 8.
-        lib.store_analysis(&a, metrics, 5).unwrap();
+        // Re-store is idempotent: same 3 rows, not 6.
+        lib.store_analysis(&a, facts, 5).unwrap();
         let n: i64 = lib
             .conn
             .query_row("SELECT COUNT(*) FROM audio_analysis", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 4);
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn blob_fact_round_trips() {
+        let t = TempRoot::new("blob");
+        let a = write_wav(&t.0, "b.wav", b"B");
+        let mut lib = Library::create(&t.0).unwrap();
+        lib.reconcile(&scan_files(&t.0).unwrap()).unwrap();
+        let bytes = vec![0u8, 1, 2, 250, 255];
+        lib.store_analysis(&a, &[("fingerprint", Fact::Blob(bytes.clone()))], 0)
+            .unwrap();
+        assert_eq!(
+            lib.facts(&a).unwrap(),
+            vec![("fingerprint".to_string(), Fact::Blob(bytes))]
+        );
+    }
+
+    #[test]
+    fn check_rejects_zero_or_two_typed_columns() {
+        let t = TempRoot::new("check");
+        let a = write_wav(&t.0, "c.wav", b"C");
+        let mut lib = Library::create(&t.0).unwrap();
+        lib.reconcile(&scan_files(&t.0).unwrap()).unwrap();
+        let id = lib.asset_id_for(&a).unwrap().unwrap();
+        // Two columns set → CHECK fails.
+        let two = lib.conn.execute(
+            "INSERT INTO audio_analysis(asset_id, metric, real_value, text_value)
+             VALUES (?1, 'x', 1.0, 'y')",
+            rusqlite::params![id],
+        );
+        assert!(two.is_err());
+        // Zero columns set → CHECK fails.
+        let none = lib.conn.execute(
+            "INSERT INTO audio_analysis(asset_id, metric) VALUES (?1, 'x')",
+            rusqlite::params![id],
+        );
+        assert!(none.is_err());
     }
 
     #[test]
@@ -1349,7 +1440,8 @@ mod tests {
         let mut lib = Library::create(&t.0).unwrap();
         lib.reconcile(&scan_files(&t.0).unwrap()).unwrap();
         lib.enqueue_all(1).unwrap();
-        lib.store_analysis(&a, &[("rms", 0.5)], 1).unwrap();
+        lib.store_analysis(&a, &[("rms", Fact::Real(0.5))], 1)
+            .unwrap();
 
         let asset_id = lib.asset_id_for(&a).unwrap().unwrap();
         lib.conn
