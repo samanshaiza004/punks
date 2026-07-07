@@ -189,3 +189,72 @@ fn undecodable_file_is_failed_not_reclaimed() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The embedded-metadata round trip end to end: write a bext Description into
+/// a real WAV, run it through the exact worker chain (claim → decode →
+/// run_all → store, plus the description-caching line `analyze_claimed` adds),
+/// and confirm the cache reflects what's on disk — proving the DB is a
+/// rebuildable cache of the file's own embedded metadata, not a second source
+/// of truth for it.
+#[test]
+fn bext_description_is_written_then_cached_by_analysis() {
+    let dir = std::env::temp_dir().join(format!("punks_pipe_bext_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("field_recording.wav");
+    write_sine_wav(&wav, 8_000, 440.0, 0.5, 8_000);
+
+    assert!(punks_playback::can_write_bext(&wav));
+    punks_playback::write_bext_description(&wav, "Footsteps, gravel, take 3").unwrap();
+
+    let mut lib = Library::create(&dir).unwrap();
+    lib.reconcile(&punks_library::scan_files(&dir).unwrap())
+        .unwrap();
+    lib.enqueue_all(punks_analysis::pipeline_version()).unwrap();
+
+    // The worker's inner loop, plus the description-caching line it adds.
+    let claimed = lib.claim_next_pending().unwrap().unwrap();
+    let decoded = decode_file(&claimed).unwrap();
+    assert_eq!(
+        decoded.metadata.description.as_deref(),
+        Some("Footsteps, gravel, take 3")
+    );
+    let ctx = AnalysisContext {
+        audio: AudioBuffer::new(&decoded.interleaved, decoded.sample_rate, decoded.channels),
+        source_duration: decoded.source_duration,
+        file_stem: claimed.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+    };
+    let report = run_all(&ctx);
+    let mut facts: Vec<(&str, Fact)> = report
+        .numeric_facts()
+        .into_iter()
+        .map(|(k, v)| (k, Fact::Real(v)))
+        .collect();
+    for (k, v) in report.text_facts() {
+        facts.push((k, Fact::Text(v)));
+    }
+    if let Some(desc) = decoded.metadata.description {
+        facts.push(("description", Fact::Text(desc)));
+    }
+    lib.store_analysis(&claimed, &facts, 3).unwrap();
+
+    let stored = lib.facts(&wav).unwrap();
+    assert!(stored.contains(&(
+        "description".to_string(),
+        Fact::Text("Footsteps, gravel, take 3".to_string())
+    )));
+
+    // A later edit through Library::set_description (the narrow write-through
+    // path SampleBrowser uses) updates just that fact, without disturbing the
+    // job the analysis pass already completed.
+    lib.set_description(&wav, "Footsteps, gravel, take 4 (better)")
+        .unwrap();
+    let stored = lib.facts(&wav).unwrap();
+    assert!(stored.contains(&(
+        "description".to_string(),
+        Fact::Text("Footsteps, gravel, take 4 (better)".to_string())
+    )));
+    assert_eq!(lib.job_status(&wav).unwrap().as_deref(), Some("done"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

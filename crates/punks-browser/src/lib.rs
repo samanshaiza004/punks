@@ -117,6 +117,13 @@ struct TabState {
     library_idx: Option<usize>,
     /// AND tag filter (active-library tag ids).
     tag_filter: Vec<i64>,
+    /// The marked set for batch operations (batch tag today; batch override/
+    /// metadata are next-pass consumers). `selected` above stays the *cursor* —
+    /// what keyboard nav moves and what plays — and is not itself part of this
+    /// set unless the user has explicitly multi-selected.
+    selection: Vec<usize>,
+    /// Shift-click range anchor: the index a range extends from.
+    anchor: Option<usize>,
 }
 
 /// An opened library plus in-memory display caches, so per-frame UI reads
@@ -132,6 +139,10 @@ struct LibraryContext {
     asset_tags: HashMap<PathBuf, Vec<i64>>,
     /// Absolute path -> analysis results, filled asynchronously by the worker.
     analysis: HashMap<PathBuf, AnalysisReport>,
+    /// Absolute path -> embedded bext Description, cached from the same facts
+    /// table as `analysis` but kept separate: it's authored content the file
+    /// owns, not an analyzer's guess, so it doesn't belong on `AnalysisReport`.
+    descriptions: HashMap<PathBuf, String>,
     /// Absolute path -> user overrides (metric -> value). Patch the detected
     /// facts above; user data, never regenerated. `None` means the metric is
     /// marked explicitly absent (hides the detected guess, if any).
@@ -194,10 +205,20 @@ impl LibraryContext {
         }
         match self.lib.all_facts() {
             Ok(rows) => {
-                self.analysis = rows
-                    .into_iter()
-                    .map(|(path, facts)| (path, facts_to_report(facts)))
-                    .collect();
+                let mut analysis = HashMap::with_capacity(rows.len());
+                let mut descriptions = HashMap::new();
+                for (path, facts) in rows {
+                    if let Some(Fact::Text(desc)) = facts
+                        .iter()
+                        .find(|(m, _)| m == "description")
+                        .map(|(_, f)| f.clone())
+                    {
+                        descriptions.insert(path.clone(), desc);
+                    }
+                    analysis.insert(path, facts_to_report(facts));
+                }
+                self.analysis = analysis;
+                self.descriptions = descriptions;
             }
             Err(e) => log::warn!("library analysis reload: {e}"),
         }
@@ -285,6 +306,32 @@ fn resolve_fact(
     }
 }
 
+/// Ctrl/Cmd-click transition: flip `index`'s membership in `selection`. Pure so
+/// it's testable without a `SampleBrowser`.
+fn selection_after_toggle(mut selection: Vec<usize>, index: usize) -> Vec<usize> {
+    match selection.iter().position(|&i| i == index) {
+        Some(pos) => {
+            selection.remove(pos);
+        }
+        None => selection.push(index),
+    }
+    selection
+}
+
+/// Shift-click transition: the inclusive range from `anchor` to `index` (in
+/// either direction), replacing whatever was marked before. `anchor` defaults
+/// to `index` itself (a single-element range) when there's no prior anchor.
+/// Pure so it's testable without a `SampleBrowser`.
+fn selection_after_range(anchor: Option<usize>, index: usize) -> Vec<usize> {
+    let anchor = anchor.unwrap_or(index);
+    let (lo, hi) = if anchor <= index {
+        (anchor, index)
+    } else {
+        (index, anchor)
+    };
+    (lo..=hi).collect()
+}
+
 /// Bridge the other way: stored `Fact`s → a typed report for the UI cache. Blob
 /// facts are ignored — no report field consumes one yet.
 fn facts_to_report(facts: Vec<(String, Fact)>) -> AnalysisReport {
@@ -332,7 +379,15 @@ fn analyze_claimed(lib: &mut Library, path: &Path, done_tx: &mpsc::Sender<PathBu
             };
             let report = punks_analysis::run_all(&ctx);
             let dur = t.elapsed().as_millis() as u32;
-            let facts = report_to_facts(&report);
+            let mut facts = report_to_facts(&report);
+            // The bext Description, cached as a fact so it's searchable/
+            // displayable without decoding again. Not an override — it's
+            // authored content the file owns, not a correction of a guess —
+            // so it rides the plain facts cache and re-populates itself from
+            // the file on every re-analysis (the DB is a rebuildable index).
+            if let Some(desc) = d.metadata.description {
+                facts.push(("description", Fact::Text(desc)));
+            }
             match lib.store_analysis(path, &facts, dur) {
                 Ok(()) => {
                     let _ = done_tx.send(path.to_path_buf()); // receiver dropped: app closing
@@ -742,14 +797,64 @@ impl SampleBrowser {
         self.active().history.len() > 1
     }
 
+    /// Plain select: cursor and the marked set both collapse to just `index` —
+    /// what a keyboard step or an unmodified click does.
     pub fn select(&mut self, index: usize) {
         if index < self.entries().len() {
-            self.active_mut().selected = Some(index);
+            let tab = self.active_mut();
+            tab.selected = Some(index);
+            tab.selection = vec![index];
+            tab.anchor = Some(index);
         }
     }
 
     pub fn selected(&self) -> Option<usize> {
         self.active().selected
+    }
+
+    /// The marked set for batch operations. Empty until the user multi-selects
+    /// (Ctrl/Cmd- or Shift-click); a plain `select` collapses it to one entry.
+    pub fn selection(&self) -> &[usize] {
+        &self.active().selection
+    }
+
+    /// Ctrl/Cmd-click: toggle `index` in the marked set. The cursor follows the
+    /// clicked row (so an immediately-following Shift-click ranges from here),
+    /// but nothing plays — multi-selecting isn't "open this file".
+    pub fn toggle_select(&mut self, index: usize) {
+        if index >= self.entries().len() {
+            return;
+        }
+        let tab = self.active_mut();
+        tab.selection = selection_after_toggle(std::mem::take(&mut tab.selection), index);
+        tab.selected = Some(index);
+        tab.anchor = Some(index);
+    }
+
+    /// Shift-click: replace the marked set with the inclusive range from the
+    /// last anchor to `index` — standard range-select. The anchor itself is
+    /// left in place so repeated Shift-clicks keep extending from the same
+    /// origin rather than from wherever the previous range ended.
+    pub fn range_select(&mut self, index: usize) {
+        if index >= self.entries().len() {
+            return;
+        }
+        let tab = self.active_mut();
+        tab.selection = selection_after_range(tab.anchor, index);
+        tab.selected = Some(index);
+    }
+
+    /// Absolute paths of every marked, non-directory row — the input to batch
+    /// operations (batch tag today; batch override/metadata are a next pass).
+    pub fn selection_paths(&self) -> Vec<PathBuf> {
+        let entries = self.entries();
+        self.active()
+            .selection
+            .iter()
+            .filter_map(|&i| entries.get(i))
+            .filter(|e| !e.is_directory)
+            .map(|e| e.path.clone())
+            .collect()
     }
 
     pub fn play_selected(&mut self) {
@@ -897,6 +1002,42 @@ impl SampleBrowser {
         self.libraries[li].reload();
     }
 
+    /// The embedded bext Description for the loaded track, from the analysis
+    /// cache. `None` outside a library or before it's been read.
+    pub fn current_description(&self) -> Option<String> {
+        let path = self.playback.current_file()?;
+        self.library_for_path(path)?.descriptions.get(path).cloned()
+    }
+
+    /// Whether [`set_description`](Self::set_description) can write to `path` —
+    /// embedded metadata write-back is WAV/BWF-only for now.
+    pub fn can_write_description(&self, path: &Path) -> bool {
+        // `set_description` no-ops outside a library (nothing to cache the
+        // write into), so the UI must gate on both conditions, not just format.
+        self.library_for_path(path).is_some() && punks_playback::can_write_bext(path)
+    }
+
+    /// Write `description` into `path`'s embedded bext chunk (the file is
+    /// authoritative), then refresh the cached fact so the UI reflects it
+    /// without waiting for the next analysis pass. No-op outside a library or
+    /// when the format can't be safely rewritten (see `can_write_description`);
+    /// sets `last_error` on failure.
+    pub fn set_description(&mut self, path: &Path, description: &str) {
+        let Some(li) = self.library_index_for(path) else {
+            return;
+        };
+        if let Err(e) = punks_playback::write_bext_description(path, description) {
+            self.last_error = Some(e.to_string());
+            return;
+        }
+        if let Err(e) = self.libraries[li].lib.set_description(path, description) {
+            self.last_error = Some(e.to_string());
+        }
+        self.libraries[li]
+            .descriptions
+            .insert(path.to_path_buf(), description.to_string());
+    }
+
     /// Index of the most-specific library owning `path` (mutable-friendly twin of
     /// [`library_for_path`](Self::library_for_path)).
     fn library_index_for(&self, path: &Path) -> Option<usize> {
@@ -943,6 +1084,15 @@ impl SampleBrowser {
         let ctx = &mut self.libraries[i];
         match ctx.lib.facts(path) {
             Ok(facts) => {
+                if let Some(Fact::Text(desc)) = facts
+                    .iter()
+                    .find(|(m, _)| m == "description")
+                    .map(|(_, f)| f.clone())
+                {
+                    ctx.descriptions.insert(path.to_path_buf(), desc);
+                } else {
+                    ctx.descriptions.remove(path);
+                }
                 ctx.analysis
                     .insert(path.to_path_buf(), facts_to_report(facts));
             }
@@ -1126,6 +1276,7 @@ impl SampleBrowser {
             assets: Vec::new(),
             asset_tags: HashMap::new(),
             analysis: HashMap::new(),
+            descriptions: HashMap::new(),
             overrides: HashMap::new(),
             scanning: true,
             scan_rx: None,
@@ -1310,6 +1461,53 @@ impl SampleBrowser {
         self.after_tag_mutation(li);
     }
 
+    /// Assign `tag_id` to every path in `paths` — the multi-select consumer
+    /// that exercises [`selection_paths`](Self::selection_paths). One reload at
+    /// the end, not one per path.
+    pub fn assign_tag_batch(&mut self, paths: &[PathBuf], tag_id: i64) {
+        let Some(li) = self.active().library_idx else {
+            return;
+        };
+        for path in paths {
+            if let Err(e) = self.libraries[li].lib.assign_tag(path, tag_id) {
+                self.last_error = Some(e.to_string());
+            }
+        }
+        self.after_tag_mutation(li);
+    }
+
+    /// Remove `tag_id` from every path in `paths`. See [`assign_tag_batch`](Self::assign_tag_batch).
+    pub fn unassign_tag_batch(&mut self, paths: &[PathBuf], tag_id: i64) {
+        let Some(li) = self.active().library_idx else {
+            return;
+        };
+        for path in paths {
+            if let Err(e) = self.libraries[li].lib.remove_tag(path, tag_id) {
+                self.last_error = Some(e.to_string());
+            }
+        }
+        self.after_tag_mutation(li);
+    }
+
+    /// Create `name` (or reuse it if it exists) and assign it to every path in
+    /// `paths`.
+    pub fn create_and_assign_tag_batch(&mut self, paths: &[PathBuf], name: &str) {
+        let Some(li) = self.active().library_idx else {
+            return;
+        };
+        match self.libraries[li].lib.create_tag(name) {
+            Ok(tag) => {
+                for path in paths {
+                    if let Err(e) = self.libraries[li].lib.assign_tag(path, tag.id) {
+                        self.last_error = Some(e.to_string());
+                    }
+                }
+            }
+            Err(e) => self.last_error = Some(e.to_string()),
+        }
+        self.after_tag_mutation(li);
+    }
+
     pub fn delete_tag(&mut self, tag_id: i64) {
         let Some(li) = self.active().library_idx else {
             return;
@@ -1459,7 +1657,7 @@ fn adjust_active_after_reorder(active: usize, from: usize, to: usize) -> usize {
 mod tests {
     use super::{
         adjust_active_after_close, adjust_active_after_reorder, resolve_fact, restore_tab_plan,
-        AnalysisReport, Fact,
+        selection_after_range, selection_after_toggle, AnalysisReport, Fact,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -1503,6 +1701,25 @@ mod tests {
             resolve_fact(Some(&detected), Some(&overrides), "loop"),
             None
         );
+    }
+
+    #[test]
+    fn toggle_select_flips_membership() {
+        assert_eq!(selection_after_toggle(vec![], 2), vec![2]);
+        assert_eq!(selection_after_toggle(vec![2], 2), Vec::<usize>::new()); // toggling off
+        assert_eq!(selection_after_toggle(vec![1, 3], 2), vec![1, 3, 2]);
+        assert_eq!(selection_after_toggle(vec![1, 2, 3], 2), vec![1, 3]);
+    }
+
+    #[test]
+    fn range_select_spans_anchor_to_index_either_direction() {
+        assert_eq!(selection_after_range(Some(2), 5), vec![2, 3, 4, 5]);
+        // Clicking "backwards" from the anchor still produces an ordered range.
+        assert_eq!(selection_after_range(Some(5), 2), vec![2, 3, 4, 5]);
+        // No anchor yet (first-ever Shift-click) collapses to a single row.
+        assert_eq!(selection_after_range(None, 4), vec![4]);
+        // Same start and end.
+        assert_eq!(selection_after_range(Some(3), 3), vec![3]);
     }
 
     /// A couple of real temp directories plus a path that doesn't exist, for

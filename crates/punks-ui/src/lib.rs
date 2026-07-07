@@ -259,6 +259,11 @@ pub struct BrowserPanel {
     /// a read-only (but selectable/copyable) input widget — plain `Text` widgets
     /// can't be selected or copied in imgui.
     error_buf: String,
+    /// Description edit buffer + which file it was last seeded from (reseeded
+    /// whenever the loaded file changes, so switching clips doesn't leak the
+    /// previous one's unsaved edit into the new one).
+    description_buf: String,
+    description_buf_path: Option<PathBuf>,
 }
 
 /// The correctable detected facts the override popup edits, as
@@ -295,6 +300,8 @@ impl BrowserPanel {
             override_bufs: HashMap::new(),
             open_override_editor: false,
             error_buf: String::new(),
+            description_buf: String::new(),
+            description_buf_path: None,
         }
     }
 
@@ -489,7 +496,7 @@ impl BrowserPanel {
         let line_h = ui.text_line_height_with_spacing();
         // The error line is a read-only input (frame-height, not text-line-height)
         // so its text is selectable/copyable.
-        let reserved = WAVEFORM_HEIGHT + 3.0 * line_h + 2.0 * ui.frame_height_with_spacing();
+        let reserved = WAVEFORM_HEIGHT + 2.0 * line_h + 3.0 * ui.frame_height_with_spacing();
         let body_height = (avail[1] - reserved).max(120.0);
         let mut drag_requested: Option<PathBuf> = None;
         let mut search_focused = false;
@@ -629,29 +636,61 @@ impl BrowserPanel {
 
         draw_waveform_widget(ui, browser, &mut self.scrub_last_x);
 
-        // Container metadata (BWF bext), one line. A blank line is reserved
-        // when absent so the layout doesn't jump. (No "preview window"
-        // indicator: the whole source is scrubbable now, so it would describe
-        // a limit that no longer exists.)
+        // Embedded metadata (BWF bext): an editable Description + Save, so an
+        // edit writes straight into the file's own bext chunk — the file stays
+        // authoritative and the library's cache is just a fast, rebuildable
+        // read of it (see `SampleBrowser::set_description`). TC timecode stays
+        // read-only alongside it. Blank lines are reserved when there's no
+        // loaded file so the layout doesn't jump.
         {
-            let mut parts: Vec<String> = Vec::new();
-            if let Some(info) = browser.current_track_info() {
-                if let Some(desc) = info.metadata.description.as_deref() {
-                    if !desc.is_empty() {
-                        parts.push(desc.to_string());
-                    }
-                }
-                if let Some(tc) = info.metadata.time_reference.filter(|&t| t > 0) {
-                    parts.push(format!(
-                        "TC {}",
-                        format_timecode(tc, info.source_sample_rate)
-                    ));
-                }
+            let current_path = browser.current_file().map(Path::to_path_buf);
+            if self.description_buf_path != current_path {
+                self.description_buf = browser
+                    .current_description()
+                    .or_else(|| {
+                        browser
+                            .current_track_info()
+                            .and_then(|i| i.metadata.description.clone())
+                    })
+                    .unwrap_or_default();
+                self.description_buf_path = current_path.clone();
             }
-            if parts.is_empty() {
-                ui.new_line();
+
+            if let Some(path) = current_path {
+                let can_write = browser.can_write_description(&path);
+                let w = ui.content_region_avail()[0] - 60.0;
+                ui.set_next_item_width(w.max(80.0));
+                let entered = ui
+                    .input_text("##description", &mut self.description_buf)
+                    .hint("Description...")
+                    .enter_returns_true(true)
+                    .read_only(!can_write)
+                    .build();
+                ui.same_line();
+                let save = ui.button("Save");
+                if !can_write {
+                    if ui.is_item_hovered() {
+                        ui.tooltip_text("Embedded metadata: WAV only, inside a library");
+                    }
+                } else if entered || save {
+                    browser.set_description(&path, self.description_buf.trim());
+                }
+
+                match browser.current_track_info() {
+                    Some(info) => match info.metadata.time_reference.filter(|&t| t > 0) {
+                        Some(tc) => {
+                            ui.text_disabled(format!(
+                                "TC {}",
+                                format_timecode(tc, info.source_sample_rate)
+                            ));
+                        }
+                        None => ui.new_line(),
+                    },
+                    None => ui.new_line(),
+                }
             } else {
-                ui.text_disabled(parts.join("   \u{b7}   "));
+                ui.new_line();
+                ui.new_line();
             }
         }
 
@@ -779,22 +818,52 @@ impl BrowserPanel {
 
         ui.popup("##tag_editor", || {
             if let Some(path) = self.tag_popup_path.clone() {
-                let fname = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                // If the row this popup was opened for is part of a live
+                // multi-selection, tag edits apply to the whole marked set —
+                // the batch-tag consumer that exercises `selection_paths`.
+                // Opening the popup for a row outside any selection (the
+                // common case) edits just that one file, as before.
+                let selection = browser.selection_paths();
+                let batch = selection.len() > 1 && selection.contains(&path);
+                let paths: &[PathBuf] = if batch {
+                    &selection
+                } else {
+                    std::slice::from_ref(&path)
+                };
+
+                let fname = if batch {
+                    format!("{} files selected", paths.len())
+                } else {
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                };
                 ui.text_disabled(&fname);
                 ui.separator();
 
+                // In batch mode a tag is "checked" only if every selected file
+                // already has it — an unchecked box may still be mixed.
                 let current = browser.tag_ids_for_path(&path);
                 let tags: Vec<TagCount> = browser.library_tags().to_vec();
                 if tags.is_empty() {
                     ui.text_disabled("No tags yet.");
                 }
                 for t in &tags {
-                    let mut has = current.contains(&t.id);
+                    let mut has = if batch {
+                        paths
+                            .iter()
+                            .all(|p| browser.tag_ids_for_path(p).contains(&t.id))
+                    } else {
+                        current.contains(&t.id)
+                    };
                     if ui.checkbox(format!("{}##ptag{}", t.name, t.id), &mut has) {
-                        if has {
+                        if batch {
+                            if has {
+                                browser.assign_tag_batch(paths, t.id);
+                            } else {
+                                browser.unassign_tag_batch(paths, t.id);
+                            }
+                        } else if has {
                             browser.assign_tag(&path, t.id);
                         } else {
                             browser.unassign_tag(&path, t.id);
@@ -813,7 +882,11 @@ impl BrowserPanel {
                 let add = ui.small_button("Add##popup_add_tag");
                 if (entered || add) && !self.popup_tag_buf.trim().is_empty() {
                     let name = self.popup_tag_buf.trim().to_string();
-                    browser.create_and_assign_tag(&path, &name);
+                    if batch {
+                        browser.create_and_assign_tag_batch(paths, &name);
+                    } else {
+                        browser.create_and_assign_tag(&path, &name);
+                    }
                     self.popup_tag_buf.clear();
                 }
             }
@@ -1232,7 +1305,7 @@ impl BrowserPanel {
                     (label, e.is_directory, e.path.clone())
                 };
 
-                let is_selected = selected == Some(i);
+                let is_selected = selected == Some(i) || browser.selection().contains(&i);
                 // Reserve room for the tag button so it doesn't spill into the
                 // next column.
                 let sel_w = if is_dir {
@@ -1299,13 +1372,22 @@ impl BrowserPanel {
 
         // Apply click after the loop — avoids holding an immutable borrow
         // on browser.entries() while calling mutable browser methods.
+        // Shift/Ctrl(Cmd)-click adjust the marked set for batch operations
+        // (see `selection`/`selection_paths`) without opening/playing anything
+        // — multi-selecting isn't "open this file". A directory always ignores
+        // modifiers: navigating into it is the only sensible click behavior.
         if let Some((i, is_dir, _)) = click_action {
-            browser.select(i);
             if is_dir {
+                browser.select(i);
                 if let Err(e) = browser.navigate_into(i) {
                     log::error!("navigate_into failed: {e}");
                 }
+            } else if ui.io().key_shift {
+                browser.range_select(i);
+            } else if ui.io().key_ctrl || ui.io().key_super {
+                browser.toggle_select(i);
             } else {
+                browser.select(i);
                 browser.play_selected();
             }
         }

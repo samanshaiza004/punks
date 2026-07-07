@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -204,6 +204,205 @@ fn read_c_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end])
         .trim_end()
         .to_string()
+}
+
+/// Minimum size of a BWF `bext` chunk body (the fixed fields; CodingHistory, if
+/// any, follows and is preserved as opaque trailing bytes).
+const BEXT_MIN_BODY_LEN: usize = 602;
+
+/// Whether [`write_bext_description`] can safely rewrite `path`: plain
+/// `RIFF`/`WAVE` only. RF64 (>4 GB) and Ogg-Vorbis-in-WAV are refused — both
+/// need format-specific handling this crate doesn't have yet — as is anything
+/// that isn't a WAVE container at all. The writer re-checks this itself; this
+/// is what the UI polls to grey out Save.
+pub fn can_write_bext(path: &Path) -> bool {
+    let Ok(prefix) = read_header_prefix(path, HEADER_PREFIX_MAX) else {
+        return false;
+    };
+    prefix.len() >= 12
+        && &prefix[0..4] == b"RIFF" // not RF64
+        && &prefix[8..12] == b"WAVE"
+        && riff_fmt_tag(&prefix) != Some(WAVE_FORMAT_OGG_VORBIS)
+}
+
+/// Where a `bext` chunk goes: replace an existing one in place, or insert a
+/// fresh one at a byte offset (right after `fmt `, or wherever the pre-`data`
+/// walk stopped if `fmt ` was never found).
+enum BextSlot {
+    Replace {
+        /// Chunk start (the `"bext"` id itself).
+        start: usize,
+        /// One past the chunk's last byte (body end + pad byte, if any).
+        end: usize,
+        body_len: usize,
+    },
+    InsertAt(usize),
+}
+
+/// Walk chunks exactly as [`parse_riff_metadata`] does, but return *where*
+/// `bext` is (or should go) instead of parsing it. Only look before `data` —
+/// metadata never lives after the audio payload.
+fn locate_bext(prefix: &[u8]) -> BextSlot {
+    let mut pos = 12;
+    let mut after_fmt = None;
+    while pos + 8 <= prefix.len() {
+        let id = &prefix[pos..pos + 4];
+        let size = u32::from_le_bytes(prefix[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body = pos + 8;
+        let next = body + size + (size & 1);
+        if id == b"bext" {
+            return BextSlot::Replace {
+                start: pos,
+                end: next.min(prefix.len()).max(body),
+                body_len: size,
+            };
+        }
+        if id == b"data" || size == 0xFFFF_FFFF {
+            break;
+        }
+        if id == b"fmt " {
+            after_fmt = Some(next);
+        }
+        if next <= pos || next > prefix.len() {
+            break;
+        }
+        pos = next;
+    }
+    BextSlot::InsertAt(after_fmt.unwrap_or(pos))
+}
+
+/// Truncate `s` to at most `max_bytes` bytes, on a UTF-8 char boundary.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Write `description` into `path`'s BWF `bext` chunk (creating one if absent),
+/// preserving every other field of an existing bext (TimeReference, Originator,
+/// UMID, coding history, …) and every other chunk in the file byte-for-byte —
+/// most importantly the `data` chunk, which is never touched. Field recordings
+/// are irreplaceable, so this never edits `path` in place: it streams a full
+/// copy to a temp file in the same directory (so the final rename is atomic on
+/// the same filesystem) and only replaces the original once that copy is
+/// complete and flushed.
+pub fn write_bext_description(path: &Path, description: &str) -> Result<(), PlaybackError> {
+    if !can_write_bext(path) {
+        return Err(PlaybackError::DecodeError(format!(
+            "{path:?}: embedded metadata write is only supported for plain WAV/BWF files"
+        )));
+    }
+    let prefix = read_header_prefix(path, HEADER_PREFIX_MAX)?;
+    let slot = locate_bext(&prefix);
+
+    let mut src =
+        File::open(path).map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+
+    // Start from the existing body (so every other bext field survives), or a
+    // fresh minimum-size body when there's nothing to preserve.
+    let mut body = match slot {
+        BextSlot::Replace {
+            start, body_len, ..
+        } => {
+            let body_start = start + 8;
+            read_exact_at(&mut src, body_start as u64, body_len, path)?
+        }
+        BextSlot::InsertAt(_) => vec![0u8; BEXT_MIN_BODY_LEN],
+    };
+    if body.len() < BEXT_MIN_BODY_LEN {
+        body.resize(BEXT_MIN_BODY_LEN, 0);
+    }
+    let desc_bytes = truncate_utf8(description, 255).as_bytes();
+    body[0..256].fill(0);
+    body[0..desc_bytes.len()].copy_from_slice(desc_bytes);
+
+    let mut chunk = Vec::with_capacity(8 + body.len() + 1);
+    chunk.extend_from_slice(b"bext");
+    chunk.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    chunk.extend_from_slice(&body);
+    if body.len() % 2 == 1 {
+        chunk.push(0);
+    }
+
+    let (head_end, tail_start) = match slot {
+        BextSlot::Replace { start, end, .. } => (start, end),
+        BextSlot::InsertAt(at) => (at, at),
+    };
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp_name = format!(
+        ".{}.punks-tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("bext")
+    );
+    let tmp_path = dir.join(tmp_name);
+
+    let result = (|| -> Result<(), PlaybackError> {
+        let mut dst = File::create(&tmp_path)
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
+        src.seek(SeekFrom::Start(0))
+            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+        copy_n(&mut src, &mut dst, head_end as u64, path)?;
+        dst.write_all(&chunk)
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
+        src.seek(SeekFrom::Start(tail_start as u64))
+            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+        let tail_len = std::io::copy(&mut src, &mut dst)
+            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+
+        // Patch the RIFF size header (bytes 4..8: total file size - 8).
+        let total_len = head_end as u64 + chunk.len() as u64 + tail_len;
+        dst.seek(SeekFrom::Start(4))
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
+        dst.write_all(&((total_len - 8) as u32).to_le_bytes())
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
+        dst.sync_all()
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
+        drop(dst);
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: rename failed: {e}")))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// Read exactly `len` bytes at `offset` from `file`.
+fn read_exact_at(
+    file: &mut File,
+    offset: u64,
+    len: usize,
+    path: &Path,
+) -> Result<Vec<u8>, PlaybackError> {
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+    let mut buf = vec![0u8; len];
+    file.read_exact(&mut buf)
+        .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+    Ok(buf)
+}
+
+/// Stream-copy exactly `len` bytes from `src`'s current position to `dst`, in
+/// bounded chunks so a multi-GB `data` chunk never loads into memory at once.
+fn copy_n(src: &mut File, dst: &mut File, len: u64, path: &Path) -> Result<(), PlaybackError> {
+    let mut remaining = len;
+    let mut buf = [0u8; 1 << 20]; // 1 MiB
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        src.read_exact(&mut buf[..want])
+            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+        dst.write_all(&buf[..want])
+            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+        remaining -= want as u64;
+    }
+    Ok(())
 }
 
 /// If `raw` is an Ogg-Vorbis-in-WAV file (format tag 0x674f), return the inner
@@ -1004,5 +1203,149 @@ mod tests {
         let frames = out.interleaved.len() / out.channels as usize;
         assert!((1600..3000).contains(&frames), "frames = {frames}");
         assert!(out.truncated);
+    }
+
+    /// A full RIFF/WAVE: `fmt ` + any extra chunks (e.g. `bext`, `cue `) + `data`,
+    /// with the RIFF size header patched to match.
+    fn build_wav(fmt: &[u8], extra_chunks: &[(&[u8; 4], &[u8])], data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&0u32.to_le_bytes()); // patched below
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        v.extend_from_slice(fmt);
+        if fmt.len() % 2 == 1 {
+            v.push(0);
+        }
+        for (id, body) in extra_chunks {
+            v.extend_from_slice(*id);
+            v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            v.extend_from_slice(body);
+            if body.len() % 2 == 1 {
+                v.push(0);
+            }
+        }
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            v.push(0);
+        }
+        let total = (v.len() - 8) as u32;
+        v[4..8].copy_from_slice(&total.to_le_bytes());
+        v
+    }
+
+    /// The `data` chunk's payload bytes, by walking chunks like the reader does.
+    fn data_bytes(raw: &[u8]) -> &[u8] {
+        let mut pos = 12;
+        loop {
+            let id = &raw[pos..pos + 4];
+            let size = u32::from_le_bytes(raw[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            let body = pos + 8;
+            if id == b"data" {
+                return &raw[body..body + size];
+            }
+            pos = body + size + (size & 1);
+        }
+    }
+
+    #[test]
+    fn write_description_inserts_bext_when_absent() {
+        let data = vec![7u8; 200];
+        let raw = build_wav(&pcm_fmt(1, 8_000), &[], &data);
+        let path = temp_wav("bext_insert", &raw);
+
+        write_bext_description(&path, "Footsteps, gravel, take 3").unwrap();
+
+        let out = decode_file(&path).expect("decode after write");
+        assert_eq!(
+            out.metadata.description.as_deref(),
+            Some("Footsteps, gravel, take 3")
+        );
+        let rewritten = std::fs::read(&path).unwrap();
+        assert_eq!(data_bytes(&rewritten), &data[..]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_description_replaces_and_preserves_other_fields_and_chunks() {
+        let data = vec![9u8; 500];
+        let bext = bext_body("Old description", "Studio A", 123_456_789);
+        let cue: &[u8] = b"CUE-CHUNK-PAYLOAD-not-touched";
+        let raw = build_wav(
+            &pcm_fmt(2, 44_100),
+            &[(b"bext", &bext), (b"cue ", cue)],
+            &data,
+        );
+        let path = temp_wav("bext_replace", &raw);
+
+        write_bext_description(&path, "New description").unwrap();
+
+        let out = decode_file(&path).expect("decode after write");
+        assert_eq!(out.metadata.description.as_deref(), Some("New description"));
+        // Fields the write must not disturb.
+        assert_eq!(out.metadata.originator.as_deref(), Some("Studio A"));
+        assert_eq!(out.metadata.time_reference, Some(123_456_789));
+
+        let rewritten = std::fs::read(&path).unwrap();
+        // The unrelated `cue ` chunk and the audio data are untouched.
+        let cue_pos = rewritten
+            .windows(cue.len())
+            .position(|w| w == cue)
+            .expect("cue payload preserved verbatim");
+        assert!(cue_pos > 0);
+        assert_eq!(data_bytes(&rewritten), &data[..]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_description_truncates_long_unicode_safely() {
+        // A multi-byte character (3 bytes each) repeated past the 255-byte
+        // budget; truncation must land on a char boundary and stay valid UTF-8.
+        let long = "\u{2603}".repeat(120); // 360 bytes
+        let raw = build_wav(&pcm_fmt(1, 8_000), &[], &[0u8; 10]);
+        let path = temp_wav("bext_truncate", &raw);
+
+        write_bext_description(&path, &long).unwrap();
+
+        let out = decode_file(&path).expect("decode after write");
+        let desc = out.metadata.description.expect("description present");
+        assert!(desc.len() <= 255);
+        assert!(long.starts_with(&desc));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cannot_write_bext_for_rf64() {
+        let fmt = pcm_fmt(1, 8_000);
+        let data = vec![0u8; 16];
+        let mut ds64 = Vec::new();
+        ds64.extend_from_slice(&0u64.to_le_bytes()); // riff size (unused by us)
+        ds64.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        ds64.extend_from_slice(&0u64.to_le_bytes()); // sample count
+        ds64.extend_from_slice(&0u32.to_le_bytes()); // table length
+
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RF64");
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"ds64");
+        v.extend_from_slice(&(ds64.len() as u32).to_le_bytes());
+        v.extend_from_slice(&ds64);
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        v.extend_from_slice(&fmt);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        v.extend_from_slice(&data);
+        let path = temp_wav("bext_rf64", &v);
+
+        assert!(!can_write_bext(&path));
+        assert!(write_bext_description(&path, "nope").is_err());
+        // Refusing to write must never touch the original file.
+        assert_eq!(std::fs::read(&path).unwrap(), v);
+        let _ = std::fs::remove_file(&path);
     }
 }

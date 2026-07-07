@@ -731,6 +731,23 @@ impl Library {
         Ok((updated > 0).then(|| abs_path.to_path_buf()))
     }
 
+    /// Upsert exactly the `"description"` fact for `abs_path`, without touching
+    /// `analysis_jobs` (unlike [`store_analysis`](Self::store_analysis), this
+    /// isn't an analysis run — it's the cache catching up after an explicit
+    /// user edit that was already written to the file's embedded metadata).
+    pub fn set_description(&self, abs_path: &Path, description: &str) -> Result<(), LibraryError> {
+        let asset_id = self.ensure_asset(abs_path)?;
+        self.conn.execute(
+            "INSERT INTO audio_analysis(asset_id, metric, text_value)
+             VALUES (?1, 'description', ?2)
+             ON CONFLICT(asset_id, metric) DO UPDATE SET
+               text_value = excluded.text_value, real_value = NULL, blob_value = NULL,
+               computed_at = unixepoch()",
+            rusqlite::params![asset_id, description],
+        )?;
+        Ok(())
+    }
+
     /// Store an asset's analysis facts (opaque `(metric, Fact)` pairs, e.g. from
     /// the caller's report) and mark its job `done` with the elapsed
     /// `duration_ms` — one transaction. Upserts, so re-running is idempotent.
