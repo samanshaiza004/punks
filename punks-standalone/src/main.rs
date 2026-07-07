@@ -19,6 +19,23 @@ use winit::{
 use punks_browser::SampleBrowser;
 use punks_ui::BrowserPanel;
 
+/// Routes imgui's copy/paste to the real OS clipboard via `arboard`. Without
+/// this, imgui falls back to an internal no-op backend: text can be selected
+/// but Ctrl+C/Ctrl+V never reach anything outside the app.
+struct ArboardClipboard(arboard::Clipboard);
+
+impl imgui::ClipboardBackend for ArboardClipboard {
+    fn get(&mut self) -> Option<String> {
+        self.0.get_text().ok()
+    }
+
+    fn set(&mut self, value: &str) {
+        if let Err(e) = self.0.set_text(value) {
+            log::warn!("clipboard set failed: {e}");
+        }
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const DRAG_PREVIEW_ICON_PNG: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
@@ -169,6 +186,14 @@ impl AppWindow {
         let mut context = imgui::Context::create();
         context.set_ini_filename(None);
         apply_style(context.style_mut());
+
+        // winit deliberately has no clipboard API; without a backend here,
+        // imgui's internal Ctrl+C/Ctrl+V in text fields (e.g. the selectable
+        // error line) never reaches the real OS clipboard.
+        match arboard::Clipboard::new() {
+            Ok(clipboard) => context.set_clipboard_backend(ArboardClipboard(clipboard)),
+            Err(e) => log::warn!("clipboard unavailable: {e}"),
+        }
 
         let mut platform = WinitPlatform::new(&mut context);
         platform.attach_window(

@@ -8,11 +8,11 @@ use std::time::Duration;
 pub use punks_analysis::{amp_to_dbfs, AnalysisReport};
 pub use punks_core::config::PunksConfig;
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
-pub use punks_library::{LibraryError, ScanSummary, TagCount};
+pub use punks_library::{Fact, LibraryError, ScanSummary, TagCount};
 pub use punks_playback::{AudioMetadata, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks};
 
 use punks_analysis::{AnalysisContext, AudioBuffer};
-use punks_library::{Fact, Library};
+use punks_library::Library;
 use punks_playback::{decode_file, PlaybackEngine, RequestSlot};
 
 /// How many buckets a full-source waveform is computed at (matches the preview
@@ -132,6 +132,10 @@ struct LibraryContext {
     asset_tags: HashMap<PathBuf, Vec<i64>>,
     /// Absolute path -> analysis results, filled asynchronously by the worker.
     analysis: HashMap<PathBuf, AnalysisReport>,
+    /// Absolute path -> user overrides (metric -> value). Patch the detected
+    /// facts above; user data, never regenerated. `None` means the metric is
+    /// marked explicitly absent (hides the detected guess, if any).
+    overrides: HashMap<PathBuf, HashMap<String, Option<Fact>>>,
     scanning: bool,
     scan_rx: Option<mpsc::Receiver<Result<ScanSummary, LibraryError>>>,
     scan_progress: Option<Arc<ScanProgress>>,
@@ -197,6 +201,15 @@ impl LibraryContext {
             }
             Err(e) => log::warn!("library analysis reload: {e}"),
         }
+        match self.lib.all_overrides() {
+            Ok(rows) => {
+                self.overrides = rows
+                    .into_iter()
+                    .map(|(path, facts)| (path, facts.into_iter().collect()))
+                    .collect();
+            }
+            Err(e) => log::warn!("library override reload: {e}"),
+        }
     }
 }
 
@@ -241,6 +254,35 @@ fn report_to_facts(report: &AnalysisReport) -> Vec<(&'static str, Fact)> {
         facts.push((k, Fact::Text(v)));
     }
     facts
+}
+
+/// One detected fact from a report, as a `Fact`, for the correctable metrics.
+/// The single place metric-name ⇄ report-field mapping lives; `None` for metrics
+/// the report doesn't carry (or that aren't set).
+fn detected_fact_of(report: &AnalysisReport, metric: &str) -> Option<Fact> {
+    match metric {
+        "instrument" => report.instrument.clone().map(Fact::Text),
+        "key" => report.key.clone().map(Fact::Text),
+        "bpm" => report.bpm.map(|b| Fact::Real(b as f64)),
+        _ => None,
+    }
+}
+
+/// Resolve a fact `user ?? analysis`, three-state: no override row falls back to
+/// the detected value; an override row holding a value wins; an override row
+/// explicitly marked absent (`None`) hides the metric even if detected guessed
+/// something — "this sound has no key" is different from "not corrected yet".
+/// Pure so it's testable without a `SampleBrowser` or a real library.
+fn resolve_fact(
+    detected: Option<&AnalysisReport>,
+    overrides: Option<&HashMap<String, Option<Fact>>>,
+    metric: &str,
+) -> Option<Fact> {
+    match overrides.and_then(|o| o.get(metric)) {
+        Some(Some(fact)) => Some(fact.clone()),
+        Some(None) => None,
+        None => detected.and_then(|r| detected_fact_of(r, metric)),
+    }
 }
 
 /// Bridge the other way: stored `Fact`s → a typed report for the UI cache. Blob
@@ -767,6 +809,11 @@ impl SampleBrowser {
         self.playback.current_info()
     }
 
+    /// The loaded track's path, or `None` when nothing is loaded.
+    pub fn current_file(&self) -> Option<&Path> {
+        self.playback.current_file()
+    }
+
     /// The most-specific library owning `path`, if any (longest matching root, so
     /// a nested library wins over its parent).
     fn library_for_path(&self, path: &Path) -> Option<&LibraryContext> {
@@ -777,10 +824,88 @@ impl SampleBrowser {
     }
 
     /// Analysis results for the loaded track, once the worker has computed them.
+    /// This is the raw *detected* report (drives the levels line + pending state);
+    /// the categorical facts line resolves overrides via [`current_resolved`].
     /// `None` outside a library or before results land.
     pub fn current_analysis(&self) -> Option<AnalysisReport> {
         let path = self.playback.current_file()?;
         self.library_for_path(path)?.analysis.get(path).cloned()
+    }
+
+    /// The raw analyzer value for `metric` on `path` (no override applied).
+    pub fn detected_fact(&self, path: &Path, metric: &str) -> Option<Fact> {
+        let ctx = self.library_for_path(path)?;
+        detected_fact_of(ctx.analysis.get(path)?, metric)
+    }
+
+    /// The stored override row for `metric` on `path`, if any: `Some(None)`
+    /// means explicitly marked absent (e.g. atonal/non-metrical); `Some(Some(f))`
+    /// is a value override; `None` means no override row (falls back to
+    /// detected). Mirrors [`Library::overrides`](punks_library::Library) exactly,
+    /// so the popup can tell "no override" from "marked N/A" apart.
+    pub fn override_state(&self, path: &Path, metric: &str) -> Option<Option<Fact>> {
+        let ctx = self.library_for_path(path)?;
+        ctx.overrides.get(path)?.get(metric).cloned()
+    }
+
+    /// The effective value for `metric` on `path`: override wins, else detected.
+    pub fn resolved_fact(&self, path: &Path, metric: &str) -> Option<Fact> {
+        let ctx = self.library_for_path(path)?;
+        resolve_fact(ctx.analysis.get(path), ctx.overrides.get(path), metric)
+    }
+
+    /// The effective value for `metric` on the loaded track (for the readout).
+    pub fn current_resolved(&self, metric: &str) -> Option<Fact> {
+        let path = self.playback.current_file()?;
+        self.resolved_fact(path, metric)
+    }
+
+    /// Set a user override for `metric` on `path` and refresh the caches so the
+    /// UI reflects it next frame. No-op outside a library.
+    pub fn set_override(&mut self, path: &Path, metric: &str, value: Fact) {
+        let Some(li) = self.library_index_for(path) else {
+            return;
+        };
+        if let Err(e) = self.libraries[li].lib.set_override(path, metric, &value) {
+            self.last_error = Some(e.to_string());
+        }
+        self.libraries[li].reload();
+    }
+
+    /// Mark `metric` on `path` explicitly absent (e.g. "this sound has no key") —
+    /// hides the detected guess, unlike [`clear_override`](Self::clear_override)
+    /// which reveals it. No-op outside a library.
+    pub fn mark_absent(&mut self, path: &Path, metric: &str) {
+        let Some(li) = self.library_index_for(path) else {
+            return;
+        };
+        if let Err(e) = self.libraries[li].lib.mark_absent(path, metric) {
+            self.last_error = Some(e.to_string());
+        }
+        self.libraries[li].reload();
+    }
+
+    /// Clear a user override (a value override or an absent mark) for `metric`
+    /// on `path`; the value falls back to detected. No-op outside a library.
+    pub fn clear_override(&mut self, path: &Path, metric: &str) {
+        let Some(li) = self.library_index_for(path) else {
+            return;
+        };
+        if let Err(e) = self.libraries[li].lib.clear_override(path, metric) {
+            self.last_error = Some(e.to_string());
+        }
+        self.libraries[li].reload();
+    }
+
+    /// Index of the most-specific library owning `path` (mutable-friendly twin of
+    /// [`library_for_path`](Self::library_for_path)).
+    fn library_index_for(&self, path: &Path) -> Option<usize> {
+        self.libraries
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| path.starts_with(&c.root))
+            .max_by_key(|(_, c)| c.root.as_os_str().len())
+            .map(|(i, _)| i)
     }
 
     /// Whether the loaded track's analysis is still in flight (queued or running),
@@ -1001,6 +1126,7 @@ impl SampleBrowser {
             assets: Vec::new(),
             asset_tags: HashMap::new(),
             analysis: HashMap::new(),
+            overrides: HashMap::new(),
             scanning: true,
             scan_rx: None,
             scan_progress: None,
@@ -1331,8 +1457,53 @@ fn adjust_active_after_reorder(active: usize, from: usize, to: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{adjust_active_after_close, adjust_active_after_reorder, restore_tab_plan};
+    use super::{
+        adjust_active_after_close, adjust_active_after_reorder, resolve_fact, restore_tab_plan,
+        AnalysisReport, Fact,
+    };
+    use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn resolve_fact_prefers_user_over_analysis() {
+        let detected = AnalysisReport {
+            instrument: Some("kick".into()),
+            key: Some("Am".into()),
+            bpm: Some(120.0),
+            ..Default::default()
+        };
+        let mut overrides: HashMap<String, Option<Fact>> = HashMap::new();
+        overrides.insert("key".into(), Some(Fact::Text("G#min".into())));
+        overrides.insert("bpm".into(), None); // explicitly marked "no BPM"
+
+        // Overridden metric → user value; un-overridden → detected.
+        assert_eq!(
+            resolve_fact(Some(&detected), Some(&overrides), "key"),
+            Some(Fact::Text("G#min".into()))
+        );
+        assert_eq!(
+            resolve_fact(Some(&detected), Some(&overrides), "instrument"),
+            Some(Fact::Text("kick".into()))
+        );
+        // Marked absent hides the detected guess entirely, not just "not corrected".
+        assert_eq!(resolve_fact(Some(&detected), Some(&overrides), "bpm"), None);
+
+        // No override row at all falls back to detected.
+        assert_eq!(
+            resolve_fact(Some(&detected), None, "key"),
+            Some(Fact::Text("Am".into()))
+        );
+        // An override with no detected report still resolves (user data stands alone).
+        assert_eq!(
+            resolve_fact(None, Some(&overrides), "key"),
+            Some(Fact::Text("G#min".into()))
+        );
+        // Nothing anywhere → None.
+        assert_eq!(
+            resolve_fact(Some(&detected), Some(&overrides), "loop"),
+            None
+        );
+    }
 
     /// A couple of real temp directories plus a path that doesn't exist, for
     /// exercising restore_tab_plan's filesystem check.

@@ -90,6 +90,25 @@ pub struct ScanSummary {
     pub unchanged: usize,
 }
 
+/// Set WAL mode, retrying on contention. `busy_timeout` does not cover this
+/// specific pragma (see the call site in `open_at`), so this is a manual
+/// backoff loop instead: up to 1s total, which comfortably covers the
+/// millisecond-scale window where a fresh database's first WAL conversion can
+/// briefly contend with another connection doing the same thing.
+fn set_wal_mode_with_retry(conn: &Connection) -> Result<(), LibraryError> {
+    let mut last_err = None;
+    for _ in 0..50 {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+    Err(last_err.unwrap().into())
+}
+
 // Migration v1: the Core (user-owned) tables only. Generated tables
 // (analysis_jobs, waveforms, audio_analysis, thumbnails) and Cache tables
 // (preview_cache) arrive as v2+ migrations when those features land — the
@@ -207,6 +226,61 @@ CREATE TABLE audio_analysis (
 ) WITHOUT ROWID;
 ";
 
+// Migration v5: user corrections that *patch* a detected fact, resolved
+// `user ?? analysis` at read. This is USER data (never regenerated), so it's an
+// additive migration that leaves `audio_analysis` untouched — re-running an
+// analyzer can't erase an override. Cascades on asset delete like `asset_tags`,
+// and survives rename/move via asset identity. (Independently-authored metadata
+// — notes/pack/author/license — is a separate `asset_metadata` layer, later.)
+const SCHEMA_V5: &str = "
+CREATE TABLE fact_overrides (
+  asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  metric     TEXT NOT NULL,                  -- 'instrument' | 'key' | 'bpm'
+  real_value REAL,
+  text_value TEXT,
+  source     TEXT NOT NULL DEFAULT 'user',   -- always 'user' today; forward-compat provenance
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (asset_id, metric),
+  CHECK ((real_value IS NOT NULL) + (text_value IS NOT NULL) = 1)
+) WITHOUT ROWID;
+";
+
+// Migration v6: `is_absent` lets a user say "this metric genuinely doesn't
+// apply" (e.g. an atonal sound has no key, a one-shot has no BPM) — distinct
+// from having no override row at all (which falls back to the detected
+// guess). `fact_overrides` is USER data, so existing rows must survive: SQLite
+// can't ALTER a CHECK constraint in place, so rename/recreate/copy/drop
+// instead of the disposable tables' DROP+CREATE. The leading DROP makes this
+// self-healing if a `fact_overrides_v5` temp table was ever left behind by an
+// earlier, non-transactional version of this same migration racing across
+// connections (fixed by wrapping the whole migration in one transaction in
+// `open_at`, but this guard costs nothing and closes the gap for good).
+const SCHEMA_V6: &str = "
+DROP TABLE IF EXISTS fact_overrides_v5;
+
+ALTER TABLE fact_overrides RENAME TO fact_overrides_v5;
+
+CREATE TABLE fact_overrides (
+  asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  metric     TEXT NOT NULL,
+  real_value REAL,
+  text_value TEXT,
+  is_absent  INTEGER NOT NULL DEFAULT 0,     -- 1 = explicitly \"no value\", not just uncorrected
+  source     TEXT NOT NULL DEFAULT 'user',
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (asset_id, metric),
+  CHECK (
+    (is_absent = 1 AND real_value IS NULL AND text_value IS NULL)
+    OR (is_absent = 0 AND (real_value IS NOT NULL) + (text_value IS NOT NULL) = 1)
+  )
+) WITHOUT ROWID;
+
+INSERT INTO fact_overrides(asset_id, metric, real_value, text_value, is_absent, source, updated_at)
+  SELECT asset_id, metric, real_value, text_value, 0, source, updated_at FROM fact_overrides_v5;
+
+DROP TABLE fact_overrides_v5;
+";
+
 /// A typed analysis fact — the value an analyzer observed for a metric. The
 /// library's storage vocabulary; it names no analyzer, so the library stays
 /// analyzer-agnostic. `Blob` is for future compact descriptors (fingerprints,
@@ -221,6 +295,10 @@ pub enum Fact {
 /// One asset's stored facts, keyed by absolute path. The caller (which owns the
 /// analyzers) reconstructs a typed report from these.
 pub type AssetFacts = (PathBuf, Vec<(String, Fact)>);
+
+/// One asset's stored overrides, keyed by absolute path. `None` per metric means
+/// explicitly marked absent (see [`Library::overrides`]).
+pub type AssetOverrides = (PathBuf, Vec<(String, Option<Fact>)>);
 
 pub struct Library {
     conn: Connection,
@@ -268,28 +346,54 @@ impl Library {
     }
 
     fn open_at(root: &Path) -> Result<Library, LibraryError> {
-        let conn = Connection::open(Self::db_path(root))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        let mut conn = Connection::open(Self::db_path(root))?;
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        // `PRAGMA journal_mode=WAL` is a documented SQLite exception: unlike
+        // ordinary statements, it does NOT honor busy_timeout's retry handler.
+        // Converting a brand-new file to WAL for the first time needs an
+        // exclusive lock, so two connections racing to open a fresh database
+        // can each get an immediate, un-retried "database is locked" — verified
+        // empirically (a bare busy_timeout does nothing for this specific
+        // pragma). Retry it ourselves with a short backoff instead.
+        set_wal_mode_with_retry(&conn)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        // Multiple threads (scan/peaks/analysis workers) each open their own
+        // connection to the same database, sometimes moments apart — e.g. right
+        // after `create()`, the background scan opens a second connection before
+        // this one's migrations would otherwise be visible. An IMMEDIATE
+        // transaction takes SQLite's write lock up front, so a second connection
+        // racing in here blocks (via `busy_timeout` above) until the first
+        // commits, then re-reads `user_version` and finds nothing left to do —
+        // instead of both racing the same DDL (e.g. two `ALTER TABLE ... RENAME`
+        // to the same temp name).
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 1 {
-            conn.execute_batch(SCHEMA_V1)?;
-            conn.pragma_update(None, "user_version", 1)?;
+            tx.execute_batch(SCHEMA_V1)?;
+            tx.pragma_update(None, "user_version", 1)?;
         }
         if version < 2 {
-            conn.execute_batch(SCHEMA_V2)?;
-            conn.pragma_update(None, "user_version", 2)?;
+            tx.execute_batch(SCHEMA_V2)?;
+            tx.pragma_update(None, "user_version", 2)?;
         }
         if version < 3 {
-            conn.execute_batch(SCHEMA_V3)?;
-            conn.pragma_update(None, "user_version", 3)?;
+            tx.execute_batch(SCHEMA_V3)?;
+            tx.pragma_update(None, "user_version", 3)?;
         }
         if version < 4 {
-            conn.execute_batch(SCHEMA_V4)?;
-            conn.pragma_update(None, "user_version", 4)?;
+            tx.execute_batch(SCHEMA_V4)?;
+            tx.pragma_update(None, "user_version", 4)?;
         }
+        if version < 5 {
+            tx.execute_batch(SCHEMA_V5)?;
+            tx.pragma_update(None, "user_version", 5)?;
+        }
+        if version < 6 {
+            tx.execute_batch(SCHEMA_V6)?;
+            tx.pragma_update(None, "user_version", 6)?;
+        }
+        tx.commit()?;
 
         Ok(Library {
             conn,
@@ -741,6 +845,116 @@ impl Library {
         Ok(rows.next().transpose()?)
     }
 
+    // --- Fact overrides (user corrections; user data, never regenerated) ---
+    //
+    // An override row's value is `Option<Fact>`: `Some(fact)` corrects the
+    // detected value; `None` means the user marked the metric explicitly absent
+    // (e.g. "this sound has no key") — different from *no row*, which falls back
+    // to the detected guess. See [`overrides`](Self::overrides).
+
+    /// Set a user override for one metric on `abs_path` (ingesting the asset if
+    /// needed): upsert into `fact_overrides`, leaving `audio_analysis` untouched
+    /// so re-running analyzers can never erase it. `Blob` overrides are
+    /// unsupported (the override UI only produces text/number) → warn + no-op.
+    pub fn set_override(
+        &self,
+        abs_path: &Path,
+        metric: &str,
+        value: &Fact,
+    ) -> Result<(), LibraryError> {
+        let (real, text): (Option<f64>, Option<&str>) = match value {
+            Fact::Real(v) => (Some(*v), None),
+            Fact::Text(s) => (None, Some(s.as_str())),
+            Fact::Blob(_) => {
+                log::warn!("ignoring blob override for {metric} on {abs_path:?}");
+                return Ok(());
+            }
+        };
+        let asset_id = self.ensure_asset(abs_path)?;
+        self.conn.execute(
+            "INSERT INTO fact_overrides(asset_id, metric, real_value, text_value, is_absent)
+             VALUES (?1, ?2, ?3, ?4, 0)
+             ON CONFLICT(asset_id, metric) DO UPDATE SET
+               real_value = excluded.real_value, text_value = excluded.text_value,
+               is_absent = 0, updated_at = unixepoch()",
+            rusqlite::params![asset_id, metric, real, text],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a metric explicitly absent on `abs_path` — "this sound has no key",
+    /// "no BPM applies" — hiding the detected guess even though it exists.
+    /// Distinct from [`clear_override`](Self::clear_override), which instead
+    /// *reveals* the detected guess again.
+    pub fn mark_absent(&self, abs_path: &Path, metric: &str) -> Result<(), LibraryError> {
+        let asset_id = self.ensure_asset(abs_path)?;
+        self.conn.execute(
+            "INSERT INTO fact_overrides(asset_id, metric, real_value, text_value, is_absent)
+             VALUES (?1, ?2, NULL, NULL, 1)
+             ON CONFLICT(asset_id, metric) DO UPDATE SET
+               real_value = NULL, text_value = NULL, is_absent = 1, updated_at = unixepoch()",
+            rusqlite::params![asset_id, metric],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a user override (a value override or an absent mark); the
+    /// resolved value falls back to the detected one.
+    pub fn clear_override(&self, abs_path: &Path, metric: &str) -> Result<(), LibraryError> {
+        let Some(asset_id) = self.asset_id_for(abs_path)? else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "DELETE FROM fact_overrides WHERE asset_id = ?1 AND metric = ?2",
+            rusqlite::params![asset_id, metric],
+        )?;
+        Ok(())
+    }
+
+    /// This asset's user overrides as `(metric, Option<Fact>)` pairs (empty if
+    /// none). `None` means the metric is marked explicitly absent.
+    pub fn overrides(&self, abs_path: &Path) -> Result<Vec<(String, Option<Fact>)>, LibraryError> {
+        let Some(asset_id) = self.asset_id_for(abs_path)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT metric, real_value, text_value, is_absent
+               FROM fact_overrides WHERE asset_id = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![asset_id], |r| {
+            Ok((r.get::<_, String>(0)?, row_to_override_at(r, 1)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every present asset's overrides, grouped by absolute path, for a display
+    /// cache reload. Mirrors [`all_facts`](Self::all_facts).
+    pub fn all_overrides(&self) -> Result<Vec<AssetOverrides>, LibraryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.relative_path, o.metric, o.real_value, o.text_value, o.is_absent
+               FROM fact_overrides o JOIN assets a ON a.id = o.asset_id
+              WHERE a.missing = 0
+              ORDER BY a.relative_path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                row_to_override_at(r, 2)?,
+            ))
+        })?;
+        let mut out: Vec<AssetOverrides> = Vec::new();
+        for row in rows {
+            let (rel, metric, fact) = row?;
+            let path = self.root.join(str_to_rel(&rel));
+            match out.last_mut() {
+                Some((p, v)) if *p == path => v.push((metric, fact)),
+                _ => out.push((path, vec![(metric, fact)])),
+            }
+        }
+        Ok(out)
+    }
+
     // --- Reconciliation ----------------------------------------------------
 
     /// Reconcile the database against `files` (the current on-disk state).
@@ -926,6 +1140,19 @@ fn row_to_fact_at(r: &rusqlite::Row, base: usize) -> Result<Fact, rusqlite::Erro
         Ok(Fact::Text(s))
     } else {
         Ok(Fact::Blob(r.get::<_, Vec<u8>>(base + 2)?))
+    }
+}
+
+/// Read an override value from three consecutive columns (real, text,
+/// is_absent) starting at `base`. `None` when `is_absent = 1` (explicitly no
+/// value); otherwise exactly one of real/text is set (table CHECK).
+fn row_to_override_at(r: &rusqlite::Row, base: usize) -> Result<Option<Fact>, rusqlite::Error> {
+    if r.get::<_, bool>(base + 2)? {
+        return Ok(None);
+    }
+    match r.get::<_, Option<f64>>(base)? {
+        Some(v) => Ok(Some(Fact::Real(v))),
+        None => Ok(Some(Fact::Text(r.get::<_, String>(base + 1)?))),
     }
 }
 
@@ -1512,5 +1739,256 @@ mod tests {
             .unwrap();
         assert_eq!(results, 0);
         assert_eq!(jobs, 0);
+    }
+
+    #[test]
+    fn override_set_read_clear() {
+        let t = TempRoot::new("override");
+        let a = write_wav(&t.0, "x.wav", b"X");
+        let mut lib = Library::create(&t.0).unwrap();
+        lib.reconcile(&scan_files(&t.0).unwrap()).unwrap();
+
+        assert!(lib.overrides(&a).unwrap().is_empty());
+        lib.set_override(&a, "key", &Fact::Text("G#min".into()))
+            .unwrap();
+        lib.set_override(&a, "bpm", &Fact::Real(140.0)).unwrap();
+        let mut got = lib.overrides(&a).unwrap();
+        got.sort_by(|x, y| x.0.cmp(&y.0));
+        assert_eq!(
+            got,
+            vec![
+                ("bpm".to_string(), Some(Fact::Real(140.0))),
+                ("key".to_string(), Some(Fact::Text("G#min".into()))),
+            ]
+        );
+        // Upsert: setting the same metric replaces, doesn't duplicate.
+        lib.set_override(&a, "key", &Fact::Text("Am".into()))
+            .unwrap();
+        assert_eq!(lib.overrides(&a).unwrap().len(), 2);
+
+        lib.clear_override(&a, "key").unwrap();
+        assert_eq!(
+            lib.overrides(&a).unwrap(),
+            vec![("bpm".to_string(), Some(Fact::Real(140.0)))]
+        );
+    }
+
+    #[test]
+    fn mark_absent_hides_detected_and_differs_from_clear() {
+        let t = TempRoot::new("absent");
+        let a = write_wav(&t.0, "x.wav", b"X");
+        let mut lib = Library::create(&t.0).unwrap();
+        lib.reconcile(&scan_files(&t.0).unwrap()).unwrap();
+
+        // Analyzer guessed a key; user says the sound is actually atonal.
+        lib.store_analysis(&a, &[("key", Fact::Text("Am".into()))], 1)
+            .unwrap();
+        lib.mark_absent(&a, "key").unwrap();
+        assert_eq!(lib.overrides(&a).unwrap(), vec![("key".to_string(), None)]);
+        // The detected guess is untouched underneath.
+        assert_eq!(
+            lib.facts(&a).unwrap(),
+            vec![("key".to_string(), Fact::Text("Am".into()))]
+        );
+
+        // Setting a real value afterwards clears the absent mark.
+        lib.set_override(&a, "key", &Fact::Text("Cmaj".into()))
+            .unwrap();
+        assert_eq!(
+            lib.overrides(&a).unwrap(),
+            vec![("key".to_string(), Some(Fact::Text("Cmaj".into())))]
+        );
+
+        // Clearing the override (not marking absent) removes the row entirely —
+        // a *different* state from "marked absent".
+        lib.mark_absent(&a, "key").unwrap();
+        lib.clear_override(&a, "key").unwrap();
+        assert!(lib.overrides(&a).unwrap().is_empty());
+    }
+
+    #[test]
+    fn v5_to_v6_migration_preserves_existing_override_rows() {
+        // Simulate a database that already ran the v5 migration (no `is_absent`
+        // column) and has a real user override in it — exactly the state of an
+        // pre-existing library.db from before `is_absent` was added. Opening it
+        // again must add the column via SCHEMA_V6 without losing that row.
+        let t = TempRoot::new("v5_upgrade");
+        let a = write_wav(&t.0, "x.wav", b"X");
+        std::fs::create_dir_all(t.0.join(".punks")).unwrap();
+        {
+            let conn = Connection::open(Library::db_path(&t.0)).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute_batch(SCHEMA_V3).unwrap();
+            conn.execute_batch(SCHEMA_V4).unwrap();
+            conn.execute_batch(SCHEMA_V5).unwrap();
+            conn.pragma_update(None, "user_version", 5).unwrap();
+            conn.execute(
+                "INSERT INTO assets(relative_path, size, mtime_ms) VALUES ('x.wav', 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO fact_overrides(asset_id, metric, text_value) VALUES (1, 'key', 'G#min')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Re-opening runs the v6 migration; the pre-existing override survives
+        // and the new is_absent-based API works on the upgraded table.
+        let lib = Library::open(&t.0).unwrap();
+        assert_eq!(
+            lib.overrides(&a).unwrap(),
+            vec![("key".to_string(), Some(Fact::Text("G#min".into())))]
+        );
+        lib.mark_absent(&a, "bpm").unwrap();
+        assert_eq!(lib.overrides(&a).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn v6_migration_self_heals_a_leftover_temp_table() {
+        // Simulate a `fact_overrides_v5` stray left behind by some earlier,
+        // non-transactional run of this same migration (e.g. a build predating
+        // the `open_at` transaction fix, or a killed process mid-migration).
+        // The v6 migration must clean it up rather than failing with "already
+        // another table ... fact_overrides_v5".
+        let t = TempRoot::new("leftover_temp");
+        std::fs::create_dir_all(t.0.join(".punks")).unwrap();
+        {
+            let conn = Connection::open(Library::db_path(&t.0)).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute_batch(SCHEMA_V3).unwrap();
+            conn.execute_batch(SCHEMA_V4).unwrap();
+            conn.execute_batch(SCHEMA_V5).unwrap();
+            conn.pragma_update(None, "user_version", 5).unwrap();
+            // The stray: a leftover table with the exact name SCHEMA_V6 renames
+            // `fact_overrides` to, from an interrupted prior attempt.
+            conn.execute_batch("CREATE TABLE fact_overrides_v5(junk INTEGER);")
+                .unwrap();
+        }
+
+        // Must not error, and must not leave the stray behind afterwards.
+        let lib = Library::open(&t.0).unwrap();
+        let user_version: i64 = lib
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(user_version, 6);
+        let leftover: i64 = lib
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fact_overrides_v5'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover, 0);
+    }
+
+    #[test]
+    fn concurrent_first_open_does_not_race_migrations() {
+        // Regression: several threads (scan/peaks/analysis workers, in the real
+        // app) can each open a brand-new library's connection within moments of
+        // each other. Before migrations were serialized behind a single
+        // transaction, two connections both mid-migration could both attempt
+        // `ALTER TABLE fact_overrides RENAME TO fact_overrides_v5`, and the
+        // second would fail with "already another table ... fact_overrides_v5".
+        let t = TempRoot::new("concurrent_open");
+        let a = write_wav(&t.0, "x.wav", b"X");
+        std::fs::create_dir_all(t.0.join(".punks")).unwrap();
+        // A zero-length file is a valid empty SQLite database (fresh, version 0)
+        // — every thread below races the *entire* v1..v6 migration sequence.
+        std::fs::write(Library::db_path(&t.0), []).unwrap();
+
+        // 4 matches the real app's actual concurrent openers (create + scan +
+        // peaks + analysis workers); racing far more than that under a loaded
+        // CI machine risks exceeding busy_timeout on contention alone, which
+        // would be a test artifact, not the bug under test.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let root = t.0.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Library::open(&root).map(|_| ())
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+
+        // Exactly one, fully-migrated fact_overrides table — no leftover temp
+        // table from a half-finished concurrent migration.
+        let lib = Library::open(&t.0).unwrap();
+        let user_version: i64 = lib
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(user_version, 6);
+        lib.mark_absent(&a, "key").unwrap(); // exercises is_absent on the upgraded table
+        let leftover: i64 = lib
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fact_overrides_v5'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover, 0);
+    }
+
+    #[test]
+    fn override_survives_reanalysis() {
+        // The provenance guarantee: re-running the analyzer (store_analysis) must
+        // never touch the user's override — they live in separate tables.
+        let t = TempRoot::new("override_regen");
+        let a = write_wav(&t.0, "x.wav", b"X");
+        let mut lib = Library::create(&t.0).unwrap();
+        lib.reconcile(&scan_files(&t.0).unwrap()).unwrap();
+
+        // Analyzer detects key = Am; user overrides to G#min.
+        lib.store_analysis(&a, &[("key", Fact::Text("Am".into()))], 1)
+            .unwrap();
+        lib.set_override(&a, "key", &Fact::Text("G#min".into()))
+            .unwrap();
+
+        // Re-analyze (still detects Am, maybe re-detects the same).
+        lib.store_analysis(&a, &[("key", Fact::Text("Am".into()))], 1)
+            .unwrap();
+
+        // Detected value is intact AND the override is intact — resolution is the
+        // caller's job, both layers survive independently.
+        assert_eq!(
+            lib.facts(&a).unwrap(),
+            vec![("key".to_string(), Fact::Text("Am".into()))]
+        );
+        assert_eq!(
+            lib.overrides(&a).unwrap(),
+            vec![("key".to_string(), Some(Fact::Text("G#min".into())))]
+        );
+    }
+
+    #[test]
+    fn overrides_cascade_on_asset_delete() {
+        let t = TempRoot::new("override_cascade");
+        let a = write_wav(&t.0, "x.wav", b"X");
+        let mut lib = Library::create(&t.0).unwrap();
+        lib.reconcile(&scan_files(&t.0).unwrap()).unwrap();
+        lib.set_override(&a, "instrument", &Fact::Text("snare".into()))
+            .unwrap();
+
+        let asset_id = lib.asset_id_for(&a).unwrap().unwrap();
+        lib.conn
+            .execute("DELETE FROM assets WHERE id = ?1", [asset_id])
+            .unwrap();
+        let n: i64 = lib
+            .conn
+            .query_row("SELECT COUNT(*) FROM fact_overrides", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

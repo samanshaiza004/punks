@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use imgui::Key;
-use punks_browser::{LibraryState, PlaybackStatus, SampleBrowser, TagCount};
+use punks_browser::{Fact, LibraryState, PlaybackStatus, SampleBrowser, TagCount};
 use punks_core::config::{Keybinds, PunksConfig};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -152,6 +153,16 @@ fn scroll_row_into_view(ui: &imgui::Ui, row: usize, row_stride: f32) {
     }
 }
 
+/// Display a `Fact` value as a plain string (integers without a trailing `.0`).
+fn fact_display(f: &Fact) -> String {
+    match f {
+        Fact::Text(s) => s.clone(),
+        Fact::Real(v) if v.fract() == 0.0 => format!("{}", *v as i64),
+        Fact::Real(v) => format!("{v}"),
+        Fact::Blob(_) => "<blob>".into(),
+    }
+}
+
 /// Uppercase the first character (canonical instruments are stored lowercase).
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
@@ -239,7 +250,24 @@ pub struct BrowserPanel {
     open_tag_delete: bool,
     /// Request to open the "delete library" confirmation popup.
     open_delete_library: bool,
+    /// File the override popup is editing, and its per-metric edit buffers
+    /// (seeded from the current override when the popup opens).
+    override_popup_path: Option<PathBuf>,
+    override_bufs: HashMap<&'static str, String>,
+    open_override_editor: bool,
+    /// Mirrors `browser.last_error()` into an owned buffer so it can be shown in
+    /// a read-only (but selectable/copyable) input widget — plain `Text` widgets
+    /// can't be selected or copied in imgui.
+    error_buf: String,
 }
+
+/// The correctable detected facts the override popup edits, as
+/// `(metric, label, numeric?)`.
+const OVERRIDE_FIELDS: &[(&str, &str, bool)] = &[
+    ("instrument", "Instrument", false),
+    ("key", "Key", false),
+    ("bpm", "Tempo", true),
+];
 
 impl BrowserPanel {
     pub fn new() -> Self {
@@ -263,6 +291,10 @@ impl BrowserPanel {
             tag_delete_target: None,
             open_tag_delete: false,
             open_delete_library: false,
+            override_popup_path: None,
+            override_bufs: HashMap::new(),
+            open_override_editor: false,
+            error_buf: String::new(),
         }
     }
 
@@ -455,7 +487,9 @@ impl BrowserPanel {
         // if the font size changes — a fixed pixel guess pushed the volume slider
         // off-screen.
         let line_h = ui.text_line_height_with_spacing();
-        let reserved = WAVEFORM_HEIGHT + 3.0 * line_h + ui.frame_height_with_spacing() + line_h;
+        // The error line is a read-only input (frame-height, not text-line-height)
+        // so its text is selectable/copyable.
+        let reserved = WAVEFORM_HEIGHT + 3.0 * line_h + 2.0 * ui.frame_height_with_spacing();
         let body_height = (avail[1] - reserved).max(120.0);
         let mut drag_requested: Option<PathBuf> = None;
         let mut search_focused = false;
@@ -626,21 +660,28 @@ impl BrowserPanel {
         // reserved when absent so the layout stays put.
         {
             if let Some(a) = browser.current_analysis() {
-                // Facts line: what the sound *is* (name-derived), most identifying.
+                // Facts line: what the sound *is*, resolved user ?? analysis (so a
+                // correction shows immediately). An "Override" button opens the
+                // editor for the loaded file.
                 let mut facts: Vec<String> = Vec::new();
-                if let Some(i) = &a.instrument {
-                    facts.push(capitalize(i));
+                if let Some(Fact::Text(s)) = browser.current_resolved("instrument") {
+                    facts.push(capitalize(&s));
                 }
-                if let Some(b) = a.bpm {
+                if let Some(Fact::Real(b)) = browser.current_resolved("bpm") {
                     facts.push(format!("{} BPM", b as u32));
                 }
-                if let Some(k) = &a.key {
-                    facts.push(k.clone());
+                if let Some(Fact::Text(s)) = browser.current_resolved("key") {
+                    facts.push(s);
                 }
                 if facts.is_empty() {
-                    ui.new_line();
+                    ui.text_disabled("no detected facts");
                 } else {
                     ui.text_disabled(facts.join("   \u{b7}   "));
+                }
+                ui.same_line();
+                if ui.small_button("Override") {
+                    self.override_popup_path = browser.current_file().map(Path::to_path_buf);
+                    self.open_override_editor = true;
                 }
                 // Levels line: length first, peak in dB (audio people don't think
                 // in linear amplitude); peak stays stored linear.
@@ -694,7 +735,18 @@ impl BrowserPanel {
         }
 
         if let Some(err) = browser.last_error() {
-            ui.text_colored([1.0, 0.3, 0.3, 1.0], err);
+            // A read-only InputText (not plain Text) so the message can be
+            // selected and copied — needed for anything longer than fits on
+            // screen, like a full db-error string.
+            self.error_buf.clear();
+            self.error_buf.push_str(err);
+            let w = ui.content_region_avail()[0];
+            let color = ui.push_style_color(imgui::StyleColor::Text, [1.0, 0.3, 0.3, 1.0]);
+            ui.set_next_item_width(w);
+            ui.input_text("##last_error", &mut self.error_buf)
+                .read_only(true)
+                .build();
+            color.pop();
         }
 
         // Tag popups live at panel scope so open_popup/popup share an ID
@@ -707,6 +759,23 @@ impl BrowserPanel {
             self.open_tag_delete = false;
             ui.open_popup("##tag_delete");
         }
+        if self.open_override_editor {
+            self.open_override_editor = false;
+            // Seed each edit field from the current override value (blank if
+            // none, or if the metric is marked absent — nothing to edit there).
+            if let Some(path) = self.override_popup_path.clone() {
+                for (metric, _, _) in OVERRIDE_FIELDS {
+                    let seed = match browser.override_state(&path, metric) {
+                        Some(Some(f)) => fact_display(&f),
+                        Some(None) | None => String::new(),
+                    };
+                    self.override_bufs.insert(metric, seed);
+                }
+            }
+            ui.open_popup("##override_editor");
+        }
+
+        self.draw_override_popup(ui, browser);
 
         ui.popup("##tag_editor", || {
             if let Some(path) = self.tag_popup_path.clone() {
@@ -1240,6 +1309,72 @@ impl BrowserPanel {
                 browser.play_selected();
             }
         }
+    }
+
+    /// The override editor for the target file: each correctable metric shows its
+    /// detected value (read-only) beside an editable override with Set / Clear.
+    /// Setting writes a user override that patches — never replaces — the detected
+    /// fact; Clear reverts to detected.
+    fn draw_override_popup(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+        ui.popup("##override_editor", || {
+            let Some(path) = self.override_popup_path.clone() else {
+                return;
+            };
+            let fname = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            ui.text_disabled(&fname);
+            ui.separator();
+
+            for &(metric, label, numeric) in OVERRIDE_FIELDS {
+                let detected = browser
+                    .detected_fact(&path, metric)
+                    .map(|f| fact_display(&f))
+                    .unwrap_or_else(|| "\u{2014}".into()); // em dash = none
+                let marked_absent = matches!(browser.override_state(&path, metric), Some(None));
+
+                ui.text(label);
+                ui.same_line();
+                ui.text_disabled(format!("(detected: {detected})"));
+                if marked_absent {
+                    ui.same_line();
+                    ui.text_colored([0.9, 0.7, 0.3, 1.0], "marked N/A");
+                }
+
+                // Confine the &mut into override_bufs to this block so the Set /
+                // N/A / Clear branches below can borrow browser + override_bufs
+                // freely.
+                let entered = {
+                    let buf = self.override_bufs.entry(metric).or_default();
+                    ui.set_next_item_width(140.0);
+                    ui.input_text(format!("##ov_{metric}"), buf).build();
+                    buf.trim().to_string()
+                };
+                ui.same_line();
+                if ui.small_button(format!("Set##set_{metric}")) && !entered.is_empty() {
+                    if numeric {
+                        if let Ok(n) = entered.parse::<f64>() {
+                            browser.set_override(&path, metric, Fact::Real(n));
+                        }
+                    } else {
+                        browser.set_override(&path, metric, Fact::Text(entered));
+                    }
+                }
+                ui.same_line();
+                if ui.small_button(format!("N/A##na_{metric}")) {
+                    // Explicitly "this metric doesn't apply" — different from
+                    // Clear, which instead reveals the detected guess again.
+                    browser.mark_absent(&path, metric);
+                    self.override_bufs.insert(metric, String::new());
+                }
+                ui.same_line();
+                if ui.small_button(format!("Clear##clr_{metric}")) {
+                    browser.clear_override(&path, metric);
+                    self.override_bufs.insert(metric, String::new());
+                }
+            }
+        });
     }
 
     fn draw_settings_modal(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
