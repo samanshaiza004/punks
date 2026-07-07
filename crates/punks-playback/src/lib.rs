@@ -12,13 +12,12 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
 
 mod decode;
+pub mod metadata;
 pub mod peaks;
 mod resample;
 
-pub use decode::{
-    can_write_bext, compute_source_peaks, decode_file, write_bext_description, AudioMetadata,
-    DecodedAudio,
-};
+pub use decode::{compute_source_peaks, decode_file, AudioMetadata, DecodedAudio};
+pub use metadata::{Backend, Capability, Field, Metadata, MetadataBackend, MetadataError};
 pub use peaks::WaveformPeaks;
 
 /// Container-level info about the currently loaded track: free-text metadata,

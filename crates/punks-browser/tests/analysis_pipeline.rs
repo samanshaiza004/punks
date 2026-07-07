@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use punks_analysis::{run_all, AnalysisContext, AnalysisReport, AudioBuffer};
 use punks_library::{Fact, Library};
-use punks_playback::decode_file;
+use punks_playback::{decode_file, Backend, Field, Metadata, MetadataBackend};
 
 /// Store a report's typed facts, then read them back into a report (the same
 /// numeric/text split the browser's bridge does, via public API only).
@@ -204,8 +204,17 @@ fn bext_description_is_written_then_cached_by_analysis() {
     let wav = dir.join("field_recording.wav");
     write_sine_wav(&wav, 8_000, 440.0, 0.5, 8_000);
 
-    assert!(punks_playback::can_write_bext(&wav));
-    punks_playback::write_bext_description(&wav, "Footsteps, gravel, take 3").unwrap();
+    let backend = Backend::for_path(&wav);
+    assert!(backend.capability(Field::Description).can_write());
+    backend
+        .write(
+            &wav,
+            &Metadata {
+                description: Some("Footsteps, gravel, take 3".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
     let mut lib = Library::create(&dir).unwrap();
     lib.reconcile(&punks_library::scan_files(&dir).unwrap())

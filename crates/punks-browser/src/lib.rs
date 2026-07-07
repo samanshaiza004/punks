@@ -13,7 +13,7 @@ pub use punks_playback::{AudioMetadata, PlaybackError, PlaybackStatus, TrackInfo
 
 use punks_analysis::{AnalysisContext, AudioBuffer};
 use punks_library::Library;
-use punks_playback::{decode_file, PlaybackEngine, RequestSlot};
+use punks_playback::{decode_file, Backend, Field, MetadataBackend, PlaybackEngine, RequestSlot};
 
 /// How many buckets a full-source waveform is computed at (matches the preview
 /// waveform's resolution).
@@ -380,13 +380,17 @@ fn analyze_claimed(lib: &mut Library, path: &Path, done_tx: &mpsc::Sender<PathBu
             let report = punks_analysis::run_all(&ctx);
             let dur = t.elapsed().as_millis() as u32;
             let mut facts = report_to_facts(&report);
-            // The bext Description, cached as a fact so it's searchable/
-            // displayable without decoding again. Not an override — it's
-            // authored content the file owns, not a correction of a guess —
-            // so it rides the plain facts cache and re-populates itself from
-            // the file on every re-analysis (the DB is a rebuildable index).
-            if let Some(desc) = d.metadata.description {
-                facts.push(("description", Fact::Text(desc)));
+            // The embedded Description, cached as a fact so it's searchable/
+            // displayable without decoding again. Read through the metadata
+            // backend (not `d.metadata`, which only ever parsed bext), so
+            // FLAC/MP3 descriptions populate the index too. Not an override —
+            // it's authored content the file owns, not a correction of a guess —
+            // so it rides the plain facts cache and re-populates itself from the
+            // file on every re-analysis (the DB is a rebuildable index).
+            if let Ok(meta) = Backend::for_path(path).read(path) {
+                if let Some(desc) = meta.description {
+                    facts.push(("description", Fact::Text(desc)));
+                }
             }
             match lib.store_analysis(path, &facts, dur) {
                 Ok(()) => {
@@ -1009,24 +1013,30 @@ impl SampleBrowser {
         self.library_for_path(path)?.descriptions.get(path).cloned()
     }
 
-    /// Whether [`set_description`](Self::set_description) can write to `path` —
-    /// embedded metadata write-back is WAV/BWF-only for now.
+    /// Whether [`set_description`](Self::set_description) can write to `path`:
+    /// the metadata backend must support writing Description (WAV/BWF via our own
+    /// writer, or a lofty-handled format), and we must be inside a library to
+    /// cache the result.
     pub fn can_write_description(&self, path: &Path) -> bool {
-        // `set_description` no-ops outside a library (nothing to cache the
-        // write into), so the UI must gate on both conditions, not just format.
-        self.library_for_path(path).is_some() && punks_playback::can_write_bext(path)
+        self.library_for_path(path).is_some()
+            && Backend::for_path(path)
+                .capability(Field::Description)
+                .can_write()
     }
 
-    /// Write `description` into `path`'s embedded bext chunk (the file is
-    /// authoritative), then refresh the cached fact so the UI reflects it
-    /// without waiting for the next analysis pass. No-op outside a library or
-    /// when the format can't be safely rewritten (see `can_write_description`);
-    /// sets `last_error` on failure.
+    /// Write `description` into `path`'s embedded metadata (the file is
+    /// authoritative) as a read-modify-write that preserves everything else,
+    /// then refresh the cached fact so the UI reflects it without waiting for the
+    /// next analysis pass. No-op outside a library or when the format can't write
+    /// Description; sets `last_error` on failure.
     pub fn set_description(&mut self, path: &Path, description: &str) {
         let Some(li) = self.library_index_for(path) else {
             return;
         };
-        if let Err(e) = punks_playback::write_bext_description(path, description) {
+        let backend = Backend::for_path(path);
+        let mut meta = backend.read(path).unwrap_or_default();
+        meta.description = Some(description.to_string());
+        if let Err(e) = backend.write(path, &meta) {
             self.last_error = Some(e.to_string());
             return;
         }

@@ -670,7 +670,7 @@ impl BrowserPanel {
                 let save = ui.button("Save");
                 if !can_write {
                     if ui.is_item_hovered() {
-                        ui.tooltip_text("Embedded metadata: WAV only, inside a library");
+                        ui.tooltip_text("Description not writable for this file (inside a library only; RF64 is read-only)");
                     }
                 } else if entered || save {
                     browser.set_description(&path, self.description_buf.trim());

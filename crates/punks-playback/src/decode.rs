@@ -57,7 +57,7 @@ const PREVIEW_WINDOW: Duration = Duration::from_secs(120);
 
 /// How many header bytes to read for classification + metadata. All chunks
 /// before `data` (fmt, ds64, bext, …) live comfortably within this.
-const HEADER_PREFIX_MAX: usize = 1 << 20; // 1 MiB
+pub(crate) const HEADER_PREFIX_MAX: usize = 1 << 20; // 1 MiB
 
 pub fn decode_file(path: &Path) -> Result<DecodedAudio, PlaybackError> {
     decode_inner(path, PREVIEW_THRESHOLD, PREVIEW_WINDOW)
@@ -103,7 +103,7 @@ fn decode_inner(
 }
 
 /// Read up to `max` bytes from the start of `path`.
-fn read_header_prefix(path: &Path, max: usize) -> Result<Vec<u8>, PlaybackError> {
+pub(crate) fn read_header_prefix(path: &Path, max: usize) -> Result<Vec<u8>, PlaybackError> {
     let mut file =
         File::open(path).map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
     let mut buf = vec![0u8; max];
@@ -153,7 +153,7 @@ fn riff_fmt_tag(prefix: &[u8]) -> Option<u16> {
 }
 
 /// Walk RIFF/RF64 chunks in `prefix` for a `bext` chunk and parse it.
-fn parse_riff_metadata(prefix: &[u8]) -> AudioMetadata {
+pub(crate) fn parse_riff_metadata(prefix: &[u8]) -> AudioMetadata {
     if !is_wave_prefix(prefix) {
         return AudioMetadata::default();
     }
@@ -215,7 +215,7 @@ const BEXT_MIN_BODY_LEN: usize = 602;
 /// need format-specific handling this crate doesn't have yet — as is anything
 /// that isn't a WAVE container at all. The writer re-checks this itself; this
 /// is what the UI polls to grey out Save.
-pub fn can_write_bext(path: &Path) -> bool {
+pub(crate) fn can_write_bext(path: &Path) -> bool {
     let Ok(prefix) = read_header_prefix(path, HEADER_PREFIX_MAX) else {
         return false;
     };
@@ -291,7 +291,7 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
 /// copy to a temp file in the same directory (so the final rename is atomic on
 /// the same filesystem) and only replaces the original once that copy is
 /// complete and flushed.
-pub fn write_bext_description(path: &Path, description: &str) -> Result<(), PlaybackError> {
+pub(crate) fn write_bext_description(path: &Path, description: &str) -> Result<(), PlaybackError> {
     if !can_write_bext(path) {
         return Err(PlaybackError::DecodeError(format!(
             "{path:?}: embedded metadata write is only supported for plain WAV/BWF files"
@@ -300,17 +300,15 @@ pub fn write_bext_description(path: &Path, description: &str) -> Result<(), Play
     let prefix = read_header_prefix(path, HEADER_PREFIX_MAX)?;
     let slot = locate_bext(&prefix);
 
-    let mut src =
-        File::open(path).map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
-
     // Start from the existing body (so every other bext field survives), or a
     // fresh minimum-size body when there's nothing to preserve.
     let mut body = match slot {
         BextSlot::Replace {
             start, body_len, ..
         } => {
-            let body_start = start + 8;
-            read_exact_at(&mut src, body_start as u64, body_len, path)?
+            let mut src = File::open(path)
+                .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+            read_exact_at(&mut src, (start + 8) as u64, body_len, path)?
         }
         BextSlot::InsertAt(_) => vec![0u8; BEXT_MIN_BODY_LEN],
     };
@@ -334,21 +332,17 @@ pub fn write_bext_description(path: &Path, description: &str) -> Result<(), Play
         BextSlot::InsertAt(at) => (at, at),
     };
 
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp_name = format!(
-        ".{}.punks-tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("bext")
-    );
-    let tmp_path = dir.join(tmp_name);
-
-    let result = (|| -> Result<(), PlaybackError> {
-        let mut dst = File::create(&tmp_path)
-            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
-        src.seek(SeekFrom::Start(0))
-            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+    // Splice: everything before the bext chunk, the new chunk, then everything
+    // after it (audio `data` and any unknown chunks) copied verbatim — the whole
+    // thing built into a temp file and atomically renamed over the original.
+    write_atomically(path, |tmp| {
+        let mut src =
+            File::open(path).map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+        let mut dst =
+            File::create(tmp).map_err(|e| PlaybackError::DecodeError(format!("{tmp:?}: {e}")))?;
         copy_n(&mut src, &mut dst, head_end as u64, path)?;
         dst.write_all(&chunk)
-            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp:?}: {e}")))?;
         src.seek(SeekFrom::Start(tail_start as u64))
             .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
         let tail_len = std::io::copy(&mut src, &mut dst)
@@ -357,17 +351,42 @@ pub fn write_bext_description(path: &Path, description: &str) -> Result<(), Play
         // Patch the RIFF size header (bytes 4..8: total file size - 8).
         let total_len = head_end as u64 + chunk.len() as u64 + tail_len;
         dst.seek(SeekFrom::Start(4))
-            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp:?}: {e}")))?;
         dst.write_all(&((total_len - 8) as u32).to_le_bytes())
-            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
-        dst.sync_all()
-            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
-        drop(dst);
-        std::fs::rename(&tmp_path, path)
-            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: rename failed: {e}")))?;
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp:?}: {e}")))?;
         Ok(())
-    })();
+    })
+}
 
+/// Atomically replace `path` with a new file that `build` writes to a sibling
+/// temp path. Field recordings and finished mixes are irreplaceable, so this is
+/// the one write primitive for them: the temp lives in the same directory (same
+/// filesystem ⇒ the final rename is atomic) and **keeps `path`'s extension**
+/// (some writers — notably `lofty` — probe format from the path). On any error
+/// the temp is removed and `path` is left byte-for-byte untouched; on success
+/// the finished temp is `fsync`ed before the rename, so a crash can't leave a
+/// renamed-but-unflushed file. Reused by the bext splice today and by RIFF
+/// INFO / iXML / project-file writers later.
+pub(crate) fn write_atomically(
+    path: &Path,
+    build: impl FnOnce(&Path) -> Result<(), PlaybackError>,
+) -> Result<(), PlaybackError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("punks");
+    let tmp_name = match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!(".{stem}.punks-tmp.{ext}"),
+        None => format!(".{stem}.punks-tmp"),
+    };
+    let tmp_path = dir.join(tmp_name);
+
+    let result = build(&tmp_path).and_then(|()| {
+        let f = File::open(&tmp_path)
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
+        f.sync_all()
+            .map_err(|e| PlaybackError::DecodeError(format!("{tmp_path:?}: {e}")))?;
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: rename failed: {e}")))
+    });
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp_path);
     }
@@ -1346,6 +1365,31 @@ mod tests {
         assert!(write_bext_description(&path, "nope").is_err());
         // Refusing to write must never touch the original file.
         assert_eq!(std::fs::read(&path).unwrap(), v);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_atomically_leaves_original_untouched_on_error() {
+        let original = b"the original bytes".to_vec();
+        let path = temp_wav("atomic_err", &original);
+
+        // A closure that writes a partial temp then fails must roll back cleanly:
+        // original intact, no temp left behind.
+        let result = write_atomically(&path, |tmp| {
+            std::fs::write(tmp, b"half-written garbage").unwrap();
+            Err(PlaybackError::DecodeError("boom".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        // The sibling temp for *this* file must be gone (exact name, so parallel
+        // tests writing their own temps can't make this flaky).
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        let tmp = path
+            .parent()
+            .unwrap()
+            .join(format!(".{stem}.punks-tmp.wav"));
+        assert!(!tmp.exists(), "temp file leaked: {tmp:?}");
         let _ = std::fs::remove_file(&path);
     }
 }
