@@ -35,6 +35,107 @@ pub struct Metadata {
     pub creator: Option<String>,
 }
 
+/// Where a resolved metadata value came from. Aligns with punks-library's
+/// facts + fact_overrides layering:
+///   - `fact_overrides` rows            -> [`Override`](Self::Override)
+///   - `audio_analysis` facts           -> [`Analysis`](Self::Analysis), except
+///     a fact that merely mirrors a container tag (e.g. the cached embedded
+///     Description) which is really [`Embedded`](Self::Embedded)
+///   - a tag read straight off the file -> [`Embedded`](Self::Embedded)
+///   - the future `asset_metadata` layer (notes/pack/author/license) ->
+///     [`Project`](Self::Project)
+///
+/// Carried per field so the UI can label every value with its origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataSource {
+    /// The file's own container tags (BWF bext, ID3, Vorbis comments, …).
+    Embedded,
+    /// A user correction that patches a detected value (`fact_overrides`).
+    Override,
+    /// Produced by an analyzer (`audio_analysis`).
+    Analysis,
+    /// Independently-authored project metadata (the future `asset_metadata`).
+    Project,
+}
+
+impl MetadataSource {
+    /// Resolution rank when several sources supply the same field: highest
+    /// wins. Strongest first — Override > Project > Embedded > Analysis: a user
+    /// correction always wins; deliberately-authored project metadata beats the
+    /// file's own tags; both beat a mere analyzer guess. Generalises
+    /// punks-library's `override ?? analysis` to four layers. Change here if
+    /// product intent differs.
+    fn rank(self) -> u8 {
+        match self {
+            MetadataSource::Override => 3,
+            MetadataSource::Project => 2,
+            MetadataSource::Embedded => 1,
+            MetadataSource::Analysis => 0,
+        }
+    }
+}
+
+/// A value tagged with its provenance — the unit the UI renders per field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sourced<T> {
+    pub value: T,
+    pub source: MetadataSource,
+}
+
+/// [`Metadata`] resolved across sources: each present field carries the
+/// [`MetadataSource`] that supplied it. Built by [`resolve`]. With only the
+/// Embedded backend wired today a single read resolves to all-Embedded; the
+/// override / analysis / project layers slot in through [`resolve`] as their
+/// backends land.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ResolvedMetadata {
+    pub description: Option<Sourced<String>>,
+    pub keywords: Option<Sourced<Vec<String>>>,
+    pub category: Option<Sourced<String>>,
+    pub creator: Option<Sourced<String>>,
+}
+
+/// The winning scalar for one field across `layers`: the value from the
+/// highest-[`rank`](MetadataSource::rank)ed source that actually supplies it.
+fn best(
+    layers: &[(MetadataSource, Metadata)],
+    get: impl Fn(&Metadata) -> Option<&str>,
+) -> Option<Sourced<String>> {
+    layers
+        .iter()
+        .filter_map(|(src, m)| get(m).map(|v| (*src, v)))
+        .max_by_key(|(src, _)| src.rank())
+        .map(|(source, value)| Sourced {
+            value: value.to_string(),
+            source,
+        })
+}
+
+/// Merge per-source metadata into one resolved view: for each field, the value
+/// from the highest-ranked source that supplies it wins and carries that
+/// source. `layers` may be in any order; a `None` scalar or empty keyword list
+/// doesn't count as supplying the field.
+///
+/// ponytail: keywords resolve whole-set from the winning source rather than
+/// unioning across sources — provenance stays unambiguous (one source per shown
+/// value) at the cost of not blending, say, embedded + project keyword sets.
+/// Upgrade to per-keyword provenance if blended sets are ever needed.
+pub fn resolve(layers: &[(MetadataSource, Metadata)]) -> ResolvedMetadata {
+    ResolvedMetadata {
+        description: best(layers, |m| m.description.as_deref()),
+        category: best(layers, |m| m.category.as_deref()),
+        creator: best(layers, |m| m.creator.as_deref()),
+        keywords: layers
+            .iter()
+            .filter(|(_, m)| !m.keywords.is_empty())
+            .max_by_key(|(src, _)| src.rank())
+            .map(|(source, m)| Sourced {
+                value: m.keywords.clone(),
+                source: *source,
+            }),
+    }
+}
+
 /// One logical field, for per-field capability queries and partial writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
@@ -103,6 +204,21 @@ pub trait MetadataBackend {
     /// are set (`Some`/non-empty) in `m`; leaves unmapped fields — and every
     /// tag/chunk/picture Punks doesn't model — untouched.
     fn write(&self, path: &Path, m: &Metadata) -> Result<(), MetadataError>;
+
+    /// The provenance every value this backend reads carries. File-format
+    /// backends read the file's own container tags, so the default is
+    /// [`MetadataSource::Embedded`]; library-backed backends (overrides /
+    /// analysis facts / project metadata) override this.
+    fn source(&self) -> MetadataSource {
+        MetadataSource::Embedded
+    }
+
+    /// [`read`](Self::read) tagged with this backend's [`source`](Self::source)
+    /// as a resolved provenance view — the single-source case. Multi-source
+    /// merges (embedded + override + analysis + project) go through [`resolve`].
+    fn read_resolved(&self, path: &Path) -> Result<ResolvedMetadata, MetadataError> {
+        Ok(resolve(&[(self.source(), self.read(path)?)]))
+    }
 }
 
 /// WAV/BWF via our own atomic bext writer. RF64 (>4 GB) is read-only — its
@@ -252,5 +368,104 @@ impl MetadataBackend for Backend {
             Backend::Wave(b) => b.write(path, m),
             Backend::Lofty(b) => b.write(path, m),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(
+        description: Option<&str>,
+        keywords: &[&str],
+        category: Option<&str>,
+        creator: Option<&str>,
+    ) -> Metadata {
+        Metadata {
+            description: description.map(str::to_string),
+            keywords: keywords.iter().map(|s| s.to_string()).collect(),
+            category: category.map(str::to_string),
+            creator: creator.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn override_outranks_embedded_outranks_analysis() {
+        let r = resolve(&[
+            (MetadataSource::Analysis, meta(Some("guess"), &[], None, None)),
+            (MetadataSource::Embedded, meta(Some("tag"), &[], None, None)),
+            (MetadataSource::Override, meta(Some("fixed"), &[], None, None)),
+        ]);
+        let d = r.description.expect("description resolved");
+        assert_eq!(d.value, "fixed");
+        assert_eq!(d.source, MetadataSource::Override);
+    }
+
+    #[test]
+    fn absent_high_rank_value_does_not_shadow_lower_source() {
+        // Override supplies no description, so Embedded's stands; the override's
+        // category is still picked up for its own field.
+        let r = resolve(&[
+            (MetadataSource::Embedded, meta(Some("tag"), &[], None, None)),
+            (MetadataSource::Override, meta(None, &[], Some("sfx"), None)),
+        ]);
+        let d = r.description.expect("description resolved");
+        assert_eq!((d.value.as_str(), d.source), ("tag", MetadataSource::Embedded));
+        assert_eq!(r.category.expect("category resolved").source, MetadataSource::Override);
+    }
+
+    #[test]
+    fn project_outranks_embedded() {
+        let r = resolve(&[
+            (MetadataSource::Embedded, meta(None, &[], None, Some("file tag"))),
+            (MetadataSource::Project, meta(None, &[], None, Some("pack author"))),
+        ]);
+        let c = r.creator.expect("creator resolved");
+        assert_eq!((c.value.as_str(), c.source), ("pack author", MetadataSource::Project));
+    }
+
+    #[test]
+    fn keywords_resolve_whole_set_from_highest_source() {
+        let r = resolve(&[
+            (MetadataSource::Embedded, meta(None, &["a", "b"], None, None)),
+            (MetadataSource::Override, meta(None, &["c"], None, None)),
+        ]);
+        let k = r.keywords.expect("keywords resolved");
+        assert_eq!(k.value, vec!["c".to_string()]);
+        assert_eq!(k.source, MetadataSource::Override);
+    }
+
+    #[test]
+    fn empty_layers_resolve_to_default() {
+        assert_eq!(resolve(&[]), ResolvedMetadata::default());
+    }
+
+    struct FixedBackend(Metadata, MetadataSource);
+    impl MetadataBackend for FixedBackend {
+        fn capability(&self, _f: Field) -> Capability {
+            Capability::ReadOnly
+        }
+        fn read(&self, _p: &Path) -> Result<Metadata, MetadataError> {
+            Ok(self.0.clone())
+        }
+        fn write(&self, _p: &Path, _m: &Metadata) -> Result<(), MetadataError> {
+            Ok(())
+        }
+        fn source(&self) -> MetadataSource {
+            self.1
+        }
+    }
+
+    #[test]
+    fn read_resolved_tags_every_field_with_backend_source() {
+        let be = FixedBackend(meta(Some("hi"), &[], None, None), MetadataSource::Override);
+        let r = be.read_resolved(Path::new("unused")).expect("read");
+        assert_eq!(r.description.expect("description").source, MetadataSource::Override);
+    }
+
+    #[test]
+    fn file_backends_default_to_embedded_source() {
+        // WaveBackend/LoftyBackend rely on the trait default.
+        assert_eq!(LoftyBackend.source(), MetadataSource::Embedded);
     }
 }
