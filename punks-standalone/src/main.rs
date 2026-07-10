@@ -12,7 +12,6 @@ use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{Key, NamedKey},
     window::Window,
 };
 
@@ -264,14 +263,11 @@ impl ApplicationHandler for App {
 
             WindowEvent::CloseRequested => event_loop.exit(),
 
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let Key::Named(NamedKey::Escape) = event.logical_key {
-                    if event.state.is_pressed() {
-                        event_loop.exit();
-                    }
-                }
-            }
-
+            // Deliberately no Escape-to-quit: it's the key users reach for to
+            // dismiss a popup (tag editor, override editor, rebind prompt) —
+            // imgui already closes those on Escape via the handle_event call
+            // below. Binding it to app exit here made that muscle-memory
+            // keystroke close the whole app instead.
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 im.context.io_mut().update_delta_time(now - im.last_frame);

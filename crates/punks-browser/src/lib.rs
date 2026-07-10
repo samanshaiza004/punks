@@ -94,6 +94,73 @@ impl From<PlaybackError> for BrowserError {
     }
 }
 
+/// A fact-based filter on the correctable facts (instrument/key/bpm range),
+/// ANDed with the tag filter and text search exactly like the tag filter is.
+/// `None`/empty means "no constraint" for that field.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FactFilter {
+    pub instrument: Option<String>,
+    pub key: Option<String>,
+    pub bpm_min: Option<f32>,
+    pub bpm_max: Option<f32>,
+}
+
+impl FactFilter {
+    pub fn is_empty(&self) -> bool {
+        self.instrument.is_none()
+            && self.key.is_none()
+            && self.bpm_min.is_none()
+            && self.bpm_max.is_none()
+    }
+}
+
+/// Distinct resolved values for the correctable facts across an active
+/// library's present assets, with usage counts — the sidebar's facet-filter
+/// data, mirroring `TagCount` for tags. Recomputed from the in-memory
+/// analysis/override caches (no SQL) whenever they change.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FactFacets {
+    /// Resolved instrument -> asset count, sorted by count desc then name.
+    pub instruments: Vec<(String, usize)>,
+    /// Resolved key -> asset count, same ordering.
+    pub keys: Vec<(String, usize)>,
+    /// (min, max) resolved BPM across assets that have one, if any.
+    pub bpm_range: Option<(f32, f32)>,
+}
+
+/// Whether an asset's resolved facts satisfy `filter`. Pure (operates on
+/// already-resolved values, not caches) so it's testable without a library.
+fn fact_filter_matches(
+    instrument: Option<&Fact>,
+    key: Option<&Fact>,
+    bpm: Option<&Fact>,
+    filter: &FactFilter,
+) -> bool {
+    if let Some(want) = &filter.instrument {
+        if !matches!(instrument, Some(Fact::Text(s)) if s == want) {
+            return false;
+        }
+    }
+    if let Some(want) = &filter.key {
+        if !matches!(key, Some(Fact::Text(s)) if s == want) {
+            return false;
+        }
+    }
+    if filter.bpm_min.is_some() || filter.bpm_max.is_some() {
+        let Some(Fact::Real(b)) = bpm else {
+            return false;
+        };
+        let b = *b as f32;
+        if filter.bpm_min.is_some_and(|min| b < min) {
+            return false;
+        }
+        if filter.bpm_max.is_some_and(|max| b > max) {
+            return false;
+        }
+    }
+    true
+}
+
 /// One tab's navigation context: its own directory history, selection, and
 /// search. Playback is global and lives on `SampleBrowser`, not here.
 #[derive(Default)]
@@ -117,6 +184,9 @@ struct TabState {
     library_idx: Option<usize>,
     /// AND tag filter (active-library tag ids).
     tag_filter: Vec<i64>,
+    /// Fact-based filter (instrument/key/bpm range), ANDed with `tag_filter`
+    /// and text search exactly the same way.
+    fact_filter: FactFilter,
     /// The marked set for batch operations (batch tag today; batch override/
     /// metadata are next-pass consumers). `selected` above stays the *cursor* —
     /// what keyboard nav moves and what plays — and is not itself part of this
@@ -147,6 +217,10 @@ struct LibraryContext {
     /// facts above; user data, never regenerated. `None` means the metric is
     /// marked explicitly absent (hides the detected guess, if any).
     overrides: HashMap<PathBuf, HashMap<String, Option<Fact>>>,
+    /// Distinct resolved instrument/key values + counts, and the BPM range,
+    /// across `assets` — the sidebar's fact-filter facets. Recomputed
+    /// whenever `analysis`/`overrides` change (see `recompute_facets`).
+    facets: FactFacets,
     scanning: bool,
     scan_rx: Option<mpsc::Receiver<Result<ScanSummary, LibraryError>>>,
     scan_progress: Option<Arc<ScanProgress>>,
@@ -231,6 +305,48 @@ impl LibraryContext {
             }
             Err(e) => log::warn!("library override reload: {e}"),
         }
+        self.recompute_facets();
+    }
+
+    /// Rebuild `facets` from the current in-memory `analysis`/`overrides`
+    /// caches (no SQL — pure aggregation over what's already loaded). Called
+    /// after a full `reload()` and, in `poll()`, once per frame for any
+    /// library that had at least one analysis completion land that frame
+    /// (batched, not per-asset, so a fast worker finishing many files at once
+    /// can't turn this into a per-completion O(library size) scan).
+    fn recompute_facets(&mut self) {
+        let mut instruments: HashMap<String, usize> = HashMap::new();
+        let mut keys: HashMap<String, usize> = HashMap::new();
+        let mut bpm_min = f32::MAX;
+        let mut bpm_max = f32::MIN;
+        let mut has_bpm = false;
+        for e in &self.assets {
+            let path = &e.path;
+            let detected = self.analysis.get(path);
+            let overrides = self.overrides.get(path);
+            if let Some(Fact::Text(s)) = resolve_fact(detected, overrides, "instrument") {
+                *instruments.entry(s).or_insert(0) += 1;
+            }
+            if let Some(Fact::Text(s)) = resolve_fact(detected, overrides, "key") {
+                *keys.entry(s).or_insert(0) += 1;
+            }
+            if let Some(Fact::Real(b)) = resolve_fact(detected, overrides, "bpm") {
+                let b = b as f32;
+                has_bpm = true;
+                bpm_min = bpm_min.min(b);
+                bpm_max = bpm_max.max(b);
+            }
+        }
+        let sorted = |m: HashMap<String, usize>| {
+            let mut v: Vec<(String, usize)> = m.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            v
+        };
+        self.facets = FactFacets {
+            instruments: sorted(instruments),
+            keys: sorted(keys),
+            bpm_range: has_bpm.then_some((bpm_min, bpm_max)),
+        };
     }
 }
 
@@ -294,6 +410,10 @@ fn detected_fact_of(report: &AnalysisReport, metric: &str) -> Option<Fact> {
 /// explicitly marked absent (`None`) hides the metric even if detected guessed
 /// something — "this sound has no key" is different from "not corrected yet".
 /// Pure so it's testable without a `SampleBrowser` or a real library.
+///
+/// This is the live two-layer resolver; `punks_playback::metadata::resolve`
+/// is a separate four-source (`MetadataSource`) resolver with no callers yet
+/// — see its doc comment for why the two aren't merged.
 fn resolve_fact(
     detected: Option<&AnalysisReport>,
     overrides: Option<&HashMap<String, Option<Fact>>>,
@@ -330,6 +450,20 @@ fn selection_after_range(anchor: Option<usize>, index: usize) -> Vec<usize> {
         (index, anchor)
     };
     (lo..=hi).collect()
+}
+
+/// Index of the most-specific (longest) root in `roots` that `dir` is a
+/// descendant of, if any — mirrors `library_for_path`'s longest-match rule.
+/// Pure so it's testable without a real `Library`/SQLite state: the bug this
+/// guards is picking whichever ancestor library happened to be opened first
+/// instead of the closest one when libraries are nested.
+fn longest_containing_root_index(dir: &Path, roots: &[PathBuf]) -> Option<usize> {
+    roots
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| dir.starts_with(r))
+        .max_by_key(|(_, r)| r.as_os_str().len())
+        .map(|(i, _)| i)
 }
 
 /// Bridge the other way: stored `Fact`s → a typed report for the UI cache. Blob
@@ -631,8 +765,8 @@ impl SampleBrowser {
                     match result {
                         Ok(s) => {
                             log::info!(
-                                "library scan {}: {} added, {} moved, {} modified, {} missing, {} unchanged",
-                                ctx.root.display(), s.added, s.moved, s.modified, s.missing, s.unchanged
+                                "library scan {}: {} added, {} moved, {} modified, {} missing, {} unchanged, {} errors",
+                                ctx.root.display(), s.added, s.moved, s.modified, s.missing, s.unchanged, s.errors
                             );
                             ctx.reload();
                             scanned.push(i);
@@ -671,12 +805,23 @@ impl SampleBrowser {
         }
 
         // Fold in finished analysis, capped per frame so a fast worker can't
-        // stall a frame. Each completion refreshes just that asset's cache.
+        // stall a frame. Each completion refreshes just that asset's cache;
+        // facets are recomputed at most once per touched library per frame
+        // (not per completion), so a burst of finishes can't turn this into
+        // repeated O(library size) work.
+        let mut facets_dirty: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for _ in 0..ANALYSIS_DRAIN_PER_FRAME {
             match self.analysis_done_rx.try_recv() {
-                Ok(path) => self.apply_analysis_done(&path),
+                Ok(path) => {
+                    if let Some(i) = self.apply_analysis_done(&path) {
+                        facets_dirty.insert(i);
+                    }
+                }
                 Err(_) => break,
             }
+        }
+        for i in facets_dirty {
+            self.libraries[i].recompute_facets();
         }
 
         self.poll_full_peaks();
@@ -713,8 +858,9 @@ impl SampleBrowser {
             tab.history = vec![path.to_path_buf()];
             tab.listing = Some(listing);
             tab.selected = None;
-            // Browse is a fresh start for this tab: drop the tag filter too.
+            // Browse is a fresh start for this tab: drop the filters too.
             tab.tag_filter.clear();
+            tab.fact_filter = FactFilter::default();
         }
         self.last_error = None;
         self.clear_search();
@@ -1013,39 +1159,51 @@ impl SampleBrowser {
         self.library_for_path(path)?.descriptions.get(path).cloned()
     }
 
-    /// Whether [`set_description`](Self::set_description) can write to `path`:
-    /// the metadata backend must support writing Description (WAV/BWF via our own
-    /// writer, or a lofty-handled format), and we must be inside a library to
-    /// cache the result.
-    pub fn can_write_description(&self, path: &Path) -> bool {
-        self.library_for_path(path).is_some()
-            && Backend::for_path(path)
-                .capability(Field::Description)
-                .can_write()
+    /// Whether [`set_description`](Self::set_description) can write to `path`
+    /// (WAV/BWF via our own writer, or a lofty-handled format), and the byte
+    /// limit it will be truncated to if the format bounds it (e.g. WAV's bext,
+    /// fixed at 255 bytes; `None` = unbounded or not writable). Combined into
+    /// one call so a caller needing both doesn't build the backend — a
+    /// file-header read for WAV — twice; callers that poll this every frame
+    /// (the UI) should still cache the result themselves, since it's still one
+    /// file read per call.
+    pub fn description_write_status(&self, path: &Path) -> (bool, Option<usize>) {
+        if self.library_for_path(path).is_none() {
+            return (false, None);
+        }
+        let backend = Backend::for_path(path);
+        (
+            backend.capability(Field::Description).can_write(),
+            backend.max_len(Field::Description),
+        )
     }
 
     /// Write `description` into `path`'s embedded metadata (the file is
     /// authoritative) as a read-modify-write that preserves everything else,
     /// then refresh the cached fact so the UI reflects it without waiting for the
-    /// next analysis pass. No-op outside a library or when the format can't write
-    /// Description; sets `last_error` on failure.
+    /// next analysis pass. The stored/cached copy is normalized (e.g. truncated
+    /// to WAV's 255-byte bext limit) exactly as the backend will store it, so the
+    /// cache never disagrees with what's actually on disk. No-op outside a
+    /// library or when the format can't write Description; sets `last_error` on
+    /// failure.
     pub fn set_description(&mut self, path: &Path, description: &str) {
         let Some(li) = self.library_index_for(path) else {
             return;
         };
         let backend = Backend::for_path(path);
+        let normalized = backend.normalize(Field::Description, description);
         let mut meta = backend.read(path).unwrap_or_default();
-        meta.description = Some(description.to_string());
+        meta.description = Some(normalized.clone());
         if let Err(e) = backend.write(path, &meta) {
             self.last_error = Some(e.to_string());
             return;
         }
-        if let Err(e) = self.libraries[li].lib.set_description(path, description) {
+        if let Err(e) = self.libraries[li].lib.set_description(path, &normalized) {
             self.last_error = Some(e.to_string());
         }
         self.libraries[li]
             .descriptions
-            .insert(path.to_path_buf(), description.to_string());
+            .insert(path.to_path_buf(), normalized);
     }
 
     /// Index of the most-specific library owning `path` (mutable-friendly twin of
@@ -1079,18 +1237,12 @@ impl SampleBrowser {
     }
 
     /// Fold one finished analysis into its library's cache, refreshing just that
-    /// asset so the next draw reflects it. Picks the most-specific owning library.
-    fn apply_analysis_done(&mut self, path: &Path) {
-        let Some(i) = self
-            .libraries
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| path.starts_with(&c.root))
-            .max_by_key(|(_, c)| c.root.as_os_str().len())
-            .map(|(i, _)| i)
-        else {
-            return;
-        };
+    /// asset so the next draw reflects it. Picks the most-specific owning
+    /// library and returns its index (so callers batching per-library follow-up
+    /// work, e.g. facet recompute, know which libraries were touched this
+    /// frame); `None` if `path` isn't inside any open library.
+    fn apply_analysis_done(&mut self, path: &Path) -> Option<usize> {
+        let i = self.library_index_for(path)?;
         let ctx = &mut self.libraries[i];
         match ctx.lib.facts(path) {
             Ok(facts) => {
@@ -1108,6 +1260,7 @@ impl SampleBrowser {
             }
             Err(e) => log::warn!("analysis refresh {path:?}: {e}"),
         }
+        Some(i)
     }
 
     /// The `(start, duration)` in source seconds the displayed waveform spans,
@@ -1198,24 +1351,44 @@ impl SampleBrowser {
     // --- Library / tags -----------------------------------------------------
 
     /// Rebuild the active display list from (raw text results) AND (tag
-    /// filter). Called on state changes only — never per frame.
+    /// filter) AND (fact filter). Called on state changes only — never per
+    /// frame.
     fn rebuild_tab_results(&mut self, tab_idx: usize) {
         let filter = self.tabs[tab_idx].tag_filter.clone();
+        let fact_filter = self.tabs[tab_idx].fact_filter.clone();
         let lib_idx = self.tabs[tab_idx].library_idx;
+        let any_filter = !filter.is_empty() || !fact_filter.is_empty();
 
-        let display: Option<Vec<FileEntry>> = match (lib_idx, filter.is_empty()) {
-            (_, true) | (None, _) => self.tabs[tab_idx].raw_results.clone(),
-            (Some(li), false) => {
+        let display: Option<Vec<FileEntry>> = match (lib_idx, any_filter) {
+            (_, false) | (None, _) => self.tabs[tab_idx].raw_results.clone(),
+            (Some(li), true) => {
                 let ctx = &self.libraries[li];
                 let passes = |path: &Path| {
-                    ctx.asset_tags
-                        .get(path)
-                        .is_some_and(|ids| filter.iter().all(|t| ids.contains(t)))
+                    let tags_ok = filter.is_empty()
+                        || ctx
+                            .asset_tags
+                            .get(path)
+                            .is_some_and(|ids| filter.iter().all(|t| ids.contains(t)));
+                    let facts_ok = fact_filter.is_empty()
+                        || fact_filter_matches(
+                            resolve_fact(
+                                ctx.analysis.get(path),
+                                ctx.overrides.get(path),
+                                "instrument",
+                            )
+                            .as_ref(),
+                            resolve_fact(ctx.analysis.get(path), ctx.overrides.get(path), "key")
+                                .as_ref(),
+                            resolve_fact(ctx.analysis.get(path), ctx.overrides.get(path), "bpm")
+                                .as_ref(),
+                            &fact_filter,
+                        );
+                    tags_ok && facts_ok
                 };
                 let base: Vec<FileEntry> = match &self.tabs[tab_idx].raw_results {
-                    // Text search active: AND the tag filter into its results.
+                    // Text search active: AND the tag/fact filters into its results.
                     Some(raw) => raw.iter().filter(|e| passes(&e.path)).cloned().collect(),
-                    // Tags only: a library-wide query shown as results.
+                    // Filter only: a library-wide query shown as results.
                     None => ctx
                         .assets
                         .iter()
@@ -1231,6 +1404,7 @@ impl SampleBrowser {
         if tab.library_idx.is_none() {
             // A filter without a library is meaningless.
             tab.tag_filter.clear();
+            tab.fact_filter = FactFilter::default();
         }
         tab.search_results = display;
         match &tab.search_results {
@@ -1256,21 +1430,40 @@ impl SampleBrowser {
             let tab = self.active_mut();
             tab.library_idx = idx;
             tab.tag_filter.clear();
+            tab.fact_filter = FactFilter::default();
             let i = self.active_tab;
             self.rebuild_tab_results(i);
         }
     }
 
     fn find_or_open_library(&mut self, dir: &Path) -> Option<usize> {
-        if let Some(i) = self.libraries.iter().position(|c| dir.starts_with(&c.root)) {
-            return Some(i);
+        // Longest-root match among already-open libraries, mirroring
+        // `library_for_path` — a nested library must win over an already-open
+        // ancestor, not just whichever happened to be opened first.
+        let open_roots: Vec<PathBuf> = self.libraries.iter().map(|c| c.root.clone()).collect();
+        let open_match = longest_containing_root_index(dir, &open_roots);
+        let open_root_len = open_match
+            .map(|i| self.libraries[i].root.as_os_str().len())
+            .unwrap_or(0);
+
+        // A closer `.punks` root can exist on disk without being open yet
+        // (e.g. a nested library created after its parent was already
+        // attached) — open it instead when it's more specific than what's
+        // already open.
+        let on_disk = Library::find_root(dir);
+        let more_specific_on_disk = on_disk
+            .as_ref()
+            .is_some_and(|r| r.as_os_str().len() > open_root_len);
+        if !more_specific_on_disk {
+            return open_match;
         }
-        let root = Library::find_root(dir)?;
+
+        let root = on_disk.unwrap();
         match Library::open(&root) {
             Ok(lib) => Some(self.push_library(lib)),
             Err(e) => {
                 log::warn!("failed to open library at {}: {e}", root.display());
-                None
+                open_match
             }
         }
     }
@@ -1288,6 +1481,7 @@ impl SampleBrowser {
             analysis: HashMap::new(),
             descriptions: HashMap::new(),
             overrides: HashMap::new(),
+            facets: FactFacets::default(),
             scanning: true,
             scan_rx: None,
             scan_progress: None,
@@ -1359,6 +1553,7 @@ impl SampleBrowser {
                 Some(x) if x == li => {
                     tab.library_idx = None;
                     tab.tag_filter.clear();
+                    tab.fact_filter = FactFilter::default();
                 }
                 Some(x) if x > li => tab.library_idx = Some(x - 1),
                 _ => {}
@@ -1400,6 +1595,47 @@ impl SampleBrowser {
 
     pub fn clear_tag_filter(&mut self) {
         self.active_mut().tag_filter.clear();
+        let i = self.active_tab;
+        self.rebuild_tab_results(i);
+    }
+
+    /// Distinct resolved instrument/key values (with counts) and the BPM
+    /// range across the active library's present assets — the sidebar's
+    /// fact-filter facets. `None` outside a library.
+    pub fn library_fact_facets(&self) -> Option<&FactFacets> {
+        self.active().library_idx.map(|i| &self.libraries[i].facets)
+    }
+
+    pub fn fact_filter(&self) -> &FactFilter {
+        &self.active().fact_filter
+    }
+
+    /// Filter by resolved instrument, or clear that constraint with `None`.
+    pub fn set_instrument_filter(&mut self, instrument: Option<String>) {
+        self.active_mut().fact_filter.instrument = instrument;
+        let i = self.active_tab;
+        self.rebuild_tab_results(i);
+    }
+
+    /// Filter by resolved key, or clear that constraint with `None`.
+    pub fn set_key_filter(&mut self, key: Option<String>) {
+        self.active_mut().fact_filter.key = key;
+        let i = self.active_tab;
+        self.rebuild_tab_results(i);
+    }
+
+    /// Filter by resolved BPM range (inclusive); `None` on either bound
+    /// leaves that side unconstrained.
+    pub fn set_bpm_filter(&mut self, min: Option<f32>, max: Option<f32>) {
+        let tab = self.active_mut();
+        tab.fact_filter.bpm_min = min;
+        tab.fact_filter.bpm_max = max;
+        let i = self.active_tab;
+        self.rebuild_tab_results(i);
+    }
+
+    pub fn clear_fact_filter(&mut self) {
+        self.active_mut().fact_filter = FactFilter::default();
         let i = self.active_tab;
         self.rebuild_tab_results(i);
     }
@@ -1666,11 +1902,13 @@ fn adjust_active_after_reorder(active: usize, from: usize, to: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjust_active_after_close, adjust_active_after_reorder, resolve_fact, restore_tab_plan,
-        selection_after_range, selection_after_toggle, AnalysisReport, Fact,
+        adjust_active_after_close, adjust_active_after_reorder, fact_filter_matches,
+        longest_containing_root_index, resolve_fact, restore_tab_plan, selection_after_range,
+        selection_after_toggle, AnalysisReport, Fact, FactFacets, FactFilter, LibraryContext,
     };
+    use punks_library::Library;
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn resolve_fact_prefers_user_over_analysis() {
@@ -1730,6 +1968,39 @@ mod tests {
         assert_eq!(selection_after_range(None, 4), vec![4]);
         // Same start and end.
         assert_eq!(selection_after_range(Some(3), 3), vec![3]);
+    }
+
+    #[test]
+    fn longest_containing_root_index_prefers_most_specific() {
+        let parent = PathBuf::from("/lib");
+        let nested = PathBuf::from("/lib/nested");
+        let unrelated = PathBuf::from("/other");
+        let roots = vec![parent.clone(), nested.clone(), unrelated.clone()];
+
+        // A dir under both parent and nested must pick nested (index 1) — the
+        // regression this guards picked whichever root was opened first,
+        // which could be the ancestor even when a closer match is open too.
+        assert_eq!(
+            longest_containing_root_index(Path::new("/lib/nested/sub"), &roots),
+            Some(1)
+        );
+        // Order of `roots` must not matter: reversed is [unrelated, nested,
+        // parent], so `nested` is now at index 1 — same winner, new position.
+        let reversed: Vec<PathBuf> = roots.iter().rev().cloned().collect();
+        assert_eq!(
+            longest_containing_root_index(Path::new("/lib/nested/sub"), &reversed),
+            Some(1)
+        );
+        // Only the parent contains this one.
+        assert_eq!(
+            longest_containing_root_index(Path::new("/lib/sub"), &roots),
+            Some(0)
+        );
+        // No open root contains it.
+        assert_eq!(
+            longest_containing_root_index(Path::new("/elsewhere"), &roots),
+            None
+        );
     }
 
     /// A couple of real temp directories plus a path that doesn't exist, for
@@ -1837,5 +2108,161 @@ mod tests {
     fn reorder_non_active_right_to_left_before_active() {
         // [a,b,c,d], active=1(b), move d:3->0 => [d,a,b,c], b now at 2
         assert_eq!(adjust_active_after_reorder(1, 3, 0), 2);
+    }
+
+    #[test]
+    fn fact_filter_is_empty_detects_any_set_field() {
+        assert!(FactFilter::default().is_empty());
+        assert!(!FactFilter {
+            instrument: Some("kick".into()),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!FactFilter {
+            bpm_min: Some(1.0),
+            ..Default::default()
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn fact_filter_matches_instrument_key_and_bpm_range() {
+        let no_filter = FactFilter::default();
+        assert!(fact_filter_matches(None, None, None, &no_filter));
+
+        let instr_filter = FactFilter {
+            instrument: Some("kick".into()),
+            ..Default::default()
+        };
+        assert!(fact_filter_matches(
+            Some(&Fact::Text("kick".into())),
+            None,
+            None,
+            &instr_filter
+        ));
+        assert!(!fact_filter_matches(
+            Some(&Fact::Text("snare".into())),
+            None,
+            None,
+            &instr_filter
+        ));
+        // No detected instrument at all -> excluded, not vacuously matched.
+        assert!(!fact_filter_matches(None, None, None, &instr_filter));
+
+        let bpm_filter = FactFilter {
+            bpm_min: Some(120.0),
+            bpm_max: Some(130.0),
+            ..Default::default()
+        };
+        assert!(fact_filter_matches(
+            None,
+            None,
+            Some(&Fact::Real(125.0)),
+            &bpm_filter
+        ));
+        assert!(!fact_filter_matches(
+            None,
+            None,
+            Some(&Fact::Real(140.0)),
+            &bpm_filter
+        ));
+        assert!(!fact_filter_matches(None, None, None, &bpm_filter));
+
+        // Combined: every set constraint must hold.
+        let combined = FactFilter {
+            instrument: Some("kick".into()),
+            bpm_min: Some(120.0),
+            ..Default::default()
+        };
+        assert!(fact_filter_matches(
+            Some(&Fact::Text("kick".into())),
+            None,
+            Some(&Fact::Real(125.0)),
+            &combined
+        ));
+        assert!(!fact_filter_matches(
+            Some(&Fact::Text("kick".into())),
+            None,
+            Some(&Fact::Real(100.0)),
+            &combined
+        ));
+    }
+
+    #[test]
+    fn recompute_facets_aggregates_resolved_instrument_key_bpm() {
+        // LibraryContext needs a real Library (SQLite) but no audio device, so
+        // — unlike SampleBrowser — it's constructible directly in a test. This
+        // exercises recompute_facets end to end: resolve_fact (override ??
+        // detected) feeding the aggregation and sort that `library_fact_facets`
+        // hands the sidebar.
+        let dir = std::env::temp_dir().join(format!(
+            "punks2_facets_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.wav");
+        let b = dir.join("b.wav");
+        let c = dir.join("c.wav");
+        std::fs::write(&a, b"A").unwrap();
+        std::fs::write(&b, b"B").unwrap();
+        std::fs::write(&c, b"C").unwrap();
+
+        let mut lib = Library::create(&dir).unwrap();
+        lib.reconcile(&punks_library::scan_files(&dir).unwrap())
+            .unwrap();
+
+        // a: detected kick/120bpm. b: detected kick/130bpm, but the user
+        // overrode its instrument to "snare" — the facet count must reflect
+        // the override, not the raw detection. c: no facts at all.
+        lib.store_analysis(
+            &a,
+            &[
+                ("instrument", Fact::Text("kick".into())),
+                ("key", Fact::Text("Am".into())),
+                ("bpm", Fact::Real(120.0)),
+            ],
+            0,
+        )
+        .unwrap();
+        lib.store_analysis(
+            &b,
+            &[
+                ("instrument", Fact::Text("kick".into())),
+                ("bpm", Fact::Real(130.0)),
+            ],
+            0,
+        )
+        .unwrap();
+        lib.set_override(&b, "instrument", &Fact::Text("snare".into()))
+            .unwrap();
+
+        let mut ctx = LibraryContext {
+            root: dir.clone(),
+            lib,
+            tags: Vec::new(),
+            assets: Vec::new(),
+            asset_tags: HashMap::new(),
+            analysis: HashMap::new(),
+            descriptions: HashMap::new(),
+            overrides: HashMap::new(),
+            facets: FactFacets::default(),
+            scanning: false,
+            scan_rx: None,
+            scan_progress: None,
+        };
+        ctx.reload();
+
+        assert_eq!(
+            ctx.facets.instruments,
+            vec![("kick".to_string(), 1), ("snare".to_string(), 1)]
+        );
+        assert_eq!(ctx.facets.keys, vec![("Am".to_string(), 1)]);
+        assert_eq!(ctx.facets.bpm_range, Some((120.0, 130.0)));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

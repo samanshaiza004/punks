@@ -264,6 +264,23 @@ pub struct BrowserPanel {
     /// previous one's unsaved edit into the new one).
     description_buf: String,
     description_buf_path: Option<PathBuf>,
+    /// The value `description_buf` was last synced from (cache, or the bext
+    /// fallback). `description_buf != description_seed` means the user has
+    /// actually edited the field — used to (a) safely re-sync from the cache
+    /// if it fills in later without clobbering an in-progress edit, and (b)
+    /// make Save/Enter a no-op when the field was never touched, so a blank
+    /// buffer shown only because the cache hadn't loaded yet can't blank out
+    /// real content on disk.
+    description_seed: String,
+    /// `(can_write, byte_limit)` for `description_buf_path`, from
+    /// `SampleBrowser::description_write_status` — cached because that call
+    /// reads the file header (for WAV) and would otherwise run every frame.
+    description_write_status: (bool, Option<usize>),
+    /// BPM range filter edit buffers, resynced from `browser.fact_filter()`
+    /// on tab switch (like `search_buf`) so they don't leak one tab's
+    /// in-progress edit into another.
+    bpm_min: f32,
+    bpm_max: f32,
 }
 
 /// The correctable detected facts the override popup edits, as
@@ -302,6 +319,10 @@ impl BrowserPanel {
             error_buf: String::new(),
             description_buf: String::new(),
             description_buf_path: None,
+            description_seed: String::new(),
+            description_write_status: (false, None),
+            bpm_min: 0.0,
+            bpm_max: 0.0,
         }
     }
 
@@ -328,6 +349,9 @@ impl BrowserPanel {
             self.last_typed_query = self.search_buf.clone();
             self.last_searched_query = self.search_buf.clone();
             self.query_change_time = Instant::now();
+            let f = browser.fact_filter();
+            self.bpm_min = f.bpm_min.unwrap_or(0.0);
+            self.bpm_max = f.bpm_max.unwrap_or(0.0);
             self.last_active_tab = browser.active_tab();
         }
 
@@ -644,20 +668,39 @@ impl BrowserPanel {
         // loaded file so the layout doesn't jump.
         {
             let current_path = browser.current_file().map(Path::to_path_buf);
+            let seed_from = |browser: &SampleBrowser| -> Option<String> {
+                browser.current_description().or_else(|| {
+                    browser
+                        .current_track_info()
+                        .and_then(|i| i.metadata.description.clone())
+                })
+            };
             if self.description_buf_path != current_path {
-                self.description_buf = browser
-                    .current_description()
-                    .or_else(|| {
-                        browser
-                            .current_track_info()
-                            .and_then(|i| i.metadata.description.clone())
-                    })
-                    .unwrap_or_default();
+                // New file: recompute write status once (a file-header read for
+                // WAV — must not run every frame) and reseed unconditionally.
+                self.description_write_status = current_path
+                    .as_deref()
+                    .map(|p| browser.description_write_status(p))
+                    .unwrap_or((false, None));
+                let seed = seed_from(browser).unwrap_or_default();
+                self.description_buf = seed.clone();
+                self.description_seed = seed;
                 self.description_buf_path = current_path.clone();
+            } else if self.description_buf == self.description_seed {
+                // Untouched: safe to re-sync from the cache if it just filled in
+                // (e.g. the analysis worker finished after the field loaded
+                // blank) — an edit in progress is never clobbered, since that
+                // case fails the buf == seed check above.
+                if let Some(seed) = seed_from(browser) {
+                    if seed != self.description_seed {
+                        self.description_buf = seed.clone();
+                        self.description_seed = seed;
+                    }
+                }
             }
 
             if let Some(path) = current_path {
-                let can_write = browser.can_write_description(&path);
+                let (can_write, max_len) = self.description_write_status;
                 let w = ui.content_region_avail()[0] - 60.0;
                 ui.set_next_item_width(w.max(80.0));
                 let entered = ui
@@ -668,12 +711,30 @@ impl BrowserPanel {
                     .build();
                 ui.same_line();
                 let save = ui.button("Save");
+                let dirty = self.description_buf != self.description_seed;
                 if !can_write {
                     if ui.is_item_hovered() {
                         ui.tooltip_text("Description not writable for this file (inside a library only; RF64 is read-only)");
                     }
-                } else if entered || save {
-                    browser.set_description(&path, self.description_buf.trim());
+                } else if (entered || save) && dirty {
+                    let trimmed = self.description_buf.trim().to_string();
+                    browser.set_description(&path, &trimmed);
+                    // Re-seed from the cache browser.set_description just
+                    // updated, so the buffer reflects any backend truncation
+                    // (e.g. WAV's 255-byte bext limit) instead of the raw input.
+                    let seed = browser.current_description().unwrap_or(trimmed);
+                    self.description_buf = seed.clone();
+                    self.description_seed = seed;
+                } else if can_write && dirty {
+                    if let Some(max) = max_len {
+                        if self.description_buf.len() > max {
+                            ui.same_line();
+                            ui.text_colored(
+                                [0.9, 0.7, 0.3, 1.0],
+                                format!("will truncate to {max} bytes"),
+                            );
+                        }
+                    }
                 }
 
                 match browser.current_track_info() {
@@ -987,7 +1048,83 @@ impl BrowserPanel {
                         browser.clear_tag_filter();
                     }
                 }
+                self.draw_fact_filters(ui, browser);
                 self.draw_delete_library(ui, browser);
+            }
+        }
+    }
+
+    /// Sidebar facet filters over the correctable facts (instrument/key/bpm
+    /// range) — the same "click to constrain the file list" pattern as the
+    /// tag filter above it, ANDed with it. Values come from `FactFacets`,
+    /// recomputed from the in-memory analysis caches (no SQL), so this is
+    /// zero-cost per frame beyond reading an already-built `Vec`.
+    fn draw_fact_filters(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+        let Some(facets) = browser.library_fact_facets().cloned() else {
+            return;
+        };
+        if facets.instruments.is_empty() && facets.keys.is_empty() && facets.bpm_range.is_none() {
+            return;
+        }
+        let filter = browser.fact_filter().clone();
+
+        ui.spacing();
+        ui.separator();
+        ui.text_disabled("FACTS");
+
+        if !facets.instruments.is_empty() {
+            ui.spacing();
+            ui.text_disabled("Instrument");
+            for (name, count) in &facets.instruments {
+                let selected = filter.instrument.as_deref() == Some(name.as_str());
+                let label = format!("{}  ({})##facinst{}", capitalize(name), count, name);
+                if ui.selectable_config(&label).selected(selected).build() {
+                    browser.set_instrument_filter(if selected { None } else { Some(name.clone()) });
+                }
+            }
+        }
+
+        if !facets.keys.is_empty() {
+            ui.spacing();
+            ui.text_disabled("Key");
+            for (name, count) in &facets.keys {
+                let selected = filter.key.as_deref() == Some(name.as_str());
+                let label = format!("{name}  ({count})##fackey{name}");
+                if ui.selectable_config(&label).selected(selected).build() {
+                    browser.set_key_filter(if selected { None } else { Some(name.clone()) });
+                }
+            }
+        }
+
+        if let Some((lo, hi)) = facets.bpm_range {
+            ui.spacing();
+            ui.text_disabled(format!("BPM ({lo:.0}-{hi:.0})"));
+            let mut active = filter.bpm_min.is_some() || filter.bpm_max.is_some();
+            if ui.checkbox("Filter by BPM##bpmfilter", &mut active) {
+                if active {
+                    self.bpm_min = filter.bpm_min.unwrap_or(lo);
+                    self.bpm_max = filter.bpm_max.unwrap_or(hi);
+                    browser.set_bpm_filter(Some(self.bpm_min), Some(self.bpm_max));
+                } else {
+                    browser.set_bpm_filter(None, None);
+                }
+            }
+            if active {
+                ui.set_next_item_width(70.0);
+                let mut changed = ui.input_float("Min##bpmmin", &mut self.bpm_min).build();
+                ui.same_line();
+                ui.set_next_item_width(70.0);
+                changed |= ui.input_float("Max##bpmmax", &mut self.bpm_max).build();
+                if changed {
+                    browser.set_bpm_filter(Some(self.bpm_min), Some(self.bpm_max));
+                }
+            }
+        }
+
+        if !filter.is_empty() {
+            ui.spacing();
+            if ui.small_button("Clear fact filter") {
+                browser.clear_fact_filter();
             }
         }
     }

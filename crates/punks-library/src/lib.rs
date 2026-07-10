@@ -88,6 +88,12 @@ pub struct ScanSummary {
     pub modified: usize,
     pub missing: usize,
     pub unchanged: usize,
+    /// Files skipped this pass because hashing failed (permission denied,
+    /// removed mid-scan, exclusively locked by another app, …). Left exactly
+    /// as they were in the DB — not marked missing — so they're retried
+    /// automatically next scan rather than losing their tags over a
+    /// transient read failure.
+    pub errors: usize,
 }
 
 /// Set WAL mode, retrying on contention. `busy_timeout` does not cover this
@@ -656,8 +662,14 @@ impl Library {
 
     /// Enqueue a `pending` job for every present asset at `pipeline_version`,
     /// in one set-based statement. Idempotent: re-queues an asset only if its
-    /// stored pipeline version differs or it isn't already `done`, so it cheaply
-    /// backfills legacy assets and picks up newly-scanned ones on every scan.
+    /// stored pipeline version differs, or its existing job never finished
+    /// (`pending`/`running`) — so it cheaply backfills legacy assets and picks
+    /// up newly-scanned ones on every scan. A job marked `error` is
+    /// deliberately left alone here (see [`fail_analysis`](Self::fail_analysis)):
+    /// re-hashing and re-decoding a permanently undecodable file on every
+    /// single scan wastes worker time for no benefit. It gets a fresh attempt
+    /// when the pipeline version bumps (the analyzer itself changed) — until
+    /// then, only an explicit retry (not implemented yet) un-sticks it.
     pub fn enqueue_all(&self, pipeline_version: u32) -> Result<(), LibraryError> {
         self.conn.execute(
             "INSERT INTO analysis_jobs(asset_id, status, pipeline_version)
@@ -666,7 +678,7 @@ impl Library {
                status = 'pending', pipeline_version = excluded.pipeline_version,
                error = NULL, updated_at = unixepoch()
              WHERE analysis_jobs.pipeline_version != excluded.pipeline_version
-                OR analysis_jobs.status != 'done'",
+                OR analysis_jobs.status IN ('pending', 'running')",
             rusqlite::params![pipeline_version],
         )?;
         Ok(())
@@ -791,7 +803,9 @@ impl Library {
     }
 
     /// Mark an asset's job `error` (e.g. its file wouldn't decode) so the worker
-    /// doesn't re-pull it every drain.
+    /// doesn't re-pull it — neither within a drain (its status is no longer
+    /// `pending`) nor on a later scan ([`enqueue_all`](Self::enqueue_all)
+    /// leaves `error` rows alone unless the pipeline version bumped).
     pub fn fail_analysis(&mut self, abs_path: &Path, err: &str) -> Result<(), LibraryError> {
         let asset_id = self.ensure_asset(abs_path)?;
         self.conn.execute(
@@ -1034,7 +1048,10 @@ impl Library {
             files.iter().map(|f| rel_to_str(&f.relative_path)).collect();
         let mut seen: HashSet<i64> = HashSet::new();
 
-        for (fi, f) in files.iter().enumerate() {
+        // Labeled so a hash failure deep inside the candidate-matching loops
+        // below can skip straight to the next file instead of aborting the
+        // whole scan (and the transaction with it) over one unreadable file.
+        'files: for (fi, f) in files.iter().enumerate() {
             on_progress(fi + 1);
             let key = rel_to_str(&f.relative_path);
             let abs = self.root.join(&f.relative_path);
@@ -1049,8 +1066,19 @@ impl Library {
                     summary.unchanged += 1;
                 } else {
                     // Same path, new bytes: path identity dominates — the user
-                    // edited the file in place; its tags stay.
-                    let hash = hash_file(&abs, f.size)?;
+                    // edited the file in place; its tags stay. A hash failure
+                    // here (permission denied, file locked, removed mid-scan)
+                    // leaves the row exactly as it was — `seen` is already
+                    // marked above, so it's neither lost nor marked missing —
+                    // and is retried on the next scan.
+                    let hash = match hash_file(&abs, f.size) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            log::warn!("scan: hashing {} failed, skipping: {e}", abs.display());
+                            summary.errors += 1;
+                            continue 'files;
+                        }
+                    };
                     tx.execute(
                         "UPDATE assets SET size=?1, mtime_ms=?2, content_hash=?3, missing=0
                           WHERE id=?4",
@@ -1078,7 +1106,14 @@ impl Library {
                     continue;
                 }
                 if file_hash.is_none() {
-                    file_hash = Some(hash_file(&abs, f.size)?);
+                    file_hash = match hash_file(&abs, f.size) {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            log::warn!("scan: hashing {} failed, skipping: {e}", abs.display());
+                            summary.errors += 1;
+                            continue 'files;
+                        }
+                    };
                 }
                 // Only claim a candidate the hash actually confirms — a
                 // heuristic-only match could pin a user's tags to the wrong
@@ -1092,7 +1127,14 @@ impl Library {
             // Stage 4: pure content match (file moved AND touched).
             if matched.is_none() {
                 if file_hash.is_none() {
-                    file_hash = Some(hash_file(&abs, f.size)?);
+                    file_hash = match hash_file(&abs, f.size) {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            log::warn!("scan: hashing {} failed, skipping: {e}", abs.display());
+                            summary.errors += 1;
+                            continue 'files;
+                        }
+                    };
                 }
                 for r in &rows {
                     if !seen.contains(&r.id)
@@ -1416,6 +1458,62 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn scan_skips_unreadable_file_but_continues() {
+        // Regression: a single unreadable file (permission denied, locked by
+        // another app, removed mid-scan) used to abort the whole reconcile via
+        // `?` on hash_file, rolling back the transaction and losing progress on
+        // every other file in the scan too. It must instead be skipped and
+        // counted, leaving its row untouched for a retry next scan.
+        use std::os::unix::fs::PermissionsExt;
+
+        let t = TempRoot::new("unreadable");
+        let good = write_wav(&t.0, "good.wav", b"V1");
+        let locked = write_wav(&t.0, "locked.wav", b"V1");
+        let mut lib = Library::create(&t.0).unwrap();
+        assert_eq!(scan(&mut lib).added, 2);
+
+        // New size/mtime on both, so reconcile must re-hash them; then lock one.
+        std::fs::write(&good, b"V2 longer").unwrap();
+        std::fs::write(&locked, b"V2 longer").unwrap();
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&locked, perms).unwrap();
+
+        // Root (some CI containers run as root) ignores unix read permissions,
+        // so the failure this test guards can't be reproduced there — bail out
+        // rather than report a false negative.
+        if std::fs::read(&locked).is_ok() {
+            let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&locked, perms).unwrap();
+            eprintln!(
+                "skipping scan_skips_unreadable_file_but_continues: running as root, permissions ignored"
+            );
+            return;
+        }
+
+        let s = scan(&mut lib);
+        // The readable file's update went through; the unreadable one was
+        // skipped and counted, not silently dropped, and didn't abort the rest.
+        assert_eq!(s.modified, 1);
+        assert_eq!(s.errors, 1);
+        assert_eq!(
+            lib.list_assets().unwrap().len(),
+            2,
+            "the unreadable asset must stay present (not marked missing), not vanish"
+        );
+
+        // Fix the permission and rescan: the file is picked back up normally.
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&locked, perms).unwrap();
+        let s = scan(&mut lib);
+        assert_eq!(s.modified, 1);
+        assert_eq!(s.errors, 0);
+    }
+
+    #[test]
     fn delete_marks_missing_and_return_recovers() {
         let t = TempRoot::new("missing");
         let a = write_wav(&t.0, "gone.wav", b"UNIQUE-CONTENT");
@@ -1714,6 +1812,35 @@ mod tests {
         assert_eq!(lib.job_status(&a).unwrap().as_deref(), Some("error"));
         // Errored jobs aren't re-pulled.
         assert!(lib.claim_next_pending().unwrap().is_none());
+    }
+
+    #[test]
+    fn enqueue_all_leaves_errored_jobs_alone_until_pipeline_version_bumps() {
+        // Regression: re-scanning used to flip every non-`done` job back to
+        // `pending` regardless of status, so a permanently undecodable file
+        // got re-hashed and re-attempted on every single scan of the library.
+        // A version-less rescan must leave it errored; a pipeline version bump
+        // (the analyzer itself changed) is what gives it a fresh attempt.
+        let t = TempRoot::new("error_retry");
+        let a = write_wav(&t.0, "bad.wav", b"BAD");
+        let mut lib = Library::create(&t.0).unwrap();
+        lib.reconcile(&scan_files(&t.0).unwrap()).unwrap();
+        lib.enqueue_all(1).unwrap();
+
+        lib.claim_next_pending().unwrap().unwrap();
+        lib.fail_analysis(&a, "unsupported codec").unwrap();
+        assert_eq!(jobs_in(&lib, "error"), 1);
+
+        // Re-scanning at the same pipeline version must not resurrect it.
+        lib.enqueue_all(1).unwrap();
+        assert_eq!(jobs_in(&lib, "error"), 1);
+        assert_eq!(jobs_in(&lib, "pending"), 0);
+        assert!(lib.claim_next_pending().unwrap().is_none());
+
+        // A pipeline version bump gives it a fresh attempt.
+        lib.enqueue_all(2).unwrap();
+        assert_eq!(jobs_in(&lib, "pending"), 1);
+        assert_eq!(jobs_in(&lib, "error"), 0);
     }
 
     #[test]

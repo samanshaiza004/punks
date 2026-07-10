@@ -116,6 +116,21 @@ fn best(
 /// source. `layers` may be in any order; a `None` scalar or empty keyword list
 /// doesn't count as supplying the field.
 ///
+/// **Not yet wired to any caller — this is deliberate, not an oversight.**
+/// `punks_browser::resolve_fact` is the resolver actually in use today
+/// (override ?? analysis, over the tag/instrument/key/bpm facts in
+/// punks-library). The two intentionally don't share an implementation
+/// because `resolve_fact` has one thing this one can't yet express: a
+/// tri-state "explicitly marked absent" (`fact_overrides.is_absent`) that
+/// hides a detected guess even when one exists — this `MetadataSource`-ranked
+/// model only has "supplies a value" or "doesn't". Migrate `resolve_fact`
+/// onto this resolver once that tri-state has a place here (e.g. an
+/// `Override` layer whose `Metadata` fields being `None` unambiguously means
+/// "absent," which requires resolving Description's `None` differently for
+/// Override than for the other three sources); until then, a change to one
+/// resolver's ranking/absence philosophy needs a conscious decision about
+/// whether the other should follow, not silent drift.
+///
 /// ponytail: keywords resolve whole-set from the winning source rather than
 /// unioning across sources — provenance stays unambiguous (one source per shown
 /// value) at the cost of not blending, say, embedded + project keyword sets.
@@ -156,9 +171,6 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub fn can_read(self) -> bool {
-        matches!(self, Capability::ReadOnly | Capability::ReadWrite)
-    }
     pub fn can_write(self) -> bool {
         matches!(self, Capability::ReadWrite)
     }
@@ -167,14 +179,12 @@ impl Capability {
 #[derive(Debug)]
 pub enum MetadataError {
     Io(String),
-    Unsupported(String),
 }
 
 impl fmt::Display for MetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MetadataError::Io(e) => write!(f, "metadata io error: {e}"),
-            MetadataError::Unsupported(e) => write!(f, "unsupported metadata operation: {e}"),
         }
     }
 }
@@ -204,6 +214,28 @@ pub trait MetadataBackend {
     /// are set (`Some`/non-empty) in `m`; leaves unmapped fields — and every
     /// tag/chunk/picture Punks doesn't model — untouched.
     fn write(&self, path: &Path, m: &Metadata) -> Result<(), MetadataError>;
+
+    /// The byte limit this backend truncates `field` to on write, if any
+    /// (e.g. WAV's bext Description is a fixed 255-byte field). `None` means
+    /// unbounded (or the field isn't writable at all). Callers that persist a
+    /// copy of the value elsewhere (a display cache) call this — or
+    /// [`normalize`](Self::normalize) — first, so the cache never disagrees
+    /// with what actually landed in the file.
+    fn max_len(&self, _field: Field) -> Option<usize> {
+        None
+    }
+
+    /// `value` as this backend will actually store it for `field` — today
+    /// just a [`max_len`](Self::max_len) truncation, applied on a UTF-8 char
+    /// boundary. `write` truncates internally regardless; this exists so a
+    /// caller can learn the truncated value *before* writing, to keep a
+    /// cached copy in sync.
+    fn normalize(&self, field: Field, value: &str) -> String {
+        match self.max_len(field) {
+            Some(max) => decode::truncate_utf8(value, max).to_string(),
+            None => value.to_string(),
+        }
+    }
 
     /// The provenance every value this backend reads carries. File-format
     /// backends read the file's own container tags, so the default is
@@ -249,6 +281,13 @@ impl MetadataBackend for WaveBackend {
             }
             // Keywords/Category/Creator (RIFF INFO / iXML) land next pass.
             _ => Capability::Unsupported,
+        }
+    }
+
+    fn max_len(&self, field: Field) -> Option<usize> {
+        match field {
+            Field::Description => Some(decode::BEXT_DESCRIPTION_MAX),
+            _ => None,
         }
     }
 
@@ -392,9 +431,15 @@ mod tests {
     #[test]
     fn override_outranks_embedded_outranks_analysis() {
         let r = resolve(&[
-            (MetadataSource::Analysis, meta(Some("guess"), &[], None, None)),
+            (
+                MetadataSource::Analysis,
+                meta(Some("guess"), &[], None, None),
+            ),
             (MetadataSource::Embedded, meta(Some("tag"), &[], None, None)),
-            (MetadataSource::Override, meta(Some("fixed"), &[], None, None)),
+            (
+                MetadataSource::Override,
+                meta(Some("fixed"), &[], None, None),
+            ),
         ]);
         let d = r.description.expect("description resolved");
         assert_eq!(d.value, "fixed");
@@ -410,24 +455,42 @@ mod tests {
             (MetadataSource::Override, meta(None, &[], Some("sfx"), None)),
         ]);
         let d = r.description.expect("description resolved");
-        assert_eq!((d.value.as_str(), d.source), ("tag", MetadataSource::Embedded));
-        assert_eq!(r.category.expect("category resolved").source, MetadataSource::Override);
+        assert_eq!(
+            (d.value.as_str(), d.source),
+            ("tag", MetadataSource::Embedded)
+        );
+        assert_eq!(
+            r.category.expect("category resolved").source,
+            MetadataSource::Override
+        );
     }
 
     #[test]
     fn project_outranks_embedded() {
         let r = resolve(&[
-            (MetadataSource::Embedded, meta(None, &[], None, Some("file tag"))),
-            (MetadataSource::Project, meta(None, &[], None, Some("pack author"))),
+            (
+                MetadataSource::Embedded,
+                meta(None, &[], None, Some("file tag")),
+            ),
+            (
+                MetadataSource::Project,
+                meta(None, &[], None, Some("pack author")),
+            ),
         ]);
         let c = r.creator.expect("creator resolved");
-        assert_eq!((c.value.as_str(), c.source), ("pack author", MetadataSource::Project));
+        assert_eq!(
+            (c.value.as_str(), c.source),
+            ("pack author", MetadataSource::Project)
+        );
     }
 
     #[test]
     fn keywords_resolve_whole_set_from_highest_source() {
         let r = resolve(&[
-            (MetadataSource::Embedded, meta(None, &["a", "b"], None, None)),
+            (
+                MetadataSource::Embedded,
+                meta(None, &["a", "b"], None, None),
+            ),
             (MetadataSource::Override, meta(None, &["c"], None, None)),
         ]);
         let k = r.keywords.expect("keywords resolved");
@@ -460,12 +523,40 @@ mod tests {
     fn read_resolved_tags_every_field_with_backend_source() {
         let be = FixedBackend(meta(Some("hi"), &[], None, None), MetadataSource::Override);
         let r = be.read_resolved(Path::new("unused")).expect("read");
-        assert_eq!(r.description.expect("description").source, MetadataSource::Override);
+        assert_eq!(
+            r.description.expect("description").source,
+            MetadataSource::Override
+        );
     }
 
     #[test]
     fn file_backends_default_to_embedded_source() {
         // WaveBackend/LoftyBackend rely on the trait default.
         assert_eq!(LoftyBackend.source(), MetadataSource::Embedded);
+    }
+
+    #[test]
+    fn wave_backend_truncates_description_to_bext_limit() {
+        let backend = WaveBackend { writable: true };
+        assert_eq!(
+            backend.max_len(Field::Description),
+            Some(decode::BEXT_DESCRIPTION_MAX)
+        );
+        let long = "x".repeat(decode::BEXT_DESCRIPTION_MAX + 50);
+        let normalized = backend.normalize(Field::Description, &long);
+        assert_eq!(normalized.len(), decode::BEXT_DESCRIPTION_MAX);
+
+        let short = "short description";
+        assert_eq!(backend.normalize(Field::Description, short), short);
+
+        // Unbounded fields pass through untouched.
+        assert_eq!(backend.max_len(Field::Keywords), None);
+    }
+
+    #[test]
+    fn lofty_backend_has_no_length_limit() {
+        assert_eq!(LoftyBackend.max_len(Field::Description), None);
+        let long = "y".repeat(10_000);
+        assert_eq!(LoftyBackend.normalize(Field::Description, &long), long);
     }
 }

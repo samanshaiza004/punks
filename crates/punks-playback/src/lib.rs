@@ -30,7 +30,6 @@ pub struct TrackInfo {
     pub metadata: AudioMetadata,
     pub source_sample_rate: u32,
     pub source_duration: Duration,
-    pub preview_duration: Duration,
     pub truncated: bool,
 }
 
@@ -572,7 +571,6 @@ fn decode_and_prepare(
     let info = TrackInfo {
         source_sample_rate: decoded.sample_rate,
         source_duration: decoded.source_duration,
-        preview_duration: decoded.preview_duration,
         truncated: decoded.truncated,
         metadata: decoded.metadata,
     };

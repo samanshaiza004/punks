@@ -34,8 +34,6 @@ pub struct DecodedAudio {
     pub metadata: AudioMetadata,
     /// True total duration of the source, even when only a preview was decoded.
     pub source_duration: Duration,
-    /// Duration actually decoded (== `source_duration` unless `truncated`).
-    pub preview_duration: Duration,
     /// Where in the source this buffer begins. 0 for a from-the-start preview;
     /// non-zero for an on-demand window decoded by [`decode_window`].
     pub window_start: Duration,
@@ -271,8 +269,14 @@ fn locate_bext(prefix: &[u8]) -> BextSlot {
     BextSlot::InsertAt(after_fmt.unwrap_or(pos))
 }
 
+/// Byte length of a BWF `bext` Description field (fixed by the format's
+/// layout — bytes 0..256, minus the terminator). Shared by the writer (which
+/// truncates to it) and [`metadata::WaveBackend::max_len`](crate::metadata)
+/// (which reports it to callers) so the two can never drift apart.
+pub(crate) const BEXT_DESCRIPTION_MAX: usize = 255;
+
 /// Truncate `s` to at most `max_bytes` bytes, on a UTF-8 char boundary.
-fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
@@ -315,7 +319,7 @@ pub(crate) fn write_bext_description(path: &Path, description: &str) -> Result<(
     if body.len() < BEXT_MIN_BODY_LEN {
         body.resize(BEXT_MIN_BODY_LEN, 0);
     }
-    let desc_bytes = truncate_utf8(description, 255).as_bytes();
+    let desc_bytes = truncate_utf8(description, BEXT_DESCRIPTION_MAX).as_bytes();
     body[0..256].fill(0);
     body[0..desc_bytes.len()].copy_from_slice(desc_bytes);
 
@@ -779,7 +783,6 @@ fn decode_from_stream(
         sample_rate: probed.sample_rate,
         metadata,
         source_duration: Duration::from_secs_f64(source_frames as f64 / rate),
-        preview_duration: Duration::from_secs_f64(decoded_frames as f64 / rate),
         window_start: Duration::ZERO,
         truncated: budget.is_some(),
     })
@@ -808,7 +811,7 @@ pub fn decode_window(
         let mut hint = Hint::new();
         hint.with_extension("wav");
         let mut probed = probe_format(mss, &hint)?;
-        let (samples, decoded_frames) = decode_pcm(&mut probed, Some(window_frames))?;
+        let (samples, _decoded_frames) = decode_pcm(&mut probed, Some(window_frames))?;
         if samples.is_empty() {
             return Err(PlaybackError::DecodeError("no audio data decoded".into()));
         }
@@ -819,7 +822,6 @@ pub fn decode_window(
             sample_rate: probed.sample_rate,
             metadata,
             source_duration: Duration::from_secs_f64(rf64.source_frames as f64 / rate),
-            preview_duration: Duration::from_secs_f64(decoded_frames as f64 / rate),
             window_start: Duration::from_secs_f64(start_frame as f64 / rate),
             truncated: true,
         });
@@ -862,7 +864,6 @@ pub fn decode_window(
         sample_rate: probed.sample_rate,
         metadata,
         source_duration: Duration::from_secs_f64(src as f64 / rate),
-        preview_duration: Duration::from_secs_f64(decoded_frames as f64 / rate),
         window_start: Duration::from_secs_f64(actual_ts as f64 / rate),
         truncated: true,
     })
