@@ -20,11 +20,14 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            artifact: punks-standalone-macos.tar.gz
+            platform: macos
+            ext: tar.gz
           - os: ubuntu-latest
-            artifact: punks-standalone-linux.tar.gz
+            platform: linux
+            ext: tar.gz
           - os: windows-latest
-            artifact: punks-standalone-windows.zip
+            platform: windows
+            ext: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -40,15 +43,22 @@ jobs:
       - name: Build release binary
         run: cargo build --release -p punks-standalone
 
+      # Version comes from the pushed tag (e.g. v0.2.0), not hardcoded, so
+      # this stays correct for every future release without editing the
+      # workflow again.
+      - name: Set artifact name
+        shell: bash
+        run: echo "ARTIFACT=punks-standalone-${{ github.ref_name }}-${{ matrix.platform }}.${{ matrix.ext }}" >> "$GITHUB_ENV"
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
-        run: tar -C target/release -czf ${{ matrix.artifact }} punks-standalone
+        run: tar -C target/release -czf "${{ env.ARTIFACT }}" punks-standalone
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path target/release/punks-standalone.exe -DestinationPath ${{ matrix.artifact }}
+        run: Compress-Archive -Path target/release/punks-standalone.exe -DestinationPath "${{ env.ARTIFACT }}"
 
       - name: Upload to GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact }}
+          files: ${{ env.ARTIFACT }}
