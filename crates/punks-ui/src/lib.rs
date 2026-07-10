@@ -337,6 +337,7 @@ impl BrowserPanel {
         &mut self,
         ui: &imgui::Ui,
         browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::FramePainter<'_>,
         on_drag_file: Option<&mut dyn FnMut(&Path)>,
     ) {
         browser.poll();
@@ -658,7 +659,7 @@ impl BrowserPanel {
             }
         }
 
-        draw_waveform_widget(ui, browser, &mut self.scrub_last_x);
+        draw_waveform_widget(ui, browser, frame, &mut self.scrub_last_x);
 
         // Embedded metadata (BWF bext): an editable Description + Save, so an
         // edit writes straight into the file's own bext chunk — the file stays
@@ -1717,6 +1718,7 @@ fn draw_tag_pills(ui: &imgui::Ui, names: &[String], rect_min: [f32; 2], rect_max
 fn draw_waveform_widget(
     ui: &imgui::Ui,
     browser: &mut SampleBrowser,
+    frame: &mut imgui_painter::FramePainter<'_>,
     scrub_last_x: &mut Option<f32>,
 ) {
     let [cx, cy] = ui.cursor_screen_pos();
@@ -1741,9 +1743,26 @@ fn draw_waveform_widget(
     let playhead_color = color_u32(WAVEFORM_PLAYHEAD);
     let text_color = color_u32(WAVEFORM_TEXT);
 
-    draw.add_rect([cx, cy], [cx + w, cy + H], bg)
-        .filled(true)
-        .build();
+    // Waveform background — Phase 3 Stage 1's one converted call site.
+    // Submitted through imgui-painter's FramePainter instead of
+    // draw.add_rect(...).filled(true); radius 0 makes it pixel-identical to
+    // a plain filled rect. Drawn first (like before) so bars/playhead/text
+    // paint on top. Writes into the same window draw list as `draw`.
+    unsafe {
+        let dl = imgui::sys::igGetWindowDrawList();
+        frame.fill_rounded_rect(
+            dl,
+            imgui_painter::Rect {
+                min: imgui_painter::Vec2 { x: cx, y: cy },
+                max: imgui_painter::Vec2 {
+                    x: cx + w,
+                    y: cy + H,
+                },
+            },
+            0.0,
+            bg,
+        );
+    }
 
     let has_peaks = if let Some(peaks) = browser.waveform_peaks() {
         let bar_w = (w / peaks.num_buckets as f32).max(1.0);

@@ -1,0 +1,37 @@
+[package]
+name = "imgui-painter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Phase-1 testbed: incubating inside punks2 before extraction into its own repo
+# (see /imgui-painter/README.md). Not a punks product dependency — punks-standalone
+# only pulls this in as a dev-dependency for the painter_demo example.
+description = "Rendering/styling toolkit for Dear ImGui, built on ImDrawList (Rust bindings)"
+
+[dependencies]
+# Same "0.12" range punks-ui's `imgui` crate pulls in, so Cargo resolves both
+# to one shared imgui-sys build (one cimgui compile, one ImGui instance) —
+# see adapter.rs's module docs.
+imgui-sys = "0.12"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+# Justified over a hand-rolled Instant-loop: naive single-shot timing is a
+# known source of misleading microbenchmark numbers (warmup/cache/noise)
+# that std alone doesn't solve. Trimmed to the console-report path only
+# (no html_reports/plotters, no rayon) since this crate just needs numbers
+# for the README table, not a generated report.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# Drives the fluent C++ header's compile-check (tests/fluent_header_compiles.rs)
+# — same crate build.rs already uses, reused here rather than hand-rolling a
+# second cross-platform compiler invocation (cc already knows how to find
+# cl.exe on Windows, clang/gcc elsewhere).
+cc = "1"
+
+[[bench]]
+name = "tessellation"
+harness = false

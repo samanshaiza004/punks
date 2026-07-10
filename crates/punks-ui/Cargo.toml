@@ -8,5 +8,9 @@ license = "MIT OR Apache-2.0"
 punks-core = { path = "../punks-core" }
 punks-browser = { path = "../punks-browser" }
 imgui = "0.12"
+# Phase 3 Stage 1: normal dependency (not dev-only) — the waveform panel
+# submits its background rect through imgui-painter's FramePainter. Pins the
+# same imgui-sys "0.12" as `imgui` above, so both resolve to one shared build.
+imgui-painter = { path = "../../imgui-painter/bindings/rust" }
 rfd = "0.15"
 log = "0.4"

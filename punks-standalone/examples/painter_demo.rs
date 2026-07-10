@@ -1,8 +1,20 @@
+//! Manual visual gate for imgui-painter phase 1 (design doc §12 step 1):
+//! renders three hand-built "looks" — a macOS-style panel, a Fluent-style
+//! button, a GitHub-style button — via imgui-painter, each next to a
+//! plain-`ImDrawList` attempt at the same look, so a human can judge
+//! whether Painter alone (gradients/shadows/borders on `rounded_rect`,
+//! nothing above it) renders convincingly. That judgment is the pass/fail
+//! gate for everything the design doc builds on top of Painter.
+//!
+//! A standalone winit/wgpu/imgui window, deliberately **not** wired into
+//! punks-standalone's product code (see the plan's Non-Goals) — this is
+//! scaffolding for imgui-painter's own incubation inside punks2, not a
+//! punks feature. Run with:
+//!   cargo run -p punks-standalone --example painter_demo
+
 use std::sync::Arc;
 use std::time::Instant;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use drag::{DragItem, Image};
 use imgui::FontSource;
 use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
@@ -15,84 +27,13 @@ use winit::{
     window::Window,
 };
 
-use punks_browser::SampleBrowser;
-use punks_ui::BrowserPanel;
+use imgui_painter::{
+    adapter, rgba, Border, ColorStop, Gradient, GradientMode, Rect as PainterRect, Session, Shadow,
+    Vec2 as PainterVec2,
+};
 
-/// Routes imgui's copy/paste to the real OS clipboard via `arboard`. Without
-/// this, imgui falls back to an internal no-op backend: text can be selected
-/// but Ctrl+C/Ctrl+V never reach anything outside the app.
-struct ArboardClipboard(arboard::Clipboard);
-
-impl imgui::ClipboardBackend for ArboardClipboard {
-    fn get(&mut self) -> Option<String> {
-        self.0.get_text().ok()
-    }
-
-    fn set(&mut self, value: &str) {
-        if let Err(e) = self.0.set_text(value) {
-            log::warn!("clipboard set failed: {e}");
-        }
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-const DRAG_PREVIEW_ICON_PNG: &[u8] = &[
-    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
-    0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255, 63, 0, 5,
-    254, 2, 254, 167, 53, 129, 207, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-];
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn start_file_drag(window: &Window, path: &std::path::Path) {
-    let drag_path = match std::fs::canonicalize(path) {
-        Ok(path) => path,
-        Err(err) => {
-            log::error!("failed to canonicalize drag path {path:?}: {err}");
-            return;
-        }
-    };
-
-    let item = DragItem::Files(vec![drag_path]);
-    let preview = Image::Raw(DRAG_PREVIEW_ICON_PNG.to_vec());
-    if let Err(err) = drag::start_drag(
-        window,
-        item,
-        preview,
-        |result, _cursor_position| {
-            log::debug!("drag finished: {result:?}");
-        },
-        Default::default(),
-    ) {
-        log::error!("failed to start drag operation: {err}");
-    }
-}
-
-/// Slight dark-theme polish: rounded frames, a touch more breathing room, and
-/// muted greys so the only saturated colour is the active tab / selection.
-fn apply_style(style: &mut imgui::Style) {
-    use imgui::StyleColor;
-
-    style.frame_rounding = 4.0;
-    style.grab_rounding = 4.0;
-    style.scrollbar_rounding = 4.0;
-    style.frame_border_size = 0.0;
-    style.window_border_size = 0.0;
-    style.frame_padding = [8.0, 4.0];
-    style.item_spacing = [8.0, 6.0];
-    style.scrollbar_size = 12.0;
-
-    style[StyleColor::WindowBg] = [0.11, 0.12, 0.13, 1.0];
-    style[StyleColor::Button] = [0.22, 0.24, 0.28, 1.0];
-    style[StyleColor::ButtonHovered] = [0.28, 0.30, 0.35, 1.0];
-    style[StyleColor::ButtonActive] = [0.32, 0.34, 0.40, 1.0];
-    style[StyleColor::FrameBg] = [0.14, 0.15, 0.17, 1.0];
-    style[StyleColor::FrameBgHovered] = [0.18, 0.19, 0.22, 1.0];
-    style[StyleColor::FrameBgActive] = [0.20, 0.21, 0.25, 1.0];
-    style[StyleColor::Header] = [0.24, 0.36, 0.52, 0.9];
-    style[StyleColor::HeaderHovered] = [0.28, 0.41, 0.59, 0.9];
-    style[StyleColor::HeaderActive] = [0.28, 0.41, 0.59, 1.0];
-    style[StyleColor::SliderGrab] = [0.36, 0.52, 0.72, 1.0];
-    style[StyleColor::SliderGrabActive] = [0.44, 0.62, 0.84, 1.0];
+fn pv2(x: f32, y: f32) -> PainterVec2 {
+    PainterVec2 { x, y }
 }
 
 struct GpuState {
@@ -114,29 +55,17 @@ struct ImguiState {
 struct AppWindow {
     gpu: GpuState,
     imgui: ImguiState,
-    browser: SampleBrowser,
-    panel: BrowserPanel,
-    // Long-lived paint context (Phase 3 Stage 1). A per-frame FramePainter
-    // is opened from this each render pass and threaded into the panel; the
-    // &mut borrow it takes makes two concurrent frames a compile error.
-    painter: imgui_painter::Painter,
+    painter: Session,
 }
 
 impl AppWindow {
     fn new(event_loop: &ActiveEventLoop) -> Self {
         let gpu = Self::init_gpu(event_loop);
         let imgui = Self::init_imgui(&gpu);
-        // BrowserPanel loads the config; SampleBrowser reuses that copy
-        // instead of reading it from disk again (P3).
-        let panel = BrowserPanel::new();
-        let browser = SampleBrowser::new(panel.prefs()).expect("failed to initialize audio engine");
-
         AppWindow {
             gpu,
             imgui,
-            browser,
-            panel,
-            painter: imgui_painter::Painter::new(),
+            painter: Session::new(),
         }
     }
 
@@ -146,10 +75,10 @@ impl AppWindow {
             ..Default::default()
         });
 
-        let size = LogicalSize::new(800.0, 600.0);
+        let size = LogicalSize::new(1000.0, 700.0);
         let attributes = Window::default_attributes()
             .with_inner_size(size)
-            .with_title("punks2");
+            .with_title("imgui-painter phase 1 demo");
         let window = Arc::new(event_loop.create_window(attributes).unwrap());
 
         let phys_size = window.inner_size();
@@ -189,15 +118,6 @@ impl AppWindow {
     fn init_imgui(gpu: &GpuState) -> ImguiState {
         let mut context = imgui::Context::create();
         context.set_ini_filename(None);
-        apply_style(context.style_mut());
-
-        // winit deliberately has no clipboard API; without a backend here,
-        // imgui's internal Ctrl+C/Ctrl+V in text fields (e.g. the selectable
-        // error line) never reaches the real OS clipboard.
-        match arboard::Clipboard::new() {
-            Ok(clipboard) => context.set_clipboard_backend(ArboardClipboard(clipboard)),
-            Err(e) => log::warn!("clipboard unavailable: {e}"),
-        }
 
         let mut platform = WinitPlatform::new(&mut context);
         platform.attach_window(
@@ -235,6 +155,222 @@ impl AppWindow {
     }
 }
 
+// --- The three looks: `_plain` draws with vanilla imgui-rs ImDrawList
+// calls, `_painted` draws the same intent through imgui-painter. Colors
+// deliberately match between the pair so the only variable a viewer judges
+// is the rendering technique, not a color choice. ---
+
+fn draw_macos_panel_plain(ui: &imgui::Ui, pos: [f32; 2], size: [f32; 2]) {
+    let max = [pos[0] + size[0], pos[1] + size[1]];
+    let draw_list = ui.get_window_draw_list();
+    draw_list
+        .add_rect(pos, max, rgba(240, 240, 242, 255))
+        .filled(true)
+        .rounding(12.0)
+        .build();
+    draw_list
+        .add_rect(pos, max, rgba(210, 210, 214, 255))
+        .rounding(12.0)
+        .thickness(1.0)
+        .build();
+}
+
+fn draw_macos_panel_painted(
+    painter: &mut Session,
+    white_uv: PainterVec2,
+    dl: *mut imgui::sys::ImDrawList,
+    pos: [f32; 2],
+    size: [f32; 2],
+) {
+    let rect = PainterRect {
+        min: pv2(pos[0], pos[1]),
+        max: pv2(pos[0] + size[0], pos[1] + size[1]),
+    };
+    painter.begin(white_uv);
+    painter.rounded_rect(rect, 12.0);
+    painter.add_shadow(&Shadow {
+        offset: pv2(0.0, 6.0),
+        blur: 24.0,
+        spread: 2.0,
+        color: rgba(0, 0, 0, 60),
+        inset: false,
+    });
+    painter.fill_gradient(&Gradient {
+        mode: GradientMode::Linear,
+        from: pv2(pos[0], pos[1]),
+        to: pv2(pos[0], pos[1] + size[1]),
+        stops: vec![
+            ColorStop {
+                t: 0.0,
+                color: rgba(248, 248, 250, 255),
+            },
+            ColorStop {
+                t: 1.0,
+                color: rgba(228, 228, 232, 255),
+            },
+        ],
+    });
+    painter.add_border(&Border {
+        thickness: 1.0,
+        color: rgba(210, 210, 214, 255),
+    });
+    let mesh = painter.end();
+    unsafe { adapter::paint_to_draw_list(dl, &mesh) };
+}
+
+fn draw_fluent_button_plain(ui: &imgui::Ui, pos: [f32; 2], size: [f32; 2]) {
+    let max = [pos[0] + size[0], pos[1] + size[1]];
+    let draw_list = ui.get_window_draw_list();
+    draw_list
+        .add_rect(pos, max, rgba(0, 103, 192, 255))
+        .filled(true)
+        .rounding(4.0)
+        .build();
+}
+
+fn draw_fluent_button_painted(
+    painter: &mut Session,
+    white_uv: PainterVec2,
+    dl: *mut imgui::sys::ImDrawList,
+    pos: [f32; 2],
+    size: [f32; 2],
+) {
+    let rect = PainterRect {
+        min: pv2(pos[0], pos[1]),
+        max: pv2(pos[0] + size[0], pos[1] + size[1]),
+    };
+    painter.begin(white_uv);
+    painter.rounded_rect(rect, 4.0);
+    painter.add_shadow(&Shadow {
+        offset: pv2(0.0, 2.0),
+        blur: 6.0,
+        spread: 0.0,
+        color: rgba(0, 0, 0, 70),
+        inset: false,
+    });
+    painter.fill_gradient(&Gradient {
+        mode: GradientMode::Linear,
+        from: pv2(pos[0], pos[1]),
+        to: pv2(pos[0], pos[1] + size[1]),
+        stops: vec![
+            ColorStop {
+                t: 0.0,
+                color: rgba(0, 120, 215, 255),
+            },
+            ColorStop {
+                t: 1.0,
+                color: rgba(0, 90, 180, 255),
+            },
+        ],
+    });
+    let mesh = painter.end();
+    unsafe { adapter::paint_to_draw_list(dl, &mesh) };
+}
+
+fn draw_github_button_plain(ui: &imgui::Ui, pos: [f32; 2], size: [f32; 2]) {
+    let max = [pos[0] + size[0], pos[1] + size[1]];
+    let draw_list = ui.get_window_draw_list();
+    draw_list
+        .add_rect(pos, max, rgba(246, 248, 250, 255))
+        .filled(true)
+        .rounding(6.0)
+        .build();
+    draw_list
+        .add_rect(pos, max, rgba(31, 35, 40, 45))
+        .rounding(6.0)
+        .thickness(1.0)
+        .build();
+}
+
+fn draw_github_button_painted(
+    painter: &mut Session,
+    white_uv: PainterVec2,
+    dl: *mut imgui::sys::ImDrawList,
+    pos: [f32; 2],
+    size: [f32; 2],
+) {
+    let rect = PainterRect {
+        min: pv2(pos[0], pos[1]),
+        max: pv2(pos[0] + size[0], pos[1] + size[1]),
+    };
+    painter.begin(white_uv);
+    painter.rounded_rect(rect, 6.0);
+    painter.add_shadow(&Shadow {
+        offset: pv2(0.0, 1.0),
+        blur: 2.0,
+        spread: 0.0,
+        color: rgba(31, 35, 40, 35),
+        inset: false,
+    });
+    painter.fill_color(rgba(246, 248, 250, 255));
+    painter.add_border(&Border {
+        thickness: 1.0,
+        color: rgba(31, 35, 40, 45),
+    });
+    let mesh = painter.end();
+    unsafe { adapter::paint_to_draw_list(dl, &mesh) };
+}
+
+const BOX_W: f32 = 220.0;
+const BOX_H: f32 = 90.0;
+const GAP_X: f32 = 60.0;
+const GAP_Y: f32 = 70.0;
+const LABEL_H: f32 = 22.0;
+
+fn draw_demo(ui: &imgui::Ui, painter: &mut Session) {
+    ui.text("imgui-painter phase 1 \u{2014} three looks gate (design doc \u{a7}12 step 1)");
+    ui.text_disabled("Left column: plain ImDrawList.  Right column: imgui-painter.");
+    ui.separator();
+    ui.spacing();
+
+    // SAFETY: called once per frame while this window's draw list is the
+    // active one, matching igGetWindowDrawList's normal per-frame usage.
+    let white_uv = unsafe { adapter::white_pixel_uv() };
+    let origin = ui.cursor_screen_pos();
+
+    let rows: [(&str, PlainFn, PaintedFn); 3] = [
+        (
+            "macOS-style panel",
+            draw_macos_panel_plain,
+            draw_macos_panel_painted,
+        ),
+        (
+            "Fluent-style button",
+            draw_fluent_button_plain,
+            draw_fluent_button_painted,
+        ),
+        (
+            "GitHub-style button",
+            draw_github_button_plain,
+            draw_github_button_painted,
+        ),
+    ];
+
+    for (row, (label, plain_fn, painted_fn)) in rows.into_iter().enumerate() {
+        let y = origin[1] + row as f32 * (BOX_H + LABEL_H + GAP_Y);
+        ui.set_cursor_screen_pos([origin[0], y]);
+        ui.text(label);
+
+        let plain_pos = [origin[0], y + LABEL_H];
+        plain_fn(ui, plain_pos, [BOX_W, BOX_H]);
+
+        let painted_pos = [origin[0] + BOX_W + GAP_X, y + LABEL_H];
+        // SAFETY: this window's draw list is the currently active one for
+        // the duration of this call (same frame, same window scope).
+        let dl = unsafe { imgui::sys::igGetWindowDrawList() };
+        painted_fn(painter, white_uv, dl, painted_pos, [BOX_W, BOX_H]);
+    }
+
+    // The raw draw-list calls above don't advance imgui's own layout
+    // cursor; reserve the space explicitly so window sizing/scrolling stays
+    // correct.
+    let content_bottom = origin[1] + rows.len() as f32 * (BOX_H + LABEL_H + GAP_Y);
+    ui.set_cursor_screen_pos([origin[0], content_bottom]);
+}
+
+type PlainFn = fn(&imgui::Ui, [f32; 2], [f32; 2]);
+type PaintedFn = fn(&mut Session, PainterVec2, *mut imgui::sys::ImDrawList, [f32; 2], [f32; 2]);
+
 #[derive(Default)]
 struct App {
     window: Option<AppWindow>,
@@ -268,11 +404,6 @@ impl ApplicationHandler for App {
 
             WindowEvent::CloseRequested => event_loop.exit(),
 
-            // Deliberately no Escape-to-quit: it's the key users reach for to
-            // dismiss a popup (tag editor, override editor, rebind prompt) —
-            // imgui already closes those on Escape via the handle_event call
-            // below. Binding it to app exit here made that muscle-memory
-            // keystroke close the whole app instead.
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 im.context.io_mut().update_delta_time(now - im.last_frame);
@@ -291,40 +422,14 @@ impl ApplicationHandler for App {
                     .expect("failed to prepare imgui frame");
 
                 let ui = im.context.frame();
-
-                // Open one imgui-painter frame per render pass (Phase 3
-                // Stage 1). Must follow im.context.frame() so the white-pixel
-                // UV it samples is valid; borrows app.painter, disjoint from
-                // the app.imgui/panel/browser fields used below. Named
-                // `frame_painter` to avoid the wgpu `frame` (SurfaceTexture)
-                // bound above.
-                let mut frame_painter = app.painter.begin_frame();
-
-                // Full-window imgui panel
                 let display_size = ui.io().display_size;
-                ui.window("Sample Browser")
+                ui.window("painter_demo")
                     .position([0.0, 0.0], imgui::Condition::Always)
                     .size(display_size, imgui::Condition::Always)
                     .no_decoration()
                     .movable(false)
                     .build(|| {
-                        #[cfg(any(target_os = "macos", target_os = "windows"))]
-                        {
-                            let mut on_drag_file =
-                                |path: &std::path::Path| start_file_drag(&app.gpu.window, path);
-                            app.panel.draw(
-                                ui,
-                                &mut app.browser,
-                                &mut frame_painter,
-                                Some(&mut on_drag_file),
-                            );
-                        }
-
-                        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                        {
-                            app.panel
-                                .draw(ui, &mut app.browser, &mut frame_painter, None);
-                        }
+                        draw_demo(ui, &mut app.painter);
                     });
 
                 if im.last_cursor != ui.mouse_cursor() {
@@ -342,9 +447,9 @@ impl ApplicationHandler for App {
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
                 let clear_color = wgpu::Color {
-                    r: 0.08,
-                    g: 0.08,
-                    b: 0.10,
+                    r: 0.06,
+                    g: 0.06,
+                    b: 0.07,
                     a: 1.0,
                 };
 
