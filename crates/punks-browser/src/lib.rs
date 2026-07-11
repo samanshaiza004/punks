@@ -5,15 +5,25 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod command;
+mod health;
+
+pub use command::{
+    AssignTagCommand, BatchCommand, Command, CommandContext, CommandError, OverrideAction,
+    SetOverrideCommand, UnassignTagCommand, UndoStack, WriteDescriptionCommand,
+};
+pub use health::{HealthIssue, HealthIssueKind};
 pub use punks_analysis::{amp_to_dbfs, AnalysisReport};
 pub use punks_core::config::PunksConfig;
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
 pub use punks_library::{Fact, LibraryError, ScanSummary, TagCount};
-pub use punks_playback::{AudioMetadata, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks};
+pub use punks_playback::{
+    AudioMetadata, Field, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks,
+};
 
 use punks_analysis::{AnalysisContext, AudioBuffer};
 use punks_library::Library;
-use punks_playback::{decode_file, Backend, Field, MetadataBackend, PlaybackEngine, RequestSlot};
+use punks_playback::{decode_file, Backend, MetadataBackend, PlaybackEngine, RequestSlot};
 
 /// How many buckets a full-source waveform is computed at (matches the preview
 /// waveform's resolution).
@@ -224,6 +234,15 @@ struct LibraryContext {
     scanning: bool,
     scan_rx: Option<mpsc::Receiver<Result<ScanSummary, LibraryError>>>,
     scan_progress: Option<Arc<ScanProgress>>,
+    /// Last completed health-check run's results (see
+    /// `SampleBrowser::check_library_health`); `None` before the first run.
+    health_issues: Option<Vec<HealthIssue>>,
+    /// `Some` while a health check is running on its background thread.
+    health_rx: Option<mpsc::Receiver<Vec<HealthIssue>>>,
+    /// This library's executed-command history (see `command.rs`). One per
+    /// library rather than global, so undo always resolves the same
+    /// library a command ran against, even after switching tabs.
+    undo_stack: UndoStack,
 }
 
 /// Live progress of a background scan, shared with the scan thread.
@@ -825,6 +844,28 @@ impl SampleBrowser {
         }
 
         self.poll_full_peaks();
+        self.poll_health_check();
+    }
+
+    /// Fold in a finished health check, if one is running. One-shot (unlike
+    /// the scan/analysis workers, there's no partial progress to stream —
+    /// the background thread sends its whole `Vec<HealthIssue>` once, when
+    /// the walk finishes).
+    fn poll_health_check(&mut self) {
+        for ctx in &mut self.libraries {
+            let Some(rx) = &ctx.health_rx else { continue };
+            match rx.try_recv() {
+                Ok(issues) => {
+                    ctx.health_issues = Some(issues);
+                    ctx.health_rx = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    log::error!("health check thread terminated unexpectedly");
+                    ctx.health_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
     }
 
     /// Kick off / receive the full-source waveform for the current clip. A long
@@ -1116,40 +1157,36 @@ impl SampleBrowser {
     }
 
     /// Set a user override for `metric` on `path` and refresh the caches so the
-    /// UI reflects it next frame. No-op outside a library.
+    /// UI reflects it next frame. Undoable (see `command.rs`). No-op outside a
+    /// library.
     pub fn set_override(&mut self, path: &Path, metric: &str, value: Fact) {
         let Some(li) = self.library_index_for(path) else {
             return;
         };
-        if let Err(e) = self.libraries[li].lib.set_override(path, metric, &value) {
-            self.last_error = Some(e.to_string());
-        }
-        self.libraries[li].reload();
+        let cmd = SetOverrideCommand::new(path.to_path_buf(), metric, OverrideAction::Set(value));
+        self.execute_command(li, Box::new(cmd));
     }
 
     /// Mark `metric` on `path` explicitly absent (e.g. "this sound has no key") —
     /// hides the detected guess, unlike [`clear_override`](Self::clear_override)
-    /// which reveals it. No-op outside a library.
+    /// which reveals it. Undoable. No-op outside a library.
     pub fn mark_absent(&mut self, path: &Path, metric: &str) {
         let Some(li) = self.library_index_for(path) else {
             return;
         };
-        if let Err(e) = self.libraries[li].lib.mark_absent(path, metric) {
-            self.last_error = Some(e.to_string());
-        }
-        self.libraries[li].reload();
+        let cmd = SetOverrideCommand::new(path.to_path_buf(), metric, OverrideAction::MarkAbsent);
+        self.execute_command(li, Box::new(cmd));
     }
 
     /// Clear a user override (a value override or an absent mark) for `metric`
-    /// on `path`; the value falls back to detected. No-op outside a library.
+    /// on `path`; the value falls back to detected. Undoable. No-op outside a
+    /// library.
     pub fn clear_override(&mut self, path: &Path, metric: &str) {
         let Some(li) = self.library_index_for(path) else {
             return;
         };
-        if let Err(e) = self.libraries[li].lib.clear_override(path, metric) {
-            self.last_error = Some(e.to_string());
-        }
-        self.libraries[li].reload();
+        let cmd = SetOverrideCommand::new(path.to_path_buf(), metric, OverrideAction::Clear);
+        self.execute_command(li, Box::new(cmd));
     }
 
     /// The embedded bext Description for the loaded track, from the analysis
@@ -1183,27 +1220,65 @@ impl SampleBrowser {
     /// then refresh the cached fact so the UI reflects it without waiting for the
     /// next analysis pass. The stored/cached copy is normalized (e.g. truncated
     /// to WAV's 255-byte bext limit) exactly as the backend will store it, so the
-    /// cache never disagrees with what's actually on disk. No-op outside a
-    /// library or when the format can't write Description; sets `last_error` on
-    /// failure.
+    /// cache never disagrees with what's actually on disk. Undoable (see
+    /// `command.rs`). No-op outside a library or when the format can't write
+    /// Description; sets `last_error` on failure.
     pub fn set_description(&mut self, path: &Path, description: &str) {
         let Some(li) = self.library_index_for(path) else {
             return;
         };
-        let backend = Backend::for_path(path);
-        let normalized = backend.normalize(Field::Description, description);
-        let mut meta = backend.read(path).unwrap_or_default();
-        meta.description = Some(normalized.clone());
-        if let Err(e) = backend.write(path, &meta) {
-            self.last_error = Some(e.to_string());
+        let cmd = WriteDescriptionCommand::new(path.to_path_buf(), description);
+        self.execute_command(li, Box::new(cmd));
+    }
+
+    /// Run `cmd` against library `li`'s `Library`, push it onto that
+    /// library's undo stack, and refresh caches. Every undoable write in
+    /// this module goes through here — see `command.rs`.
+    fn execute_command(&mut self, li: usize, mut cmd: Box<dyn Command>) {
+        {
+            let mut ctx = CommandContext {
+                lib: &mut self.libraries[li].lib,
+            };
+            if let Err(e) = cmd.execute(&mut ctx) {
+                self.last_error = Some(e.to_string());
+            }
+        }
+        self.libraries[li].undo_stack.push(cmd);
+        self.libraries[li].reload();
+    }
+
+    /// Undo the active library's most recently executed command, if any.
+    /// No-op outside a library or with nothing to undo.
+    pub fn undo(&mut self) {
+        let Some(li) = self.active().library_idx else {
             return;
+        };
+        let ctx_lib = &mut self.libraries[li];
+        let mut ctx = CommandContext {
+            lib: &mut ctx_lib.lib,
+        };
+        match ctx_lib.undo_stack.undo(&mut ctx) {
+            Some(Ok(())) => self.libraries[li].reload(),
+            Some(Err(e)) => {
+                self.last_error = Some(e.to_string());
+                self.libraries[li].reload();
+            }
+            None => {}
         }
-        if let Err(e) = self.libraries[li].lib.set_description(path, &normalized) {
-            self.last_error = Some(e.to_string());
-        }
-        self.libraries[li]
-            .descriptions
-            .insert(path.to_path_buf(), normalized);
+    }
+
+    /// Whether the active library has anything to [`undo`](Self::undo).
+    pub fn can_undo(&self) -> bool {
+        self.active()
+            .library_idx
+            .is_some_and(|li| self.libraries[li].undo_stack.can_undo())
+    }
+
+    /// Label for the command [`undo`](Self::undo) would undo next, for an
+    /// "Undo: {description}" UI affordance. `None` if there's nothing to undo.
+    pub fn undo_description(&self) -> Option<String> {
+        let li = self.active().library_idx?;
+        self.libraries[li].undo_stack.next_undo_description()
     }
 
     /// Index of the most-specific library owning `path` (mutable-friendly twin of
@@ -1485,6 +1560,9 @@ impl SampleBrowser {
             scanning: true,
             scan_rx: None,
             scan_progress: None,
+            health_issues: None,
+            health_rx: None,
+            undo_stack: UndoStack::default(),
         };
         ctx.reload();
         let (rx, progress) = spawn_scan(root);
@@ -1606,6 +1684,50 @@ impl SampleBrowser {
         self.active().library_idx.map(|i| &self.libraries[i].facets)
     }
 
+    /// The active library's last completed metadata health-check results
+    /// (`None` if it's never been run). See [`check_library_health`]
+    /// (Self::check_library_health).
+    pub fn health_issues(&self) -> Option<&[HealthIssue]> {
+        let i = self.active().library_idx?;
+        self.libraries[i].health_issues.as_deref()
+    }
+
+    /// Whether a health check is currently running for the active library.
+    pub fn health_check_running(&self) -> bool {
+        self.active()
+            .library_idx
+            .is_some_and(|i| self.libraries[i].health_rx.is_some())
+    }
+
+    /// Kick off a metadata health check over the active library's assets on
+    /// a background thread — every file gets a fresh metadata read (I/O
+    /// proportional to library size), so this must not run on the UI
+    /// thread (see CLAUDE.md's rule on file-sized I/O). Snapshots the
+    /// caches it needs (`descriptions`/`overrides`) before spawning, so the
+    /// worker never touches `LibraryContext` — same shape as
+    /// [`spawn_scan`], a one-shot background walk with a single result
+    /// sent back over a channel. No-op outside a library or while a check
+    /// is already running.
+    pub fn check_library_health(&mut self) {
+        let Some(i) = self.active().library_idx else {
+            return;
+        };
+        if self.libraries[i].health_rx.is_some() {
+            return;
+        }
+        let ctx = &self.libraries[i];
+        let assets: Vec<PathBuf> = ctx.assets.iter().map(|e| e.path.clone()).collect();
+        let descriptions = ctx.descriptions.clone();
+        let overrides = ctx.overrides.clone();
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let issues = health::scan_assets(&assets, &descriptions, &overrides);
+            let _ = tx.send(issues); // receiver dropped: app closing
+        });
+        self.libraries[i].health_rx = Some(rx);
+    }
+
     pub fn fact_filter(&self) -> &FactFilter {
         &self.active().fact_filter
     }
@@ -1672,86 +1794,149 @@ impl SampleBrowser {
         self.after_tag_mutation(li);
     }
 
+    /// Display name for `tag_id` in library `li` (its cached tag list),
+    /// for a command's undo label. Falls back to the id itself — this
+    /// should always find a real name in practice (a tag_id only ever
+    /// comes from a tag that exists), so the fallback is defensive, not a
+    /// path any caller should hit.
+    fn tag_name(&self, li: usize, tag_id: i64) -> String {
+        self.libraries[li]
+            .tags
+            .iter()
+            .find(|t| t.id == tag_id)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| format!("#{tag_id}"))
+    }
+
+    /// Undoable. See [`assign_tag_batch`](Self::assign_tag_batch) for the
+    /// multi-select version.
     pub fn assign_tag(&mut self, path: &Path, tag_id: i64) {
         let Some(li) = self.active().library_idx else {
             return;
         };
-        if let Err(e) = self.libraries[li].lib.assign_tag(path, tag_id) {
-            self.last_error = Some(e.to_string());
-        }
-        self.after_tag_mutation(li);
+        let tag_name = self.tag_name(li, tag_id);
+        let cmd = AssignTagCommand {
+            path: path.to_path_buf(),
+            tag_id,
+            tag_name,
+        };
+        self.execute_command(li, Box::new(cmd));
+        self.rebuild_tag_filtered_tabs(li);
     }
 
+    /// Undoable. See [`unassign_tag_batch`](Self::unassign_tag_batch).
     pub fn unassign_tag(&mut self, path: &Path, tag_id: i64) {
         let Some(li) = self.active().library_idx else {
             return;
         };
-        if let Err(e) = self.libraries[li].lib.remove_tag(path, tag_id) {
-            self.last_error = Some(e.to_string());
-        }
-        self.after_tag_mutation(li);
+        let tag_name = self.tag_name(li, tag_id);
+        let cmd = UnassignTagCommand {
+            path: path.to_path_buf(),
+            tag_id,
+            tag_name,
+        };
+        self.execute_command(li, Box::new(cmd));
+        self.rebuild_tag_filtered_tabs(li);
     }
 
+    /// Creates `name` (or reuses it if it exists), then assigns it — only
+    /// the assignment is undoable (see `command.rs`'s module doc for why
+    /// tag creation itself isn't: undoing it could delete a tag something
+    /// else has since used).
     pub fn create_and_assign_tag(&mut self, path: &Path, name: &str) {
         let Some(li) = self.active().library_idx else {
             return;
         };
         match self.libraries[li].lib.create_tag(name) {
             Ok(tag) => {
-                if let Err(e) = self.libraries[li].lib.assign_tag(path, tag.id) {
-                    self.last_error = Some(e.to_string());
-                }
+                let cmd = AssignTagCommand {
+                    path: path.to_path_buf(),
+                    tag_id: tag.id,
+                    tag_name: tag.name,
+                };
+                self.execute_command(li, Box::new(cmd));
+                self.rebuild_tag_filtered_tabs(li);
             }
-            Err(e) => self.last_error = Some(e.to_string()),
+            Err(e) => {
+                self.last_error = Some(e.to_string());
+                self.after_tag_mutation(li);
+            }
         }
-        self.after_tag_mutation(li);
     }
 
     /// Assign `tag_id` to every path in `paths` — the multi-select consumer
-    /// that exercises [`selection_paths`](Self::selection_paths). One reload at
-    /// the end, not one per path.
+    /// that exercises [`selection_paths`](Self::selection_paths). Pushed as
+    /// one [`BatchCommand`], so it undoes as a single step, not N.
     pub fn assign_tag_batch(&mut self, paths: &[PathBuf], tag_id: i64) {
         let Some(li) = self.active().library_idx else {
             return;
         };
-        for path in paths {
-            if let Err(e) = self.libraries[li].lib.assign_tag(path, tag_id) {
-                self.last_error = Some(e.to_string());
-            }
-        }
-        self.after_tag_mutation(li);
+        let tag_name = self.tag_name(li, tag_id);
+        let commands: Vec<Box<dyn Command>> = paths
+            .iter()
+            .map(|path| {
+                Box::new(AssignTagCommand {
+                    path: path.clone(),
+                    tag_id,
+                    tag_name: tag_name.clone(),
+                }) as Box<dyn Command>
+            })
+            .collect();
+        let label = format!("assign \"{tag_name}\" to {} file(s)", paths.len());
+        self.execute_command(li, Box::new(BatchCommand::new(label, commands)));
+        self.rebuild_tag_filtered_tabs(li);
     }
 
-    /// Remove `tag_id` from every path in `paths`. See [`assign_tag_batch`](Self::assign_tag_batch).
+    /// Remove `tag_id` from every path in `paths`. See
+    /// [`assign_tag_batch`](Self::assign_tag_batch) — same one-step undo.
     pub fn unassign_tag_batch(&mut self, paths: &[PathBuf], tag_id: i64) {
         let Some(li) = self.active().library_idx else {
             return;
         };
-        for path in paths {
-            if let Err(e) = self.libraries[li].lib.remove_tag(path, tag_id) {
-                self.last_error = Some(e.to_string());
-            }
-        }
-        self.after_tag_mutation(li);
+        let tag_name = self.tag_name(li, tag_id);
+        let commands: Vec<Box<dyn Command>> = paths
+            .iter()
+            .map(|path| {
+                Box::new(UnassignTagCommand {
+                    path: path.clone(),
+                    tag_id,
+                    tag_name: tag_name.clone(),
+                }) as Box<dyn Command>
+            })
+            .collect();
+        let label = format!("remove \"{tag_name}\" from {} file(s)", paths.len());
+        self.execute_command(li, Box::new(BatchCommand::new(label, commands)));
+        self.rebuild_tag_filtered_tabs(li);
     }
 
     /// Create `name` (or reuse it if it exists) and assign it to every path in
-    /// `paths`.
+    /// `paths`. Only the assignments are undoable — see
+    /// [`create_and_assign_tag`](Self::create_and_assign_tag).
     pub fn create_and_assign_tag_batch(&mut self, paths: &[PathBuf], name: &str) {
         let Some(li) = self.active().library_idx else {
             return;
         };
         match self.libraries[li].lib.create_tag(name) {
             Ok(tag) => {
-                for path in paths {
-                    if let Err(e) = self.libraries[li].lib.assign_tag(path, tag.id) {
-                        self.last_error = Some(e.to_string());
-                    }
-                }
+                let commands: Vec<Box<dyn Command>> = paths
+                    .iter()
+                    .map(|path| {
+                        Box::new(AssignTagCommand {
+                            path: path.clone(),
+                            tag_id: tag.id,
+                            tag_name: tag.name.clone(),
+                        }) as Box<dyn Command>
+                    })
+                    .collect();
+                let label = format!("assign \"{}\" to {} file(s)", tag.name, paths.len());
+                self.execute_command(li, Box::new(BatchCommand::new(label, commands)));
+                self.rebuild_tag_filtered_tabs(li);
             }
-            Err(e) => self.last_error = Some(e.to_string()),
+            Err(e) => {
+                self.last_error = Some(e.to_string());
+                self.after_tag_mutation(li);
+            }
         }
-        self.after_tag_mutation(li);
     }
 
     pub fn delete_tag(&mut self, tag_id: i64) {
@@ -1769,6 +1954,17 @@ impl SampleBrowser {
 
     fn after_tag_mutation(&mut self, li: usize) {
         self.libraries[li].reload();
+        self.rebuild_tag_filtered_tabs(li);
+    }
+
+    /// Re-run search/results for any tab on library `li` with an active tag
+    /// filter, so a tag mutation (assign/unassign/create/delete) is
+    /// reflected in an already-filtered list without the user re-clicking
+    /// the filter. Split out from [`after_tag_mutation`](Self::after_tag_mutation)
+    /// so tag-assignment commands (which already call
+    /// [`execute_command`](Self::execute_command) for the reload half) can
+    /// call just this half.
+    fn rebuild_tag_filtered_tabs(&mut self, li: usize) {
         for i in 0..self.tabs.len() {
             if self.tabs[i].library_idx == Some(li) && !self.tabs[i].tag_filter.is_empty() {
                 self.rebuild_tab_results(i);
@@ -1905,6 +2101,7 @@ mod tests {
         adjust_active_after_close, adjust_active_after_reorder, fact_filter_matches,
         longest_containing_root_index, resolve_fact, restore_tab_plan, selection_after_range,
         selection_after_toggle, AnalysisReport, Fact, FactFacets, FactFilter, LibraryContext,
+        UndoStack,
     };
     use punks_library::Library;
     use std::collections::HashMap;
@@ -2253,6 +2450,9 @@ mod tests {
             scanning: false,
             scan_rx: None,
             scan_progress: None,
+            health_issues: None,
+            health_rx: None,
+            undo_stack: UndoStack::default(),
         };
         ctx.reload();
 

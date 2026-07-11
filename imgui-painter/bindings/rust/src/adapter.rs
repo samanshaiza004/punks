@@ -10,33 +10,41 @@
 
 use imgui_sys as sys;
 
-use crate::{Mesh, Vec2};
+use crate::{Mesh, Vec2, Vertex};
 
-/// Append `mesh` to `draw_list`'s current command, inheriting its active
-/// clip rect and texture binding (that's what `PrimReserve` sets up).
+/// Append `mesh` to `draw_list`'s current command — the owned-[`Mesh`]
+/// convenience over [`paint_raw`]. Used by the benchmark and owned-mesh
+/// tests; the per-frame draw path ([`crate::Canvas`]) goes through
+/// [`paint_raw`] to avoid the owned copy.
+///
+/// # Safety
+/// Same as [`paint_raw`].
+pub unsafe fn paint_to_draw_list(draw_list: *mut sys::ImDrawList, mesh: &Mesh) {
+    paint_raw(draw_list, &mesh.vertices, &mesh.indices);
+}
+
+/// Append `vertices`/`indices` to `draw_list`'s current command, inheriting
+/// its active clip rect and texture binding (that's what `PrimReserve` sets
+/// up). Borrows the slices — no owned `Mesh`, so the per-frame draw path can
+/// submit straight from the arena with zero allocation.
 ///
 /// # Safety
 /// `draw_list` must be a valid, currently-active `ImDrawList*` (e.g. from
-/// `ui.get_window_draw_list()` via [`white_pixel_uv`]'s sibling call, or
-/// `igGetWindowDrawList()` directly), and this must run on the thread that
-/// owns the ImGui context for the current frame.
-pub unsafe fn paint_to_draw_list(draw_list: *mut sys::ImDrawList, mesh: &Mesh) {
-    if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+/// `igGetWindowDrawList()`), on the thread that owns the ImGui context for
+/// the current frame. The slices must stay valid for the call.
+pub unsafe fn paint_raw(draw_list: *mut sys::ImDrawList, vertices: &[Vertex], indices: &[u16]) {
+    if vertices.is_empty() || indices.is_empty() {
         return;
     }
-    sys::ImDrawList_PrimReserve(
-        draw_list,
-        mesh.indices.len() as i32,
-        mesh.vertices.len() as i32,
-    );
+    sys::ImDrawList_PrimReserve(draw_list, indices.len() as i32, vertices.len() as i32);
     // Indices are session-local (0-based); the draw list's vertex buffer is
     // shared across everything drawn this frame, so rebase against its
     // current write offset before writing ours in.
     let base = (*draw_list)._VtxCurrentIdx as u16;
-    for &i in &mesh.indices {
-        sys::ImDrawList_PrimWriteIdx(draw_list, base + i);
+    for &i in indices {
+        sys::ImDrawList_PrimWriteIdx(draw_list, base.wrapping_add(i));
     }
-    for v in &mesh.vertices {
+    for v in vertices {
         let pos = sys::ImVec2 {
             x: v.pos.x,
             y: v.pos.y,

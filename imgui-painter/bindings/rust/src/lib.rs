@@ -103,6 +103,7 @@ mod ffi {
         pub fn ip_rounded_rect(ctx: *mut ip_ctx, rect: ip_rect, radius: f32);
         pub fn ip_fill_color(ctx: *mut ip_ctx, color: ip_color);
         pub fn ip_fill_gradient(ctx: *mut ip_ctx, gradient: *const ip_gradient);
+        pub fn ip_line(ctx: *mut ip_ctx, a: ip_vec2, b: ip_vec2, thickness: f32, color: ip_color);
         pub fn ip_add_shadow(ctx: *mut ip_ctx, shadow: *const ip_shadow);
         pub fn ip_add_border(ctx: *mut ip_ctx, border: *const ip_border);
         pub fn ip_end(ctx: *mut ip_ctx) -> ip_mesh;
@@ -317,6 +318,37 @@ impl Session {
         unsafe { ffi::ip_add_border(self.ctx, &raw) };
     }
 
+    /// Append a straight `thickness`-px segment from `a` to `b`. Independent
+    /// of the current shape (unlike `fill_*`), so it composes with fills in
+    /// one accumulation. Not anti-aliased — pixel-exact for axis-aligned
+    /// integer-width lines, a hard edge for diagonals (see the core's
+    /// ponytail).
+    pub fn line(&mut self, a: Vec2, b: Vec2, thickness: f32, color: Color) {
+        unsafe { ffi::ip_line(self.ctx, a, b, thickness, color) };
+    }
+
+    /// Read the accumulated mesh as borrowed slices, without copying it into
+    /// an owned [`Mesh`] — the zero-allocation read path [`Canvas`] submits
+    /// through. The slices are valid only for `f`'s duration (they borrow the
+    /// context's arena, invalidated by the next `begin`); this ends the
+    /// current accumulation, same as [`end`](Self::end).
+    pub fn with_raw_mesh<R>(&mut self, f: impl FnOnce(&[Vertex], &[u16]) -> R) -> R {
+        let raw = unsafe { ffi::ip_end(self.ctx) };
+        // SAFETY: ip_end returns pointers into the ctx's buffers, valid until
+        // the next begin/Drop; the slices don't escape `f`.
+        let vtx: &[Vertex] = if raw.vtx.is_null() || raw.vtx_count <= 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(raw.vtx, raw.vtx_count as usize) }
+        };
+        let idx: &[u16] = if raw.idx.is_null() || raw.idx_count <= 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(raw.idx, raw.idx_count as usize) }
+        };
+        f(vtx, idx)
+    }
+
     /// Finish the session and copy out the accumulated mesh.
     pub fn end(&mut self) -> Mesh {
         let raw = unsafe { ffi::ip_end(self.ctx) };
@@ -354,7 +386,7 @@ impl Drop for Session {
 /// arena whose scratch buffers grow once and are cleared (not dropped) per
 /// shape, so there's no steady-state allocation after warm-up.
 ///
-/// Get a per-frame [`FramePainter`] from [`begin_frame`](Self::begin_frame);
+/// Get a per-frame [`Frame`] from [`begin_frame`](Self::begin_frame);
 /// the borrow it takes makes starting two frames on one `Painter`
 /// concurrently a compile error, not a runtime rule.
 pub struct Painter {
@@ -369,11 +401,11 @@ impl Painter {
     }
 
     /// Begin a frame. Samples the host's white-pixel UV once (an active
-    /// ImGui context must exist on this thread), then hands back a
-    /// [`FramePainter`] scoped to this frame.
-    pub fn begin_frame(&mut self) -> FramePainter<'_> {
+    /// ImGui context must exist on this thread), then hands back a [`Frame`]
+    /// scoped to this frame; open a [`Canvas`] per draw list from it.
+    pub fn begin_frame(&mut self) -> Frame<'_> {
         let white_uv = unsafe { adapter::white_pixel_uv() };
-        FramePainter {
+        Frame {
             painter: self,
             white_uv,
         }
@@ -386,59 +418,96 @@ impl Default for Painter {
     }
 }
 
-/// One frame's painting, borrowed from a [`Painter`] via
-/// [`Painter::begin_frame`]. Submission lives here, on the frame — a shape
-/// method builds its mesh and copies it straight into the target draw list
-/// today, but because the frame owns that boundary, later work (GPU-batch
-/// upload, `ImDrawListSplitter` z-order, frame stats) can change how/when
-/// submission happens without touching any call site.
-pub struct FramePainter<'a> {
+/// One imgui frame's painting, borrowed from a [`Painter`] via
+/// [`Painter::begin_frame`]. Hand out a [`Canvas`] per draw list with
+/// [`canvas`](Self::canvas); each `Canvas` accumulates shapes and submits
+/// once on `Drop`.
+///
+/// `Frame` is the only scope that spans *everything drawn this imgui frame*,
+/// across every draw list. That makes it the reserved home for frame-level
+/// behavior — primitive/vertex counters, allocation stats, validation
+/// hooks, cross-canvas mesh batching, GPU-upload coordination — none of
+/// which belong to a single `Canvas`. None of it is built yet (punks2 draws
+/// into one window = one draw list, so there's no consumer); it lives in
+/// `ip_frame_begin`/`ip_frame_end` as reserved hooks, per CLAUDE.md §8.
+///
+/// Invariant, total across the chain: a `Canvas` never outlives its `Frame`;
+/// a `Frame` never outlives its `Painter`; the `Painter` owns all memory.
+/// [`begin_frame`](Painter::begin_frame)'s `&mut Painter` borrow makes two
+/// concurrent frames uncompilable; [`canvas`](Self::canvas)'s `&mut Frame`
+/// borrow makes two concurrent canvases uncompilable — matching the arena's
+/// single-accumulator reality, enforced by the borrow checker, not a rule.
+pub struct Frame<'a> {
     painter: &'a mut Painter,
     white_uv: Vec2,
 }
 
-impl FramePainter<'_> {
-    /// Build a solid-filled (optionally rounded) rect and submit it into
-    /// `dl`. `radius <= 0.0` is a plain rectangle — pixel-identical to
-    /// `ImDrawList::add_rect(...).filled(true)`.
+impl Frame<'_> {
+    /// Open a [`Canvas`] targeting `dl`. The canvas accumulates every shape
+    /// drawn on it into one mesh and submits it into `dl` when it drops.
     ///
     /// # Safety
-    /// `dl` must be a valid, currently-active `ImDrawList*` for this frame
-    /// (e.g. `imgui::sys::igGetWindowDrawList()`), on the thread that owns
-    /// the ImGui context — same contract as
-    /// [`adapter::paint_to_draw_list`].
-    pub unsafe fn fill_rounded_rect(
-        &mut self,
-        dl: *mut imgui_sys::ImDrawList,
-        rect: Rect,
-        radius: f32,
-        color: Color,
-    ) {
-        let mesh = self.build_fill(rect, radius, color);
-        adapter::paint_to_draw_list(dl, &mesh);
-    }
-
-    /// Mesh half of [`fill_rounded_rect`](Self::fill_rounded_rect), split
-    /// out so it's exercisable without a live ImGui draw list (the tests
-    /// build a `FramePainter` with a synthetic white-pixel UV and assert on
-    /// this mesh). Submission stays on the frame; this only builds.
-    fn build_fill(&mut self, rect: Rect, radius: f32, color: Color) -> Mesh {
-        let session = &mut self.painter.session;
-        session.begin(self.white_uv);
-        session.rounded_rect(rect, radius);
-        session.fill_color(color);
-        session.end()
+    /// `dl` must be a valid, currently-active `ImDrawList*` (e.g.
+    /// `imgui::sys::igGetWindowDrawList()`) that stays valid until the
+    /// returned `Canvas` drops, on the thread owning the ImGui context —
+    /// same contract as [`adapter::paint_raw`]. The `&mut self` borrow keeps
+    /// only one canvas open at a time.
+    pub unsafe fn canvas(&mut self, dl: *mut imgui_sys::ImDrawList) -> Canvas<'_> {
+        self.painter.session.begin(self.white_uv);
+        Canvas {
+            session: &mut self.painter.session,
+            dl,
+        }
     }
 }
 
-impl Drop for FramePainter<'_> {
+impl Drop for Frame<'_> {
     fn drop(&mut self) {
-        // No-op today. Reserved as the frame-end boundary for behavior that
-        // belongs at frame granularity when it lands: frame stats / alloc
-        // counters, validation hooks, deferred GPU-batch upload, paint
-        // debugger snapshots. Per-shape scratch already clears on each
-        // `fill_*` call (Session::begin), so there's nothing to reset here
-        // yet — this exists so those futures don't change the call site.
+        // No-op today (see the type doc): the reserved home for frame-end
+        // behavior — stats, validation, cross-canvas batch flush, GPU
+        // upload. Per-canvas scratch clears on each `canvas()`; there's
+        // nothing frame-level to reset yet. Exists so those futures don't
+        // change any call site.
+    }
+}
+
+/// Draws into exactly one [`ImDrawList`](imgui_sys::ImDrawList). Every shape
+/// (`fill_rect`, `line`) accumulates into one mesh; the whole mesh submits
+/// once, on `Drop` — so 512 waveform bars are one reserve + one copy, not
+/// 512. Borrowed from a [`Frame`] via [`Frame::canvas`]; the app describes
+/// geometry and never touches the draw list, `PrimReserve`, or a `Mesh`.
+pub struct Canvas<'a> {
+    session: &'a mut Session,
+    dl: *mut imgui_sys::ImDrawList,
+}
+
+impl Canvas<'_> {
+    /// A solid-filled (optionally rounded) rect. `radius <= 0.0` is a plain
+    /// rectangle — pixel-identical to `ImDrawList::add_rect(...).filled(true)`.
+    pub fn fill_rect(&mut self, rect: Rect, radius: f32, color: Color) {
+        self.session.rounded_rect(rect, radius);
+        self.session.fill_color(color);
+    }
+
+    /// A straight `thickness`-px segment from `a` to `b`. Not anti-aliased —
+    /// pixel-exact for axis-aligned integer-width lines (playhead, crosshair),
+    /// a hard edge for diagonals (see [`Session::line`]).
+    pub fn line(&mut self, a: Vec2, b: Vec2, thickness: f32, color: Color) {
+        self.session.line(a, b, thickness, color);
+    }
+}
+
+impl Drop for Canvas<'_> {
+    fn drop(&mut self) {
+        // Zero-copy submit: read the arena's accumulated mesh and write it
+        // straight into the bound draw list — no owned `Mesh`, so no per-frame
+        // allocation. `Drop` can't return `Result`, but PrimReserve/
+        // PrimWriteVtx don't fail, so there's nothing to surface.
+        let dl = self.dl;
+        // SAFETY: `dl` upheld valid by the caller of `Frame::canvas` for this
+        // Canvas's whole lifetime; the raw slices don't escape the closure.
+        self.session
+            .with_raw_mesh(|vtx, idx| unsafe { adapter::paint_raw(dl, vtx, idx) });
     }
 }
 
@@ -1183,30 +1252,76 @@ mod tests {
     }
 
     #[test]
-    fn frame_painter_fill_matches_the_equivalent_session_sequence() {
-        // The Painter/FramePainter wrapper must build the exact same mesh a
-        // direct Session begin -> rounded_rect -> fill_color -> end would.
-        // Constructed by hand (bypassing begin_frame, which needs a live
-        // ImGui context for white_pixel_uv) with a synthetic UV so the
-        // geometry path is exercisable headlessly; draw_into's submission
-        // half rides the manual visual check.
-        let r = rect((3.0, 5.0), (43.0, 25.0));
-        let color = rgba(0x12, 0x34, 0x56, 0xFF);
+    fn line_produces_a_one_pixel_wide_quad_with_the_expected_span() {
+        // A 1px vertical segment: the quad must span ±0.5px perpendicular
+        // (so 1px wide) over the segment's length. `Canvas`'s Drop-submit
+        // needs a live draw list, so the geometry is exercised at the
+        // Session level it composes; submission rides the visual gate.
+        let color = rgba(0xFF, 0x00, 0x00, 0xFF);
+        let mut s = Session::new();
+        s.begin(uv());
+        s.line(
+            Vec2 { x: 10.0, y: 5.0 },
+            Vec2 { x: 10.0, y: 25.0 },
+            1.0,
+            color,
+        );
+        s.with_raw_mesh(|vtx, idx| {
+            assert_eq!(vtx.len(), 4, "a line is one quad");
+            assert_eq!(idx.len(), 6, "one quad is two triangles");
+            let xs: Vec<f32> = vtx.iter().map(|v| v.pos.x).collect();
+            let ys: Vec<f32> = vtx.iter().map(|v| v.pos.y).collect();
+            assert!(
+                xs.iter().all(|&x| x == 9.5 || x == 10.5),
+                "1px wide: {xs:?}"
+            );
+            assert!(
+                ys.iter().all(|&y| y == 5.0 || y == 25.0),
+                "spans a->b: {ys:?}"
+            );
+            assert!(vtx.iter().all(|v| v.col == color));
+        });
+    }
 
-        let mut expected_session = Session::new();
-        expected_session.begin(uv());
-        expected_session.rounded_rect(r, 6.0);
-        expected_session.fill_color(color);
-        let expected = expected_session.end();
+    #[test]
+    fn multiple_shapes_accumulate_into_one_mesh() {
+        // The single-submit property `Canvas` relies on: several fills + a
+        // line drawn between one begin and one read land in ONE mesh (not
+        // one per shape). Two plain rects (5 vtx / 12 idx each) + one line
+        // (4 vtx / 6 idx) = 14 vtx / 30 idx combined.
+        let c = rgba(0x20, 0x40, 0x60, 0xFF);
+        let mut s = Session::new();
+        s.begin(uv());
+        s.rounded_rect(rect((0.0, 0.0), (20.0, 10.0)), 0.0);
+        s.fill_color(c);
+        s.rounded_rect(rect((30.0, 0.0), (50.0, 10.0)), 0.0);
+        s.fill_color(c);
+        s.line(Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 0.0, y: 10.0 }, 1.0, c);
+        s.with_raw_mesh(|vtx, idx| {
+            assert_eq!(vtx.len(), 5 + 5 + 4);
+            assert_eq!(idx.len(), 12 + 12 + 6);
+        });
+    }
 
-        let mut painter = Painter::new();
-        let mut frame = FramePainter {
-            painter: &mut painter,
-            white_uv: uv(),
-        };
-        let got = frame.build_fill(r, 6.0, color);
+    #[test]
+    fn with_raw_mesh_matches_the_owned_mesh_copy() {
+        // The zero-copy read path and the owned-Mesh path must see identical
+        // geometry — so `Canvas`'s no-alloc submit draws the same thing the
+        // tested `Session::end` path would.
+        let c = rgba(0x11, 0x22, 0x33, 0xFF);
+        let mut raw_session = Session::new();
+        raw_session.begin(uv());
+        raw_session.rounded_rect(rect((1.0, 2.0), (9.0, 8.0)), 2.0);
+        raw_session.fill_color(c);
+        let (raw_v, raw_i) = raw_session.with_raw_mesh(|vtx, idx| (vtx.to_vec(), idx.to_vec()));
 
-        assert!(!got.vertices.is_empty());
-        assert_eq!(got, expected);
+        let mut owned_session = Session::new();
+        owned_session.begin(uv());
+        owned_session.rounded_rect(rect((1.0, 2.0), (9.0, 8.0)), 2.0);
+        owned_session.fill_color(c);
+        let owned = owned_session.end();
+
+        assert_eq!(raw_v, owned.vertices);
+        assert_eq!(raw_i, owned.indices);
     }
 }

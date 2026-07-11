@@ -392,6 +392,41 @@ void ip_fill_gradient(ip_ctx *ctx, const ip_gradient *gradient) {
         ctx->idx);
 }
 
+void ip_line(ip_ctx *ctx, ip_vec2 a, ip_vec2 b, float thickness, ip_color color) {
+    // A straight segment as a `thickness`-wide quad: offset each endpoint by
+    // half the thickness along the segment's perpendicular, emit two
+    // triangles. Independent of the current shape (unlike ip_fill_*), so it
+    // composes freely alongside fills in one accumulation.
+    //
+    // ponytail: no anti-aliasing, unlike Dear ImGui's own AddLine (which
+    // feathers the edge). Pixel-identical for axis-aligned integer-width
+    // lines (all punks2 uses today: playhead + crosshair, 1px); a visible
+    // hard edge for diagonal lines. Upgrade path: a feathered-edge stroke
+    // (an inner opaque quad flanked by alpha-ramp edge quads) if a diagonal
+    // consumer ever appears.
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (len <= 0.0f) {
+        return;
+    }
+    const float half = thickness * 0.5f;
+    const float nx = -dy / len * half;
+    const float ny = dx / len * half;
+
+    const uint16_t base = static_cast<uint16_t>(ctx->vtx.size());
+    ctx->vtx.push_back({{a.x + nx, a.y + ny}, ctx->white_uv, color});
+    ctx->vtx.push_back({{b.x + nx, b.y + ny}, ctx->white_uv, color});
+    ctx->vtx.push_back({{b.x - nx, b.y - ny}, ctx->white_uv, color});
+    ctx->vtx.push_back({{a.x - nx, a.y - ny}, ctx->white_uv, color});
+    ctx->idx.push_back(base);
+    ctx->idx.push_back(base + 1);
+    ctx->idx.push_back(base + 2);
+    ctx->idx.push_back(base);
+    ctx->idx.push_back(base + 2);
+    ctx->idx.push_back(base + 3);
+}
+
 void ip_add_shadow(ip_ctx *ctx, const ip_shadow *shadow) {
     if (!ctx->has_shape || shadow == nullptr) {
         return;

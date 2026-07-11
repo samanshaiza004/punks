@@ -20,6 +20,8 @@ pub struct Keybinds {
     pub prev_tab: String,
     #[serde(default = "default_next_tab")]
     pub next_tab: String,
+    #[serde(default = "default_undo")]
+    pub undo: String,
 }
 
 fn default_navigate_up() -> String {
@@ -46,6 +48,9 @@ fn default_prev_tab() -> String {
 fn default_next_tab() -> String {
     "RightArrow".into()
 }
+fn default_undo() -> String {
+    "U".into()
+}
 fn default_volume() -> f32 {
     1.0
 }
@@ -61,6 +66,7 @@ impl Default for Keybinds {
             close_tab: default_close_tab(),
             prev_tab: default_prev_tab(),
             next_tab: default_next_tab(),
+            undo: default_undo(),
         }
     }
 }
@@ -170,5 +176,16 @@ mod tests {
         let back: PunksConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tabs, cfg.tabs);
         assert_eq!(back.active_tab, 1);
+    }
+
+    #[test]
+    fn keybinds_without_undo_field_deserializes_with_default() {
+        // A config saved before the undo keybind existed has a "keybinds"
+        // object with no "undo" key; loading it must not fail, and must
+        // fall back to the documented default.
+        let json = r#"{"keybinds": {"navigate_up": "W"}}"#;
+        let cfg: PunksConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.keybinds.navigate_up, "W");
+        assert_eq!(cfg.keybinds.undo, "U");
     }
 }

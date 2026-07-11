@@ -112,6 +112,12 @@ typedef struct {
  * == 0` is a no-op; `== 1` fills solid with that one stop's color). */
 void ip_fill_gradient(ip_ctx *ctx, const ip_gradient *gradient);
 
+/* Append a straight segment from `a` to `b`, `thickness` px wide, as a quad.
+ * Independent of the current shape, so it composes with fills in one
+ * accumulation. Not anti-aliased (see painter.cpp's ponytail): pixel-exact
+ * for axis-aligned integer-width lines, a hard edge for diagonals. */
+void ip_line(ip_ctx *ctx, ip_vec2 a, ip_vec2 b, float thickness, ip_color color);
+
 typedef struct {
     ip_vec2 offset;
     float blur;

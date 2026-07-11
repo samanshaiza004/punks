@@ -38,3 +38,23 @@ jobs:
 
       - name: test
         run: cargo test --workspace
+
+  drawing-boundary:
+    name: drawing boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No raw ImDrawList geometry in application code
+        # punks2 describes geometry through imgui-painter (Canvas); only text
+        # (imgui owns the font atlas) may go straight to ImDrawList. A raw
+        # fill/stroke in product code belongs in imgui-painter instead —
+        # improve the library until it can express the shape, don't hand-roll
+        # it here. Scoped to crates/: imgui-painter itself legitimately calls
+        # PrimReserve/PrimWrite* and tessellates.
+        run: |
+          if grep -rnE '\.(add_rect|add_rect_filled|add_line|add_circle|add_circle_filled|add_triangle|add_triangle_filled|add_ngon|add_ngon_filled|add_bezier_cubic|add_bezier_quadratic|add_polyline|add_convex_poly_filled)\b|ImDrawList_Add(Rect|RectFilled|Line|Circle|CircleFilled|Triangle|TriangleFilled|Ngon|NgonFilled|Polyline|ConvexPolyFilled|BezierCubic|BezierQuadratic)' crates/ --include='*.rs'; then
+            echo "::error::Raw ImDrawList geometry found in application code — draw it through imgui-painter (Canvas) instead. Only add_text may bypass it."
+            exit 1
+          fi
+          echo "OK: application code constructs no raw geometry."

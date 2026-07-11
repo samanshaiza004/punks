@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use imgui::Key;
-use punks_browser::{Fact, LibraryState, PlaybackStatus, SampleBrowser, TagCount};
+use punks_browser::{
+    Fact, HealthIssue, HealthIssueKind, LibraryState, PlaybackStatus, SampleBrowser, TagCount,
+};
 use punks_core::config::{Keybinds, PunksConfig};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -16,6 +18,7 @@ enum BrowserAction {
     CloseTab,
     PrevTab,
     NextTab,
+    Undo,
 }
 
 const CAPTURABLE_KEYS: &[(Key, &str)] = &[
@@ -79,6 +82,7 @@ fn keybind_field_mut(keybinds: &mut Keybinds, action: BrowserAction) -> &mut Str
         BrowserAction::CloseTab => &mut keybinds.close_tab,
         BrowserAction::PrevTab => &mut keybinds.prev_tab,
         BrowserAction::NextTab => &mut keybinds.next_tab,
+        BrowserAction::Undo => &mut keybinds.undo,
     }
 }
 
@@ -92,6 +96,7 @@ fn keybind_field(keybinds: &Keybinds, action: BrowserAction) -> &str {
         BrowserAction::CloseTab => &keybinds.close_tab,
         BrowserAction::PrevTab => &keybinds.prev_tab,
         BrowserAction::NextTab => &keybinds.next_tab,
+        BrowserAction::Undo => &keybinds.undo,
     }
 }
 
@@ -104,6 +109,7 @@ const KEYBIND_ACTIONS: &[(BrowserAction, &str)] = &[
     (BrowserAction::CloseTab, "Close tab"),
     (BrowserAction::PrevTab, "Previous tab"),
     (BrowserAction::NextTab, "Next tab"),
+    (BrowserAction::Undo, "Undo"),
 ];
 
 // Tab palette: active tab carries a muted blue accent, inactive tabs are grey.
@@ -160,6 +166,29 @@ fn fact_display(f: &Fact) -> String {
         Fact::Real(v) if v.fract() == 0.0 => format!("{}", *v as i64),
         Fact::Real(v) => format!("{v}"),
         Fact::Blob(_) => "<blob>".into(),
+    }
+}
+
+/// One-line human-readable description of a metadata health issue, for the
+/// sidebar health panel. `{:?}` on `Field` prints its bare variant name
+/// (`Description`, `Category`, …) since it's a data-less enum, so it doubles
+/// as the display label without a separate lookup table.
+fn health_issue_summary(issue: &HealthIssue) -> String {
+    match &issue.kind {
+        HealthIssueKind::Missing => format!("missing {:?}", issue.field),
+        HealthIssueKind::CacheDrift { embedded, cached } => {
+            format!(
+                "{:?} changed since last scan (file: \"{embedded}\", cached: \"{cached}\")",
+                issue.field
+            )
+        }
+        HealthIssueKind::OverrideDrift {
+            embedded,
+            overridden,
+        } => format!(
+            "{:?} disagrees with override (file: \"{embedded}\", override: \"{overridden}\")",
+            issue.field
+        ),
     }
 }
 
@@ -337,7 +366,7 @@ impl BrowserPanel {
         &mut self,
         ui: &imgui::Ui,
         browser: &mut SampleBrowser,
-        frame: &mut imgui_painter::FramePainter<'_>,
+        frame: &mut imgui_painter::Frame<'_>,
         on_drag_file: Option<&mut dyn FnMut(&Path)>,
     ) {
         browser.poll();
@@ -590,6 +619,7 @@ impl BrowserPanel {
                         self.draw_search_results(
                             ui,
                             browser,
+                            frame,
                             &mut drag_requested,
                             sf,
                             up_key,
@@ -600,6 +630,7 @@ impl BrowserPanel {
                         self.draw_browse_list(
                             ui,
                             browser,
+                            frame,
                             &mut drag_requested,
                             sf,
                             up_key,
@@ -656,6 +687,8 @@ impl BrowserPanel {
                 browser.new_tab(start.as_deref());
             } else if pressed(&self.prefs.keybinds.close_tab) {
                 browser.close_tab(browser.active_tab());
+            } else if pressed(&self.prefs.keybinds.undo) {
+                browser.undo();
             }
         }
 
@@ -1013,6 +1046,18 @@ impl BrowserPanel {
             }
             LibraryState::Ready => {
                 ui.spacing();
+                if let Some(desc) = browser.undo_description() {
+                    if ui.button(format!("Undo: {desc}##undo_btn")) {
+                        browser.undo();
+                    }
+                    if ui.is_item_hovered() {
+                        ui.tooltip_text(format!("({})", self.prefs.keybinds.undo));
+                    }
+                } else {
+                    ui.text_disabled("Nothing to undo");
+                }
+
+                ui.spacing();
                 ui.text_disabled("TAGS");
                 ui.set_next_item_width(-1.0);
                 let entered = ui
@@ -1050,7 +1095,55 @@ impl BrowserPanel {
                     }
                 }
                 self.draw_fact_filters(ui, browser);
+                self.draw_health_panel(ui, browser);
                 self.draw_delete_library(ui, browser);
+            }
+        }
+    }
+
+    /// Sidebar metadata health-check panel: an on-demand scan comparing each
+    /// asset's embedded metadata against the library's cached copy and any
+    /// user override, surfacing missing/drifted fields. Read-only — this
+    /// never writes anything; it's a diagnostic, not a fix.
+    fn draw_health_panel(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+        ui.spacing();
+        ui.separator();
+        ui.text_disabled("METADATA HEALTH");
+        ui.spacing();
+
+        let running = browser.health_check_running();
+        if running {
+            ui.text_disabled("Checking…");
+        } else if ui.button("Check library health") {
+            browser.check_library_health();
+        }
+
+        match browser.health_issues() {
+            None => {
+                if !running {
+                    ui.text_disabled("Not checked yet.");
+                }
+            }
+            Some([]) => ui.text_disabled("No issues found."),
+            Some(issues) => {
+                ui.spacing();
+                ui.text(format!("{} issue(s) found:", issues.len()));
+                ui.child_window("health_issues")
+                    .size([-1.0, 150.0])
+                    .border(true)
+                    .build(|| {
+                        for issue in issues {
+                            let name = issue
+                                .path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            ui.text_wrapped(format!("{name} — {}", health_issue_summary(issue)));
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text(issue.path.to_string_lossy());
+                            }
+                        }
+                    });
             }
         }
     }
@@ -1168,6 +1261,7 @@ impl BrowserPanel {
         &mut self,
         ui: &imgui::Ui,
         browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::Frame<'_>,
         drag_requested: &mut Option<PathBuf>,
         search_focused: bool,
         up_key: Key,
@@ -1287,7 +1381,7 @@ impl BrowserPanel {
                 }
                 let names = browser.tag_names_for_path(&path);
                 if !names.is_empty() {
-                    draw_tag_pills(ui, &names, row_rect.0, row_rect.1);
+                    draw_tag_pills(ui, &names, frame, row_rect.0, row_rect.1);
                 }
                 ui.same_line();
                 if ui.small_button(format!("+##stagbtn{i}")) {
@@ -1321,6 +1415,7 @@ impl BrowserPanel {
         &mut self,
         ui: &imgui::Ui,
         browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::Frame<'_>,
         drag_requested: &mut Option<PathBuf>,
         search_focused: bool,
         up_key: Key,
@@ -1484,7 +1579,7 @@ impl BrowserPanel {
                     }
                     let names = browser.tag_names_for_path(&path);
                     if !names.is_empty() {
-                        draw_tag_pills(ui, &names, row_rect.0, row_rect.1);
+                        draw_tag_pills(ui, &names, frame, row_rect.0, row_rect.1);
                     }
                     ui.same_line();
                     if ui.small_button(format!("+##tagbtn{i}")) {
@@ -1691,8 +1786,13 @@ fn color_u32(c: [f32; 4]) -> u32 {
 
 /// Right-aligned tag pills inside a file row's rect, drawn over the
 /// selectable. Stops before eating the space reserved for the file name.
-fn draw_tag_pills(ui: &imgui::Ui, names: &[String], rect_min: [f32; 2], rect_max: [f32; 2]) {
-    let draw = ui.get_window_draw_list();
+fn draw_tag_pills(
+    ui: &imgui::Ui,
+    names: &[String],
+    frame: &mut imgui_painter::Frame<'_>,
+    rect_min: [f32; 2],
+    rect_max: [f32; 2],
+) {
     let bg = color_u32(PILL_BG);
     let fg = color_u32(PILL_TEXT);
     let y0 = rect_min[1] + 1.0;
@@ -1700,25 +1800,53 @@ fn draw_tag_pills(ui: &imgui::Ui, names: &[String], rect_min: [f32; 2], rect_max
     // Keep the left part of the row readable for the name.
     let min_x = rect_min[0] + 160.0;
     let mut x = rect_max[0] - 4.0;
+
+    // Lay pills out right-to-left, collecting each one's position so the
+    // backgrounds go through one Canvas (submitted first) and the labels
+    // draw on top afterward (imgui owns fonts).
+    let mut pills: Vec<(f32, f32, &str)> = Vec::new(); // (x, width, name)
     for name in names.iter().rev() {
         let w = ui.calc_text_size(name)[0] + 10.0;
         if x - w < min_x {
             break;
         }
         x -= w;
-        draw.add_rect([x, y0], [x + w, y1], bg)
-            .filled(true)
-            .rounding(4.0)
-            .build();
-        draw.add_text([x + 5.0, y0 + 1.0], fg, name);
+        pills.push((x, w, name));
         x -= 4.0;
+    }
+    if pills.is_empty() {
+        return;
+    }
+
+    // Pill backgrounds — one Canvas, one submit for the whole row's pills.
+    // SAFETY: the window draw list is the active one this frame; the Canvas
+    // submits and releases the raw pointer when it drops at the block's end.
+    unsafe {
+        let dl = imgui::sys::igGetWindowDrawList();
+        let mut canvas = frame.canvas(dl);
+        for &(px, w, _) in &pills {
+            canvas.fill_rect(
+                imgui_painter::Rect {
+                    min: imgui_painter::Vec2 { x: px, y: y0 },
+                    max: imgui_painter::Vec2 { x: px + w, y: y1 },
+                },
+                4.0,
+                bg,
+            );
+        }
+    }
+
+    // Labels on top, on imgui's own draw list.
+    let draw = ui.get_window_draw_list();
+    for &(px, _, name) in &pills {
+        draw.add_text([px + 5.0, y0 + 1.0], fg, name);
     }
 }
 
 fn draw_waveform_widget(
     ui: &imgui::Ui,
     browser: &mut SampleBrowser,
-    frame: &mut imgui_painter::FramePainter<'_>,
+    frame: &mut imgui_painter::Frame<'_>,
     scrub_last_x: &mut Option<f32>,
 ) {
     let [cx, cy] = ui.cursor_screen_pos();
@@ -1736,6 +1864,10 @@ fn draw_waveform_widget(
     let axis = browser.waveform_axis();
     let mouse_x = ui.io().mouse_pos[0];
 
+    // imgui's own draw list, for text only — imgui-painter owns fills and
+    // strokes. `draw` stays live across the Canvas blocks below (each opens
+    // the raw window draw list, which is the same underlying list); this is
+    // the same interleave Stage 1 proved safe.
     let draw = ui.get_window_draw_list();
 
     let bg = color_u32(WAVEFORM_BG);
@@ -1743,43 +1875,35 @@ fn draw_waveform_widget(
     let playhead_color = color_u32(WAVEFORM_PLAYHEAD);
     let text_color = color_u32(WAVEFORM_TEXT);
 
-    // Waveform background — Phase 3 Stage 1's one converted call site.
-    // Submitted through imgui-painter's FramePainter instead of
-    // draw.add_rect(...).filled(true); radius 0 makes it pixel-identical to
-    // a plain filled rect. Drawn first (like before) so bars/playhead/text
-    // paint on top. Writes into the same window draw list as `draw`.
-    unsafe {
+    // Geometry helpers so the Canvas calls below read cleanly.
+    let rect = |x0: f32, y0: f32, x1: f32, y1: f32| imgui_painter::Rect {
+        min: imgui_painter::Vec2 { x: x0, y: y0 },
+        max: imgui_painter::Vec2 { x: x1, y: y1 },
+    };
+    let pt = |x: f32, y: f32| imgui_painter::Vec2 { x, y };
+
+    // Background + every bar in ONE Canvas — up to ~512 bars submitted as a
+    // single reserve+copy, not one per bar. Drawn first (behind everything).
+    // SAFETY: the window draw list is the active one this frame; the Canvas
+    // submits and releases the raw pointer when it drops at the block's end.
+    let has_peaks = unsafe {
         let dl = imgui::sys::igGetWindowDrawList();
-        frame.fill_rounded_rect(
-            dl,
-            imgui_painter::Rect {
-                min: imgui_painter::Vec2 { x: cx, y: cy },
-                max: imgui_painter::Vec2 {
-                    x: cx + w,
-                    y: cy + H,
-                },
-            },
-            0.0,
-            bg,
-        );
-    }
-
-    let has_peaks = if let Some(peaks) = browser.waveform_peaks() {
-        let bar_w = (w / peaks.num_buckets as f32).max(1.0);
-        let mid_y = cy + H / 2.0;
-        let half_h = H / 2.0;
-
-        for (i, &(lo, hi)) in peaks.peaks.iter().enumerate() {
-            let x = cx + i as f32 * bar_w;
-            let y_top = mid_y - hi * half_h;
-            let y_bot = (mid_y - lo * half_h).max(y_top + 1.0);
-            draw.add_rect([x, y_top], [x + bar_w - 0.5, y_bot], bar_color)
-                .filled(true)
-                .build();
+        let mut canvas = frame.canvas(dl);
+        canvas.fill_rect(rect(cx, cy, cx + w, cy + H), 0.0, bg);
+        if let Some(peaks) = browser.waveform_peaks() {
+            let bar_w = (w / peaks.num_buckets as f32).max(1.0);
+            let mid_y = cy + H / 2.0;
+            let half_h = H / 2.0;
+            for (i, &(lo, hi)) in peaks.peaks.iter().enumerate() {
+                let x = cx + i as f32 * bar_w;
+                let y_top = mid_y - hi * half_h;
+                let y_bot = (mid_y - lo * half_h).max(y_top + 1.0);
+                canvas.fill_rect(rect(x, y_top, x + bar_w - 0.5, y_bot), 0.0, bar_color);
+            }
+            true
+        } else {
+            false
         }
-        true
-    } else {
-        false
     };
 
     match browser.playback_status() {
@@ -1789,11 +1913,16 @@ fn draw_waveform_widget(
             duration,
         } => {
             // Playhead position mapped onto the displayed axis (source-relative).
+            // Its own Canvas at this exact z-point, so the label text below
+            // stays over it, matching the pre-conversion draw order.
             if let Some((start, dur)) = axis {
                 let t = (((position.as_secs_f64() - start) / dur) as f32).clamp(0.0, 1.0);
                 let px = cx + t * w;
-                draw.add_line([px, cy], [px, cy + H], playhead_color)
-                    .build();
+                unsafe {
+                    let dl = imgui::sys::igGetWindowDrawList();
+                    let mut canvas = frame.canvas(dl);
+                    canvas.line(pt(px, cy), pt(px, cy + H), 1.0, playhead_color);
+                }
             }
             let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             let pos_s = position.as_secs();
@@ -1835,10 +1964,15 @@ fn draw_waveform_widget(
         if hovered || active {
             let mx = mouse_x.clamp(cx, cx + w);
             let hover = color_u32(WAVEFORM_HOVER);
-            draw.add_line([mx, cy], [mx, cy + H], hover).build();
             let mid = cy + H / 2.0;
-            draw.add_line([mx - 4.0, mid], [mx + 4.0, mid], hover)
-                .build();
+            // Both crosshair strokes in one Canvas, submitted here so the
+            // hover label below stays on top (pre-conversion draw order).
+            unsafe {
+                let dl = imgui::sys::igGetWindowDrawList();
+                let mut canvas = frame.canvas(dl);
+                canvas.line(pt(mx, cy), pt(mx, cy + H), 1.0, hover);
+                canvas.line(pt(mx - 4.0, mid), pt(mx + 4.0, mid), 1.0, hover);
+            }
             let frac = ((mx - cx) / w).clamp(0.0, 1.0) as f64;
             let t = (start + frac * dur) as u64;
             let label = format!("{}:{:02}", t / 60, t % 60);

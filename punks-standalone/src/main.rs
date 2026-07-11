@@ -116,7 +116,7 @@ struct AppWindow {
     imgui: ImguiState,
     browser: SampleBrowser,
     panel: BrowserPanel,
-    // Long-lived paint context (Phase 3 Stage 1). A per-frame FramePainter
+    // Long-lived paint context (Phase 3 Stage 1). A per-frame Frame
     // is opened from this each render pass and threaded into the panel; the
     // &mut borrow it takes makes two concurrent frames a compile error.
     painter: imgui_painter::Painter,
