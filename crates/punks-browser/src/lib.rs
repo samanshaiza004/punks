@@ -10,7 +10,7 @@ mod health;
 
 pub use command::{
     AssignTagCommand, BatchCommand, Command, CommandContext, CommandError, OverrideAction,
-    SetOverrideCommand, UnassignTagCommand, UndoStack, WriteDescriptionCommand,
+    SetOverrideCommand, UnassignTagCommand, UndoStack, WriteMetadataCommand,
 };
 pub use health::{HealthIssue, HealthIssueKind};
 pub use punks_analysis::{amp_to_dbfs, AnalysisReport};
@@ -18,7 +18,8 @@ pub use punks_core::config::PunksConfig;
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
 pub use punks_library::{Fact, LibraryError, ScanSummary, TagCount};
 pub use punks_playback::{
-    AudioMetadata, Field, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks,
+    AudioMetadata, Capability, Field, Metadata, MetadataSource, PlaybackError, PlaybackStatus,
+    ResolvedMetadata, Sourced, TrackInfo, WaveformPeaks,
 };
 
 use punks_analysis::{AnalysisContext, AudioBuffer};
@@ -29,9 +30,21 @@ use punks_playback::{decode_file, Backend, MetadataBackend, PlaybackEngine, Requ
 /// waveform's resolution).
 const WAVEFORM_BUCKETS: usize = 512;
 
-/// Compute (or load from cache) the full-source waveform for `path`, cache it
-/// under the file's library if any, and return it. Runs on the peaks worker.
-fn compute_and_cache_peaks(path: &Path) -> Option<WaveformPeaks> {
+/// Ensure `path`'s full-source waveform is in the library's persistent cache,
+/// returning it: load if cached (fast), else compute + store. The returned
+/// peaks double as the caller's view. Runs on the peaks worker today; the
+/// future folder-sweep calls this exact function so cache population lives in
+/// one place. No-op-store outside a library (nothing to persist to).
+//
+// TODO(decode-once): a short file is currently decoded twice on first
+// audition — once by the playback engine, once here — because this re-streams
+// the source instead of reusing the engine's already-decoded buffer. Fine for
+// v0.3, but at thousands of one-shots the ideal is a single decode fanning out
+// to { playback, screen waveform, cache write } (what pro tools like Soundminder
+// do). Upgrade path: persist the engine's in-memory `waveform_peaks()` for
+// non-truncated files instead of recomputing; the headless folder-sweep wants
+// the same single-decode fan-out.
+fn ensure_waveform_cached(path: &Path) -> Option<WaveformPeaks> {
     let root = path.parent().and_then(Library::find_root);
     let lib = root.as_deref().and_then(|r| Library::open(r).ok());
 
@@ -219,10 +232,10 @@ struct LibraryContext {
     asset_tags: HashMap<PathBuf, Vec<i64>>,
     /// Absolute path -> analysis results, filled asynchronously by the worker.
     analysis: HashMap<PathBuf, AnalysisReport>,
-    /// Absolute path -> embedded bext Description, cached from the same facts
-    /// table as `analysis` but kept separate: it's authored content the file
-    /// owns, not an analyzer's guess, so it doesn't belong on `AnalysisReport`.
-    descriptions: HashMap<PathBuf, String>,
+    /// Absolute path -> cached embedded scalar fields (Description/Category/
+    /// Creator) as `(Field, value)`, the DB's copy of what's in the file.
+    /// The health validator drift-checks a fresh file read against this.
+    metadata_cache: HashMap<PathBuf, Vec<(Field, String)>>,
     /// Absolute path -> user overrides (metric -> value). Patch the detected
     /// facts above; user data, never regenerated. `None` means the metric is
     /// marked explicitly absent (hides the detected guess, if any).
@@ -299,19 +312,31 @@ impl LibraryContext {
         match self.lib.all_facts() {
             Ok(rows) => {
                 let mut analysis = HashMap::with_capacity(rows.len());
-                let mut descriptions = HashMap::new();
+                let mut metadata_cache = HashMap::new();
                 for (path, facts) in rows {
-                    if let Some(Fact::Text(desc)) = facts
-                        .iter()
-                        .find(|(m, _)| m == "description")
-                        .map(|(_, f)| f.clone())
-                    {
-                        descriptions.insert(path.clone(), desc);
+                    // The cached embedded scalar fields, keyed to their
+                    // metric name (matches `metric_name` in health.rs).
+                    let mut cached: Vec<(Field, String)> = Vec::new();
+                    for (metric, field) in [
+                        ("description", Field::Description),
+                        ("category", Field::Category),
+                        ("creator", Field::Creator),
+                    ] {
+                        if let Some(Fact::Text(v)) = facts
+                            .iter()
+                            .find(|(m, _)| m == metric)
+                            .map(|(_, f)| f.clone())
+                        {
+                            cached.push((field, v));
+                        }
+                    }
+                    if !cached.is_empty() {
+                        metadata_cache.insert(path.clone(), cached);
                     }
                     analysis.insert(path, facts_to_report(facts));
                 }
                 self.analysis = analysis;
-                self.descriptions = descriptions;
+                self.metadata_cache = metadata_cache;
             }
             Err(e) => log::warn!("library analysis reload: {e}"),
         }
@@ -544,6 +569,15 @@ fn analyze_claimed(lib: &mut Library, path: &Path, done_tx: &mpsc::Sender<PathBu
                 if let Some(desc) = meta.description {
                     facts.push(("description", Fact::Text(desc)));
                 }
+                // Category/Creator are cached the same way (rebuildable from
+                // the file) so the health validator has a stored copy to
+                // drift-check against. Keywords is a Vec — no scalar Fact.
+                if let Some(category) = meta.category {
+                    facts.push(("category", Fact::Text(category)));
+                }
+                if let Some(creator) = meta.creator {
+                    facts.push(("creator", Fact::Text(creator)));
+                }
             }
             match lib.store_analysis(path, &facts, dur) {
                 Ok(()) => {
@@ -689,7 +723,7 @@ impl SampleBrowser {
             let peaks_request = Arc::clone(&peaks_request);
             std::thread::spawn(move || loop {
                 let path = peaks_request.recv();
-                let peaks = compute_and_cache_peaks(&path);
+                let peaks = ensure_waveform_cached(&path);
                 if peaks_tx.send((path, peaks)).is_err() {
                     break; // receiver dropped
                 }
@@ -872,12 +906,15 @@ impl SampleBrowser {
     /// file only shows its preview peaks until this fills in the whole shape,
     /// which is also what makes the entire source scrubbable.
     fn poll_full_peaks(&mut self) {
-        // Request once per truncated clip. Short clips already decode whole, so
-        // their preview peaks are the full waveform — no scan needed.
-        if let (Some(info), Some(file)) =
-            (self.playback.current_info(), self.playback.current_file())
-        {
-            if info.truncated && self.peaks_requested_for.as_deref() != Some(file) {
+        // Request once per loaded clip. A truncated (long) clip needs this to
+        // get its whole-source shape and become fully scrubbable; a short clip's
+        // preview peaks are already the full waveform on screen, but we still
+        // request it so its waveform gets *persisted* to the cache — the whole
+        // point of the cache is zero recompute after restart, and short one-shots
+        // are the common case. Deduped by `peaks_requested_for`, latest-wins via
+        // the RequestSlot, so rapid scrolling only caches files you dwell on.
+        if let Some(file) = self.playback.current_file() {
+            if self.peaks_requested_for.as_deref() != Some(file) {
                 self.peaks_requested_for = Some(file.to_path_buf());
                 self.peaks_request.send(file.to_path_buf());
             }
@@ -1189,46 +1226,53 @@ impl SampleBrowser {
         self.execute_command(li, Box::new(cmd));
     }
 
-    /// The embedded bext Description for the loaded track, from the analysis
-    /// cache. `None` outside a library or before it's been read.
-    pub fn current_description(&self) -> Option<String> {
-        let path = self.playback.current_file()?;
-        self.library_for_path(path)?.descriptions.get(path).cloned()
-    }
-
-    /// Whether [`set_description`](Self::set_description) can write to `path`
-    /// (WAV/BWF via our own writer, or a lofty-handled format), and the byte
-    /// limit it will be truncated to if the format bounds it (e.g. WAV's bext,
-    /// fixed at 255 bytes; `None` = unbounded or not writable). Combined into
-    /// one call so a caller needing both doesn't build the backend — a
-    /// file-header read for WAV — twice; callers that poll this every frame
-    /// (the UI) should still cache the result themselves, since it's still one
-    /// file read per call.
-    pub fn description_write_status(&self, path: &Path) -> (bool, Option<usize>) {
+    /// Per-field write status for the metadata panel: whether `field` can be
+    /// written to `path` and the byte limit it's truncated to if the format
+    /// bounds it (`None` = unbounded or not writable). One backend build (a
+    /// file-header read for WAV) — callers that poll every frame should cache
+    /// the result themselves. Outside a library nothing is writable.
+    pub fn metadata_field_status(&self, path: &Path, field: Field) -> (Capability, Option<usize>) {
         if self.library_for_path(path).is_none() {
-            return (false, None);
+            return (Capability::Unsupported, None);
         }
         let backend = Backend::for_path(path);
-        (
-            backend.capability(Field::Description).can_write(),
-            backend.max_len(Field::Description),
-        )
+        (backend.capability(field), backend.max_len(field))
     }
 
-    /// Write `description` into `path`'s embedded metadata (the file is
+    /// The embedded metadata for `path`, each field tagged with its
+    /// [`MetadataSource`] (today all `Embedded` — the file's own tags). The
+    /// metadata panel seeds *and* labels its fields from this, one file read
+    /// per selection. `None` outside a library.
+    pub fn read_resolved_metadata(&self, path: &Path) -> Option<ResolvedMetadata> {
+        self.library_for_path(path)?;
+        Backend::for_path(path).read_resolved(path).ok()
+    }
+
+    /// Write `m`'s set fields into `path`'s embedded metadata (the file is
     /// authoritative) as a read-modify-write that preserves everything else,
-    /// then refresh the cached fact so the UI reflects it without waiting for the
-    /// next analysis pass. The stored/cached copy is normalized (e.g. truncated
-    /// to WAV's 255-byte bext limit) exactly as the backend will store it, so the
-    /// cache never disagrees with what's actually on disk. Undoable (see
-    /// `command.rs`). No-op outside a library or when the format can't write
-    /// Description; sets `last_error` on failure.
-    pub fn set_description(&mut self, path: &Path, description: &str) {
+    /// then refresh the cached facts so the UI/health reflect it without
+    /// waiting for the next analysis pass — normalized exactly as the backend
+    /// stored it, so the cache can't disagree with disk. Undoable as one "edit
+    /// metadata" step (see `command.rs`). No-op outside a library; sets
+    /// `last_error` on failure.
+    pub fn set_metadata(&mut self, path: &Path, m: Metadata) {
         let Some(li) = self.library_index_for(path) else {
             return;
         };
-        let cmd = WriteDescriptionCommand::new(path.to_path_buf(), description);
+        let cmd = WriteMetadataCommand::new(path.to_path_buf(), m);
         self.execute_command(li, Box::new(cmd));
+    }
+
+    /// Convenience over [`set_metadata`](Self::set_metadata) for a
+    /// Description-only edit (kept for existing callers).
+    pub fn set_description(&mut self, path: &Path, description: &str) {
+        self.set_metadata(
+            path,
+            Metadata {
+                description: Some(description.to_string()),
+                ..Default::default()
+            },
+        );
     }
 
     /// Run `cmd` against library `li`'s `Library`, push it onto that
@@ -1243,7 +1287,27 @@ impl SampleBrowser {
                 self.last_error = Some(e.to_string());
             }
         }
-        self.libraries[li].undo_stack.push(cmd);
+        // Inside a transaction the command only accumulates (grouped into one
+        // undo step at commit) and we defer the reload to commit, so a batch of
+        // N mutations reloads the cache once, not N times.
+        let in_txn = self.libraries[li].undo_stack.in_transaction();
+        self.libraries[li].undo_stack.record(cmd);
+        if !in_txn {
+            self.libraries[li].reload();
+        }
+    }
+
+    /// Open a grouping transaction on library `li`: commands executed until
+    /// [`commit_transaction`](Self::commit_transaction) collapse into one undo
+    /// step and trigger a single cache reload. See `command.rs`.
+    fn begin_transaction(&mut self, li: usize, label: impl Into<String>) {
+        self.libraries[li].undo_stack.begin_transaction(label);
+    }
+
+    /// Close library `li`'s transaction (folding its commands into one undo
+    /// step) and reload its cache once.
+    fn commit_transaction(&mut self, li: usize) {
+        self.libraries[li].undo_stack.commit_transaction();
         self.libraries[li].reload();
     }
 
@@ -1279,6 +1343,40 @@ impl SampleBrowser {
     pub fn undo_description(&self) -> Option<String> {
         let li = self.active().library_idx?;
         self.libraries[li].undo_stack.next_undo_description()
+    }
+
+    /// Re-apply the active library's most recently undone command, if any.
+    /// No-op outside a library or with nothing to redo.
+    pub fn redo(&mut self) {
+        let Some(li) = self.active().library_idx else {
+            return;
+        };
+        let ctx_lib = &mut self.libraries[li];
+        let mut ctx = CommandContext {
+            lib: &mut ctx_lib.lib,
+        };
+        match ctx_lib.undo_stack.redo(&mut ctx) {
+            Some(Ok(())) => self.libraries[li].reload(),
+            Some(Err(e)) => {
+                self.last_error = Some(e.to_string());
+                self.libraries[li].reload();
+            }
+            None => {}
+        }
+    }
+
+    /// Whether the active library has anything to [`redo`](Self::redo).
+    pub fn can_redo(&self) -> bool {
+        self.active()
+            .library_idx
+            .is_some_and(|li| self.libraries[li].undo_stack.can_redo())
+    }
+
+    /// Label for the command [`redo`](Self::redo) would re-apply next, for a
+    /// "Redo: {description}" UI affordance. `None` if there's nothing to redo.
+    pub fn redo_description(&self) -> Option<String> {
+        let li = self.active().library_idx?;
+        self.libraries[li].undo_stack.next_redo_description()
     }
 
     /// Index of the most-specific library owning `path` (mutable-friendly twin of
@@ -1321,14 +1419,28 @@ impl SampleBrowser {
         let ctx = &mut self.libraries[i];
         match ctx.lib.facts(path) {
             Ok(facts) => {
-                if let Some(Fact::Text(desc)) = facts
-                    .iter()
-                    .find(|(m, _)| m == "description")
-                    .map(|(_, f)| f.clone())
-                {
-                    ctx.descriptions.insert(path.to_path_buf(), desc);
+                // Matches the cached-fields loop in `reload` (see
+                // `metric_name` in health.rs) so a fresh analysis and a full
+                // reload agree on what the health validator drift-checks
+                // against.
+                let mut cached: Vec<(Field, String)> = Vec::new();
+                for (metric, field) in [
+                    ("description", Field::Description),
+                    ("category", Field::Category),
+                    ("creator", Field::Creator),
+                ] {
+                    if let Some(Fact::Text(v)) = facts
+                        .iter()
+                        .find(|(m, _)| m == metric)
+                        .map(|(_, f)| f.clone())
+                    {
+                        cached.push((field, v));
+                    }
+                }
+                if cached.is_empty() {
+                    ctx.metadata_cache.remove(path);
                 } else {
-                    ctx.descriptions.remove(path);
+                    ctx.metadata_cache.insert(path.to_path_buf(), cached);
                 }
                 ctx.analysis
                     .insert(path.to_path_buf(), facts_to_report(facts));
@@ -1554,7 +1666,7 @@ impl SampleBrowser {
             assets: Vec::new(),
             asset_tags: HashMap::new(),
             analysis: HashMap::new(),
-            descriptions: HashMap::new(),
+            metadata_cache: HashMap::new(),
             overrides: HashMap::new(),
             facets: FactFacets::default(),
             scanning: true,
@@ -1703,7 +1815,7 @@ impl SampleBrowser {
     /// a background thread — every file gets a fresh metadata read (I/O
     /// proportional to library size), so this must not run on the UI
     /// thread (see CLAUDE.md's rule on file-sized I/O). Snapshots the
-    /// caches it needs (`descriptions`/`overrides`) before spawning, so the
+    /// caches it needs (`metadata_cache`/`overrides`) before spawning, so the
     /// worker never touches `LibraryContext` — same shape as
     /// [`spawn_scan`], a one-shot background walk with a single result
     /// sent back over a channel. No-op outside a library or while a check
@@ -1717,12 +1829,12 @@ impl SampleBrowser {
         }
         let ctx = &self.libraries[i];
         let assets: Vec<PathBuf> = ctx.assets.iter().map(|e| e.path.clone()).collect();
-        let descriptions = ctx.descriptions.clone();
+        let cached = ctx.metadata_cache.clone();
         let overrides = ctx.overrides.clone();
 
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let issues = health::scan_assets(&assets, &descriptions, &overrides);
+            let issues = health::scan_assets(&assets, &cached, &overrides);
             let _ = tx.send(issues); // receiver dropped: app closing
         });
         self.libraries[i].health_rx = Some(rx);
@@ -1872,18 +1984,21 @@ impl SampleBrowser {
             return;
         };
         let tag_name = self.tag_name(li, tag_id);
-        let commands: Vec<Box<dyn Command>> = paths
-            .iter()
-            .map(|path| {
+        self.begin_transaction(
+            li,
+            format!("assign \"{tag_name}\" to {} file(s)", paths.len()),
+        );
+        for path in paths {
+            self.execute_command(
+                li,
                 Box::new(AssignTagCommand {
                     path: path.clone(),
                     tag_id,
                     tag_name: tag_name.clone(),
-                }) as Box<dyn Command>
-            })
-            .collect();
-        let label = format!("assign \"{tag_name}\" to {} file(s)", paths.len());
-        self.execute_command(li, Box::new(BatchCommand::new(label, commands)));
+                }),
+            );
+        }
+        self.commit_transaction(li);
         self.rebuild_tag_filtered_tabs(li);
     }
 
@@ -1894,18 +2009,21 @@ impl SampleBrowser {
             return;
         };
         let tag_name = self.tag_name(li, tag_id);
-        let commands: Vec<Box<dyn Command>> = paths
-            .iter()
-            .map(|path| {
+        self.begin_transaction(
+            li,
+            format!("remove \"{tag_name}\" from {} file(s)", paths.len()),
+        );
+        for path in paths {
+            self.execute_command(
+                li,
                 Box::new(UnassignTagCommand {
                     path: path.clone(),
                     tag_id,
                     tag_name: tag_name.clone(),
-                }) as Box<dyn Command>
-            })
-            .collect();
-        let label = format!("remove \"{tag_name}\" from {} file(s)", paths.len());
-        self.execute_command(li, Box::new(BatchCommand::new(label, commands)));
+                }),
+            );
+        }
+        self.commit_transaction(li);
         self.rebuild_tag_filtered_tabs(li);
     }
 
@@ -1918,18 +2036,23 @@ impl SampleBrowser {
         };
         match self.libraries[li].lib.create_tag(name) {
             Ok(tag) => {
-                let commands: Vec<Box<dyn Command>> = paths
-                    .iter()
-                    .map(|path| {
+                // The tag creation itself is not undoable (structural); only the
+                // assignments are, grouped into one transaction step.
+                self.begin_transaction(
+                    li,
+                    format!("assign \"{}\" to {} file(s)", tag.name, paths.len()),
+                );
+                for path in paths {
+                    self.execute_command(
+                        li,
                         Box::new(AssignTagCommand {
                             path: path.clone(),
                             tag_id: tag.id,
                             tag_name: tag.name.clone(),
-                        }) as Box<dyn Command>
-                    })
-                    .collect();
-                let label = format!("assign \"{}\" to {} file(s)", tag.name, paths.len());
-                self.execute_command(li, Box::new(BatchCommand::new(label, commands)));
+                        }),
+                    );
+                }
+                self.commit_transaction(li);
                 self.rebuild_tag_filtered_tabs(li);
             }
             Err(e) => {
@@ -2098,14 +2221,88 @@ fn adjust_active_after_reorder(active: usize, from: usize, to: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjust_active_after_close, adjust_active_after_reorder, fact_filter_matches,
-        longest_containing_root_index, resolve_fact, restore_tab_plan, selection_after_range,
-        selection_after_toggle, AnalysisReport, Fact, FactFacets, FactFilter, LibraryContext,
-        UndoStack,
+        adjust_active_after_close, adjust_active_after_reorder, ensure_waveform_cached,
+        fact_filter_matches, longest_containing_root_index, resolve_fact, restore_tab_plan,
+        selection_after_range, selection_after_toggle, AnalysisReport, Fact, FactFacets,
+        FactFilter, LibraryContext, UndoStack,
     };
     use punks_library::Library;
     use std::collections::HashMap;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
+
+    /// A decodable mono 16-bit PCM sine WAV — short enough to be a one-shot
+    /// (non-truncated), so it exercises the short-file persistence path.
+    fn write_sine_wav(path: &Path, frames: usize) {
+        let sample_rate = 48_000u32;
+        let mut pcm: Vec<u8> = Vec::with_capacity(frames * 2);
+        for n in 0..frames {
+            let s = 0.5 * (std::f32::consts::TAU * 440.0 * n as f32 / sample_rate as f32).sin();
+            pcm.extend_from_slice(&((s * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        let data_len = pcm.len() as u32;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(b"RIFF").unwrap();
+        f.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+        f.write_all(b"WAVE").unwrap();
+        f.write_all(b"fmt ").unwrap();
+        f.write_all(&16u32.to_le_bytes()).unwrap();
+        f.write_all(&1u16.to_le_bytes()).unwrap(); // PCM
+        f.write_all(&1u16.to_le_bytes()).unwrap(); // mono
+        f.write_all(&sample_rate.to_le_bytes()).unwrap();
+        f.write_all(&(sample_rate * 2).to_le_bytes()).unwrap();
+        f.write_all(&2u16.to_le_bytes()).unwrap();
+        f.write_all(&16u16.to_le_bytes()).unwrap();
+        f.write_all(b"data").unwrap();
+        f.write_all(&data_len.to_le_bytes()).unwrap();
+        f.write_all(&pcm).unwrap();
+    }
+
+    #[test]
+    fn short_file_waveform_persists_and_reloads_from_cache() {
+        // Regression: short (non-truncated) files used to never persist their
+        // waveform, so every session recomputed it. `ensure_waveform_cached`
+        // must store on first call and serve from disk on the second.
+        let dir = std::env::temp_dir().join(format!(
+            "punks_wave_persist_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("one_shot.wav");
+        write_sine_wav(&wav, 4_000); // ~83ms — a short one-shot
+        let mut lib = Library::create(&dir).unwrap();
+        lib.reconcile(&punks_library::scan_files(&dir).unwrap())
+            .unwrap();
+
+        let bins = dir.join(".punks").join("waveforms");
+        let count_bins = || {
+            std::fs::read_dir(&bins)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| e.file_name().to_string_lossy().ends_with(".bin"))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(count_bins(), 0, "nothing cached before first audition");
+
+        // First call computes + persists.
+        let first = ensure_waveform_cached(&wav).expect("peaks computed");
+        assert!(!first.peaks.is_empty());
+        assert_eq!(count_bins(), 1, "a .bin is written on first audition");
+
+        // Second call serves the identical peaks from the cache.
+        let second = ensure_waveform_cached(&wav).expect("peaks from cache");
+        assert_eq!(first.peaks, second.peaks, "cache round-trips exactly");
+        assert_eq!(count_bins(), 1, "no duplicate cache entry");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn resolve_fact_prefers_user_over_analysis() {
@@ -2444,7 +2641,7 @@ mod tests {
             assets: Vec::new(),
             asset_tags: HashMap::new(),
             analysis: HashMap::new(),
-            descriptions: HashMap::new(),
+            metadata_cache: HashMap::new(),
             overrides: HashMap::new(),
             facets: FactFacets::default(),
             scanning: false,
