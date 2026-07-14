@@ -4,9 +4,54 @@ use std::time::{Duration, Instant};
 
 use imgui::Key;
 use punks_browser::{
-    Fact, HealthIssue, HealthIssueKind, LibraryState, PlaybackStatus, SampleBrowser, TagCount,
+    Capability, Fact, Field, HealthIssue, HealthIssueKind, LibraryState, Metadata, MetadataSource,
+    PlaybackStatus, SampleBrowser, TagCount,
 };
 use punks_core::config::{Keybinds, PunksConfig};
+
+/// One editable metadata field's panel state, seeded from the file once per
+/// selection (see `seed_metadata_editor`).
+#[derive(Default, Clone)]
+struct MetaField {
+    /// The edit buffer (keywords are shown as a comma-separated list).
+    buf: String,
+    /// The value `buf` was seeded from — `buf != seed` means "edited",
+    /// which gates Save so a value shown only because the field loaded blank
+    /// can't overwrite real content.
+    seed: String,
+    writable: bool,
+    max_len: Option<usize>,
+    /// Where the shown value came from, for the provenance badge (today
+    /// always `Embedded`; the panel is shaped for Override/Analysis/Project
+    /// if a metadata-override layer ever lands).
+    source: Option<MetadataSource>,
+}
+
+impl MetaField {
+    fn dirty(&self) -> bool {
+        self.buf != self.seed
+    }
+}
+
+/// Per-file metadata editor state for the Metadata panel.
+#[derive(Default)]
+struct MetadataEditor {
+    path: Option<PathBuf>,
+    description: MetaField,
+    keywords: MetaField,
+    category: MetaField,
+    creator: MetaField,
+}
+
+/// Short label for a value's provenance badge.
+fn source_label(source: MetadataSource) -> &'static str {
+    match source {
+        MetadataSource::Embedded => "Embedded",
+        MetadataSource::Override => "Override",
+        MetadataSource::Analysis => "Analysis",
+        MetadataSource::Project => "Project",
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum BrowserAction {
@@ -19,6 +64,9 @@ enum BrowserAction {
     PrevTab,
     NextTab,
     Undo,
+    Redo,
+    TogglePlayback,
+    ToggleInspector,
 }
 
 const CAPTURABLE_KEYS: &[(Key, &str)] = &[
@@ -83,6 +131,9 @@ fn keybind_field_mut(keybinds: &mut Keybinds, action: BrowserAction) -> &mut Str
         BrowserAction::PrevTab => &mut keybinds.prev_tab,
         BrowserAction::NextTab => &mut keybinds.next_tab,
         BrowserAction::Undo => &mut keybinds.undo,
+        BrowserAction::Redo => &mut keybinds.redo,
+        BrowserAction::TogglePlayback => &mut keybinds.play_stop,
+        BrowserAction::ToggleInspector => &mut keybinds.toggle_inspector,
     }
 }
 
@@ -97,6 +148,9 @@ fn keybind_field(keybinds: &Keybinds, action: BrowserAction) -> &str {
         BrowserAction::PrevTab => &keybinds.prev_tab,
         BrowserAction::NextTab => &keybinds.next_tab,
         BrowserAction::Undo => &keybinds.undo,
+        BrowserAction::Redo => &keybinds.redo,
+        BrowserAction::TogglePlayback => &keybinds.play_stop,
+        BrowserAction::ToggleInspector => &keybinds.toggle_inspector,
     }
 }
 
@@ -110,6 +164,9 @@ const KEYBIND_ACTIONS: &[(BrowserAction, &str)] = &[
     (BrowserAction::PrevTab, "Previous tab"),
     (BrowserAction::NextTab, "Next tab"),
     (BrowserAction::Undo, "Undo"),
+    (BrowserAction::Redo, "Redo"),
+    (BrowserAction::TogglePlayback, "Play / Stop"),
+    (BrowserAction::ToggleInspector, "Toggle inspector"),
 ];
 
 // Tab palette: active tab carries a muted blue accent, inactive tabs are grey.
@@ -123,6 +180,8 @@ const DIR_TEXT_COLOR: [f32; 4] = [0.55, 0.85, 1.0, 1.0];
 
 // Left rail: library status + tag filters live here; tags on rows are pills.
 const SIDEBAR_WIDTH: f32 = 180.0;
+/// Width of the drag strip between Results and the Inspector.
+const SPLITTER_WIDTH: f32 = 6.0;
 /// Height of the waveform strip. Shared so the panel can reserve exactly the
 /// right room below the file list for it + the metadata lines + transport row.
 const WAVEFORM_HEIGHT: f32 = 64.0;
@@ -175,7 +234,6 @@ fn fact_display(f: &Fact) -> String {
 /// as the display label without a separate lookup table.
 fn health_issue_summary(issue: &HealthIssue) -> String {
     match &issue.kind {
-        HealthIssueKind::Missing => format!("missing {:?}", issue.field),
         HealthIssueKind::CacheDrift { embedded, cached } => {
             format!(
                 "{:?} changed since last scan (file: \"{embedded}\", cached: \"{cached}\")",
@@ -251,6 +309,9 @@ fn relative_parent(root: Option<&Path>, file_path: &Path) -> String {
 pub struct BrowserPanel {
     prefs: PunksConfig,
     rebinding: Option<BrowserAction>,
+    /// Warning shown when a rebind was refused because the chosen key is
+    /// already bound to another action. Cleared when a new rebind starts.
+    rebind_conflict: Option<String>,
     search_buf: String,
     last_typed_query: String,
     query_change_time: Instant,
@@ -288,23 +349,14 @@ pub struct BrowserPanel {
     /// a read-only (but selectable/copyable) input widget — plain `Text` widgets
     /// can't be selected or copied in imgui.
     error_buf: String,
-    /// Description edit buffer + which file it was last seeded from (reseeded
-    /// whenever the loaded file changes, so switching clips doesn't leak the
-    /// previous one's unsaved edit into the new one).
-    description_buf: String,
-    description_buf_path: Option<PathBuf>,
-    /// The value `description_buf` was last synced from (cache, or the bext
-    /// fallback). `description_buf != description_seed` means the user has
-    /// actually edited the field — used to (a) safely re-sync from the cache
-    /// if it fills in later without clobbering an in-progress edit, and (b)
-    /// make Save/Enter a no-op when the field was never touched, so a blank
-    /// buffer shown only because the cache hadn't loaded yet can't blank out
-    /// real content on disk.
-    description_seed: String,
-    /// `(can_write, byte_limit)` for `description_buf_path`, from
-    /// `SampleBrowser::description_write_status` — cached because that call
-    /// reads the file header (for WAV) and would otherwise run every frame.
-    description_write_status: (bool, Option<usize>),
+    /// Metadata editor state (Description/Keywords/Category/Creator), reseeded
+    /// whenever the loaded file changes so switching clips doesn't leak the
+    /// previous one's unsaved edit into the new one. Shown read-only in the
+    /// Inspector's Metadata section; edited in a modal (see `open_metadata_editor`).
+    editor: MetadataEditor,
+    /// Request to open the metadata editor modal (set by the Inspector's
+    /// Actions/Metadata buttons, consumed at panel scope with the other popups).
+    open_metadata_editor: bool,
     /// BPM range filter edit buffers, resynced from `browser.fact_filter()`
     /// on tab switch (like `search_buf`) so they don't leak one tab's
     /// in-progress edit into another.
@@ -327,6 +379,7 @@ impl BrowserPanel {
         BrowserPanel {
             prefs,
             rebinding: None,
+            rebind_conflict: None,
             search_buf: String::new(),
             last_typed_query: String::new(),
             query_change_time: Instant::now(),
@@ -346,10 +399,8 @@ impl BrowserPanel {
             override_bufs: HashMap::new(),
             open_override_editor: false,
             error_buf: String::new(),
-            description_buf: String::new(),
-            description_buf_path: None,
-            description_seed: String::new(),
-            description_write_status: (false, None),
+            editor: MetadataEditor::default(),
+            open_metadata_editor: false,
             bpm_min: 0.0,
             bpm_max: 0.0,
         }
@@ -516,6 +567,18 @@ impl BrowserPanel {
             ui.open_popup("Settings##modal");
         }
 
+        // Inspector toggle: hiding the right pane gives Results the full width.
+        // The state is persisted (see the tab/volume save path below).
+        ui.same_line();
+        if ui.button(if self.prefs.inspector_visible {
+            "Inspector \u{25b8}"
+        } else {
+            "Inspector \u{25c2}"
+        }) {
+            self.prefs.inspector_visible = !self.prefs.inspector_visible;
+            punks_core::config::save(&self.prefs);
+        }
+
         self.draw_settings_modal(ui, browser);
 
         let crumbs = browser.breadcrumbs();
@@ -542,15 +605,16 @@ impl BrowserPanel {
         ui.separator();
 
         let avail = ui.content_region_avail();
-        // Reserve exact room below the file list for: waveform + 3 metadata lines
-        // (bext, facts, levels) + the transport/volume row + a line of slack (for
-        // the error line / spacing). Derived from font metrics so it stays correct
-        // if the font size changes — a fixed pixel guess pushed the volume slider
-        // off-screen.
+        // Reserve room below the body row for only what stays *pinned*: the
+        // waveform + the transport row (Play/Stop + volume) + a line of slack for
+        // the error line. The Inspector's metadata/facts now scroll inside their
+        // own pane, so their length no longer figures into this reservation —
+        // that's what keeps the transport on-screen no matter how much metadata a
+        // file has. Derived from font metrics so it survives a font-size change.
         let line_h = ui.text_line_height_with_spacing();
         // The error line is a read-only input (frame-height, not text-line-height)
         // so its text is selectable/copyable.
-        let reserved = WAVEFORM_HEIGHT + 2.0 * line_h + 3.0 * ui.frame_height_with_spacing();
+        let reserved = WAVEFORM_HEIGHT + ui.frame_height_with_spacing() + line_h;
         let body_height = (avail[1] - reserved).max(120.0);
         let mut drag_requested: Option<PathBuf> = None;
         let mut search_focused = false;
@@ -567,6 +631,34 @@ impl BrowserPanel {
             && (ui.io().key_ctrl || ui.io().key_super)
             && ui.is_key_pressed_no_repeat(Key::F);
 
+        // Reseed the metadata editor from the newly-selected file (once per
+        // selection change) before anything reads it this frame — the Inspector
+        // summary below and the editor modal at panel scope both depend on it.
+        seed_metadata_editor(browser, &mut self.editor);
+
+        // Three-pane body row: Sidebar | Results | Inspector. Results is the
+        // star and gets whatever width the other two don't take; the Inspector
+        // is fixed-width (drag the splitter to resize) and disappears entirely
+        // when toggled off, handing its space back to Results. Widths are
+        // computed up front because a child window needs its width set before it
+        // is drawn, and same_line panes can't be measured after the fact.
+        let spacing = ui.clone_style().item_spacing[0];
+        let full_w = ui.content_region_avail()[0];
+        let inspector_w = if self.prefs.inspector_visible {
+            self.prefs.inspector_width
+        } else {
+            0.0
+        };
+        // Same_line gaps between panes: sidebar|content always; plus
+        // content|splitter and splitter|inspector when the inspector is shown.
+        let (splitter_w, gap_count) = if self.prefs.inspector_visible {
+            (SPLITTER_WIDTH, 3.0)
+        } else {
+            (0.0, 1.0)
+        };
+        let content_w =
+            (full_w - SIDEBAR_WIDTH - splitter_w - inspector_w - gap_count * spacing).max(160.0);
+
         // Left rail: library status + tag filters. Tag display on rows stays
         // inline (pills); the sidebar is only for filtering and library setup.
         let sidebar_bg = ui.push_style_color(imgui::StyleColor::ChildBg, SIDEBAR_BG);
@@ -579,7 +671,7 @@ impl BrowserPanel {
 
         ui.same_line();
         ui.child_window("content")
-            .size([0.0, body_height])
+            .size([content_w, body_height])
             .build(|| {
                 let w = ui.content_region_avail()[0];
                 if focus_search {
@@ -642,6 +734,33 @@ impl BrowserPanel {
                 });
             });
 
+        if self.prefs.inspector_visible {
+            // Splitter: an invisible hit strip whose horizontal drag resizes the
+            // Inspector. Dragging left widens it (the boundary moves left), so we
+            // subtract the mouse delta. Width persists on release.
+            ui.same_line();
+            ui.invisible_button("##inspector_splitter", [splitter_w, body_height]);
+            if ui.is_item_hovered() || ui.is_item_active() {
+                ui.set_mouse_cursor(Some(imgui::MouseCursor::ResizeEW));
+            }
+            if ui.is_item_active() {
+                self.prefs.inspector_width =
+                    (self.prefs.inspector_width - ui.io().mouse_delta[0]).clamp(180.0, 600.0);
+            }
+            if ui.is_item_deactivated() {
+                punks_core::config::save(&self.prefs);
+            }
+
+            ui.same_line();
+            let inspector_bg = ui.push_style_color(imgui::StyleColor::ChildBg, SIDEBAR_BG);
+            ui.child_window("inspector")
+                .size([inspector_w, body_height])
+                .build(|| {
+                    self.draw_inspector(ui, browser);
+                });
+            inspector_bg.pop();
+        }
+
         if let Some(path) = drag_requested.as_deref() {
             if let Some(on_drag_file) = on_drag_file {
                 on_drag_file(path);
@@ -651,10 +770,15 @@ impl BrowserPanel {
 
         ui.separator();
 
-        // Panel-level keys (same focus gating as nav): Space toggles playback;
-        // the tab keybinds switch / create / close tabs.
+        // Panel-level keys (same focus gating as nav): the configurable
+        // play/stop bind toggles playback; the tab / undo / redo / inspector
+        // binds do the rest.
         if ui.is_window_focused() && !search_focused {
-            if ui.is_key_pressed_no_repeat(Key::Space) {
+            let count = browser.tab_count();
+            let active = browser.active_tab();
+            let pressed =
+                |bind: &str| parse_key(bind).is_some_and(|k| ui.is_key_pressed_no_repeat(k));
+            if pressed(&self.prefs.keybinds.play_stop) {
                 match browser.playback_status() {
                     PlaybackStatus::Playing { .. } | PlaybackStatus::Loading { .. } => {
                         browser.stop();
@@ -672,13 +796,7 @@ impl BrowserPanel {
                         }
                     }
                 }
-            }
-
-            let count = browser.tab_count();
-            let active = browser.active_tab();
-            let pressed =
-                |bind: &str| parse_key(bind).is_some_and(|k| ui.is_key_pressed_no_repeat(k));
-            if pressed(&self.prefs.keybinds.next_tab) {
+            } else if pressed(&self.prefs.keybinds.next_tab) {
                 browser.switch_tab((active + 1) % count);
             } else if pressed(&self.prefs.keybinds.prev_tab) {
                 browser.switch_tab((active + count - 1) % count);
@@ -689,156 +807,44 @@ impl BrowserPanel {
                 browser.close_tab(browser.active_tab());
             } else if pressed(&self.prefs.keybinds.undo) {
                 browser.undo();
+            } else if pressed(&self.prefs.keybinds.redo) {
+                browser.redo();
+            } else if pressed(&self.prefs.keybinds.toggle_inspector) {
+                self.prefs.inspector_visible = !self.prefs.inspector_visible;
+                punks_core::config::save(&self.prefs);
             }
         }
 
         draw_waveform_widget(ui, browser, frame, &mut self.scrub_last_x);
 
-        // Embedded metadata (BWF bext): an editable Description + Save, so an
-        // edit writes straight into the file's own bext chunk — the file stays
-        // authoritative and the library's cache is just a fast, rebuildable
-        // read of it (see `SampleBrowser::set_description`). TC timecode stays
-        // read-only alongside it. Blank lines are reserved when there's no
-        // loaded file so the layout doesn't jump.
-        {
-            let current_path = browser.current_file().map(Path::to_path_buf);
-            let seed_from = |browser: &SampleBrowser| -> Option<String> {
-                browser.current_description().or_else(|| {
-                    browser
-                        .current_track_info()
-                        .and_then(|i| i.metadata.description.clone())
-                })
-            };
-            if self.description_buf_path != current_path {
-                // New file: recompute write status once (a file-header read for
-                // WAV — must not run every frame) and reseed unconditionally.
-                self.description_write_status = current_path
-                    .as_deref()
-                    .map(|p| browser.description_write_status(p))
-                    .unwrap_or((false, None));
-                let seed = seed_from(browser).unwrap_or_default();
-                self.description_buf = seed.clone();
-                self.description_seed = seed;
-                self.description_buf_path = current_path.clone();
-            } else if self.description_buf == self.description_seed {
-                // Untouched: safe to re-sync from the cache if it just filled in
-                // (e.g. the analysis worker finished after the field loaded
-                // blank) — an edit in progress is never clobbered, since that
-                // case fails the buf == seed check above.
-                if let Some(seed) = seed_from(browser) {
-                    if seed != self.description_seed {
-                        self.description_buf = seed.clone();
-                        self.description_seed = seed;
+        // Pinned transport, directly below the waveform: Play/Stop on the left,
+        // volume on the right edge. Always visible (never scrolls) so playback
+        // becomes muscle memory — the metadata/facts that used to live here have
+        // moved into the Inspector, which is exactly what frees this row to stay
+        // put no matter how much a file carries.
+        let playing = !matches!(browser.playback_status(), PlaybackStatus::Idle);
+        if ui.button(if playing {
+            "\u{25a0} Stop"
+        } else {
+            "\u{25b6} Play"
+        }) {
+            if playing {
+                browser.stop();
+            } else if in_search {
+                // Mirror the Space-key path above: play the highlighted search
+                // result, or the browse selection.
+                if let Some(idx) = browser.search_selected() {
+                    if let Some(e) = browser.search_results().and_then(|r| r.get(idx)) {
+                        let path = e.path.clone();
+                        browser.play_file(&path);
                     }
-                }
-            }
-
-            if let Some(path) = current_path {
-                let (can_write, max_len) = self.description_write_status;
-                let w = ui.content_region_avail()[0] - 60.0;
-                ui.set_next_item_width(w.max(80.0));
-                let entered = ui
-                    .input_text("##description", &mut self.description_buf)
-                    .hint("Description...")
-                    .enter_returns_true(true)
-                    .read_only(!can_write)
-                    .build();
-                ui.same_line();
-                let save = ui.button("Save");
-                let dirty = self.description_buf != self.description_seed;
-                if !can_write {
-                    if ui.is_item_hovered() {
-                        ui.tooltip_text("Description not writable for this file (inside a library only; RF64 is read-only)");
-                    }
-                } else if (entered || save) && dirty {
-                    let trimmed = self.description_buf.trim().to_string();
-                    browser.set_description(&path, &trimmed);
-                    // Re-seed from the cache browser.set_description just
-                    // updated, so the buffer reflects any backend truncation
-                    // (e.g. WAV's 255-byte bext limit) instead of the raw input.
-                    let seed = browser.current_description().unwrap_or(trimmed);
-                    self.description_buf = seed.clone();
-                    self.description_seed = seed;
-                } else if can_write && dirty {
-                    if let Some(max) = max_len {
-                        if self.description_buf.len() > max {
-                            ui.same_line();
-                            ui.text_colored(
-                                [0.9, 0.7, 0.3, 1.0],
-                                format!("will truncate to {max} bytes"),
-                            );
-                        }
-                    }
-                }
-
-                match browser.current_track_info() {
-                    Some(info) => match info.metadata.time_reference.filter(|&t| t > 0) {
-                        Some(tc) => {
-                            ui.text_disabled(format!(
-                                "TC {}",
-                                format_timecode(tc, info.source_sample_rate)
-                            ));
-                        }
-                        None => ui.new_line(),
-                    },
-                    None => ui.new_line(),
                 }
             } else {
-                ui.new_line();
-                ui.new_line();
+                browser.play_selected();
             }
         }
 
-        // Analysis readout for the loaded track: fills in asynchronously as the
-        // background worker completes. Two lines (facts + levels); blanks are
-        // reserved when absent so the layout stays put.
-        {
-            if let Some(a) = browser.current_analysis() {
-                // Facts line: what the sound *is*, resolved user ?? analysis (so a
-                // correction shows immediately). An "Override" button opens the
-                // editor for the loaded file.
-                let mut facts: Vec<String> = Vec::new();
-                if let Some(Fact::Text(s)) = browser.current_resolved("instrument") {
-                    facts.push(capitalize(&s));
-                }
-                if let Some(Fact::Real(b)) = browser.current_resolved("bpm") {
-                    facts.push(format!("{} BPM", b as u32));
-                }
-                if let Some(Fact::Text(s)) = browser.current_resolved("key") {
-                    facts.push(s);
-                }
-                if facts.is_empty() {
-                    ui.text_disabled("no detected facts");
-                } else {
-                    ui.text_disabled(facts.join("   \u{b7}   "));
-                }
-                ui.same_line();
-                if ui.small_button("Override") {
-                    self.override_popup_path = browser.current_file().map(Path::to_path_buf);
-                    self.open_override_editor = true;
-                }
-                // Levels line: length first, peak in dB (audio people don't think
-                // in linear amplitude); peak stays stored linear.
-                ui.text_disabled(format!(
-                    "{}   \u{b7}   Peak {:.1} dB   \u{b7}   RMS {:.1} dBFS   \u{b7}   ZCR {:.3}",
-                    format_duration(a.duration),
-                    punks_browser::amp_to_dbfs(a.peak),
-                    a.rms_dbfs,
-                    a.zcr
-                ));
-            } else if browser.current_analysis_pending() {
-                // Animated so a slow/queued analysis reads as "working", not
-                // frozen. ASCII dots (the pixel font lacks a `…` glyph).
-                let dots = (ui.time() * 2.0) as usize % 4;
-                ui.new_line();
-                ui.text_disabled(format!("analyzing{}", ".".repeat(dots)));
-            } else {
-                ui.new_line();
-                ui.new_line();
-            }
-        }
-
-        // Transport row: volume slider pinned to the right edge of the panel.
+        ui.same_line();
         let transport_x = ui.cursor_pos()[0];
         let transport_y = ui.cursor_pos()[1];
         let panel_width = ui.content_region_avail()[0];
@@ -908,8 +914,24 @@ impl BrowserPanel {
             }
             ui.open_popup("##override_editor");
         }
+        if self.open_metadata_editor {
+            self.open_metadata_editor = false;
+            ui.open_popup("Edit Metadata##metadata_editor");
+        }
 
         self.draw_override_popup(ui, browser);
+
+        // Give the editor modal a comfortable fixed width the first time it
+        // appears (its fields size to the modal, not the other way round). No
+        // safe `set_next_window_size` on `Ui` in this imgui version, so call the
+        // C API directly; height 0 lets it auto-fit the fields.
+        unsafe {
+            imgui::sys::igSetNextWindowSize(
+                imgui::sys::ImVec2 { x: 440.0, y: 0.0 },
+                imgui::Condition::Appearing as i32,
+            );
+        }
+        draw_metadata_editor_modal(ui, browser, &mut self.editor);
 
         ui.popup("##tag_editor", || {
             if let Some(path) = self.tag_popup_path.clone() {
@@ -1055,6 +1077,14 @@ impl BrowserPanel {
                     }
                 } else {
                     ui.text_disabled("Nothing to undo");
+                }
+                if let Some(desc) = browser.redo_description() {
+                    if ui.button(format!("Redo: {desc}##redo_btn")) {
+                        browser.redo();
+                    }
+                    if ui.is_item_hovered() {
+                        ui.tooltip_text(format!("({})", self.prefs.keybinds.redo));
+                    }
                 }
 
                 ui.spacing();
@@ -1219,6 +1249,136 @@ impl BrowserPanel {
             ui.spacing();
             if ui.small_button("Clear fact filter") {
                 browser.clear_fact_filter();
+            }
+        }
+    }
+
+    /// The right-hand Inspector: contextual info about the selected file,
+    /// ordered by what users reach for most — Selection, then Actions, then
+    /// Facts / Tags, with Metadata last (a ~5%-of-time concern that shouldn't
+    /// crowd the reading flow). Sections default open/closed each launch; that
+    /// state is deliberately *not* persisted (see `PunksConfig`). Future
+    /// sections (Embedded metadata, Health, Preview FX) slot in here once they
+    /// have real content to show.
+    fn draw_inspector(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+        ui.spacing();
+        let Some(path) = browser.current_file().map(Path::to_path_buf) else {
+            ui.text_disabled("No file selected");
+            return;
+        };
+
+        // Selection.
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        ui.text_wrapped(&name);
+        ui.separator();
+
+        // Actions: the verbs a user reaches for on a selected sound. Override /
+        // Edit Metadata open their modals via request flags (consumed at panel
+        // scope with the other popups); the rest act immediately.
+        let playing = !matches!(browser.playback_status(), PlaybackStatus::Idle);
+        if ui.button(if playing { "Stop" } else { "Play" }) {
+            if playing {
+                browser.stop();
+            } else {
+                browser.play_file(&path);
+            }
+        }
+        ui.same_line();
+        if ui.button("Reveal") {
+            reveal_in_file_manager(&path);
+        }
+        ui.same_line();
+        if ui.button("Copy Path") {
+            ui.set_clipboard_text(path.to_string_lossy());
+        }
+        if ui.button("Override") {
+            self.override_popup_path = Some(path.clone());
+            self.open_override_editor = true;
+        }
+        ui.same_line();
+        if ui.button("Edit Metadata") {
+            self.open_metadata_editor = true;
+        }
+        ui.separator();
+
+        // Facts (open by default): the read-only analysis readout — what the
+        // sound *is* (resolved user⇒analysis) plus its levels, and the file's
+        // start timecode when present.
+        if ui.collapsing_header("Facts", imgui::TreeNodeFlags::DEFAULT_OPEN) {
+            if let Some(a) = browser.current_analysis() {
+                let mut facts: Vec<String> = Vec::new();
+                if let Some(Fact::Text(s)) = browser.current_resolved("instrument") {
+                    facts.push(capitalize(&s));
+                }
+                if let Some(Fact::Real(b)) = browser.current_resolved("bpm") {
+                    facts.push(format!("{} BPM", b as u32));
+                }
+                if let Some(Fact::Text(s)) = browser.current_resolved("key") {
+                    facts.push(s);
+                }
+                if facts.is_empty() {
+                    ui.text_disabled("no detected facts");
+                } else {
+                    ui.text_disabled(facts.join("   \u{b7}   "));
+                }
+                // Levels: peak in dB (audio people don't think in linear
+                // amplitude); peak stays stored linear.
+                ui.text_disabled(format!(
+                    "{}   \u{b7}   Peak {:.1} dB",
+                    format_duration(a.duration),
+                    punks_browser::amp_to_dbfs(a.peak),
+                ));
+                ui.text_disabled(format!(
+                    "RMS {:.1} dBFS   \u{b7}   ZCR {:.3}",
+                    a.rms_dbfs, a.zcr
+                ));
+                if let Some(info) = browser.current_track_info() {
+                    if let Some(tc) = info.metadata.time_reference.filter(|&t| t > 0) {
+                        ui.text_disabled(format!(
+                            "TC {}",
+                            format_timecode(tc, info.source_sample_rate)
+                        ));
+                    }
+                }
+            } else if browser.current_analysis_pending() {
+                // Animated so a slow/queued analysis reads as "working", not
+                // frozen. ASCII dots (the pixel font lacks a `…` glyph).
+                let dots = (ui.time() * 2.0) as usize % 4;
+                ui.text_disabled(format!("analyzing{}", ".".repeat(dots)));
+            } else {
+                ui.text_disabled("no analysis yet");
+            }
+        }
+
+        // Tags (open by default): the selected file's tags, edited through the
+        // existing per-file tag popup.
+        if ui.collapsing_header("Tags", imgui::TreeNodeFlags::DEFAULT_OPEN) {
+            let ids = browser.tag_ids_for_path(&path);
+            if ids.is_empty() {
+                ui.text_disabled("No tags");
+            } else {
+                let tags = browser.library_tags();
+                let names: Vec<&str> = ids
+                    .iter()
+                    .filter_map(|id| tags.iter().find(|t| t.id == *id).map(|t| t.name.as_str()))
+                    .collect();
+                ui.text_wrapped(names.join(", "));
+            }
+            if ui.button("Edit Tags") {
+                self.tag_popup_path = Some(path.clone());
+                self.open_tag_editor = true;
+            }
+        }
+
+        // Metadata (closed by default): a low-weight read-only summary; the
+        // editor opens as a modal, so it never sits as always-live edit fields.
+        if ui.collapsing_header("Metadata", imgui::TreeNodeFlags::empty()) {
+            metadata_summary(ui, &self.editor);
+            if ui.button("Edit Metadata...") {
+                self.open_metadata_editor = true;
             }
         }
     }
@@ -1735,23 +1895,42 @@ impl BrowserPanel {
                 ui.same_line_with_pos(180.0);
                 if ui.button(&btn_label) && !is_rebinding {
                     self.rebinding = Some(action);
+                    self.rebind_conflict = None;
                 }
             }
 
             if let Some(action) = self.rebinding {
                 for &(key, name) in CAPTURABLE_KEYS {
                     if ui.is_key_pressed_no_repeat(key) {
-                        *keybind_field_mut(&mut self.prefs.keybinds, action) = name.to_string();
+                        // Refuse a key already bound to a different action —
+                        // two actions on one key silently shadow each other.
+                        let conflict = KEYBIND_ACTIONS.iter().find(|(a, _)| {
+                            *a != action
+                                && keybind_field(&self.prefs.keybinds, *a)
+                                    .eq_ignore_ascii_case(name)
+                        });
+                        if let Some((_, other)) = conflict {
+                            self.rebind_conflict =
+                                Some(format!("{name} is already bound to \"{other}\""));
+                        } else {
+                            *keybind_field_mut(&mut self.prefs.keybinds, action) = name.to_string();
+                            self.rebind_conflict = None;
+                            punks_core::config::save(&self.prefs);
+                        }
                         self.rebinding = None;
-                        punks_core::config::save(&self.prefs);
                         break;
                     }
                 }
             }
 
+            if let Some(msg) = &self.rebind_conflict {
+                ui.text_colored([1.0, 0.4, 0.4, 1.0], msg);
+            }
+
             ui.separator();
             if ui.button("Reset to defaults") {
                 self.prefs.keybinds = Keybinds::default();
+                self.rebind_conflict = None;
                 punks_core::config::save(&self.prefs);
             }
             ui.same_line();
@@ -2000,4 +2179,238 @@ fn draw_waveform_widget(
     } else {
         *scrub_last_x = None;
     }
+}
+
+/// Seed one [`MetaField`] from a resolved value (if any) and its capability —
+/// called once per field on file-selection change, never per frame.
+fn seed_metadata_field(
+    field: &mut MetaField,
+    value: Option<(String, MetadataSource)>,
+    capability: Capability,
+    max_len: Option<usize>,
+) {
+    let (buf, source) = match value {
+        Some((v, s)) => (v, Some(s)),
+        None => (String::new(), None),
+    };
+    field.seed = buf.clone();
+    field.buf = buf;
+    field.source = source;
+    field.writable = capability.can_write();
+    field.max_len = max_len;
+}
+
+/// One editable metadata row: label + provenance badge, then the input
+/// itself (greyed out with a tooltip when the backend can't write it), then
+/// a truncation warning if the edited value would be cut on save.
+fn draw_metadata_field(ui: &imgui::Ui, label: &str, id: &str, hint: &str, field: &mut MetaField) {
+    ui.text_disabled(label);
+    ui.same_line();
+    let badge = field.source.map(source_label).unwrap_or("—");
+    ui.text_disabled(format!("[{badge}]"));
+
+    let w = ui.content_region_avail()[0];
+    ui.set_next_item_width(w.max(80.0));
+    ui.input_text(id, &mut field.buf)
+        .hint(hint)
+        .read_only(!field.writable)
+        .build();
+    let hovered = ui.is_item_hovered();
+    if !field.writable {
+        if hovered {
+            ui.tooltip_text(
+                "Not writable for this file (inside a library only; RF64 is read-only)",
+            );
+        }
+    } else if field.dirty() {
+        if let Some(max) = field.max_len {
+            if field.buf.len() > max {
+                ui.text_colored(
+                    [0.9, 0.7, 0.3, 1.0],
+                    format!("will truncate to {max} bytes"),
+                );
+            }
+        }
+    }
+}
+
+/// Reveal `path` in the OS file manager, selecting the file where the platform
+/// supports it. Best-effort: a spawn failure is logged, never surfaced — this
+/// is a convenience, not a data operation.
+// ponytail: Linux opens the containing folder (xdg-open has no portable
+// "select this file"); macOS/Windows select the file itself. Upgrade path: a
+// per-desktop-environment selection call if users ask for it.
+fn reveal_in_file_manager(path: &Path) {
+    use std::process::Command;
+    let spawned = if cfg!(target_os = "macos") {
+        Command::new("open").arg("-R").arg(path).spawn()
+    } else if cfg!(target_os = "windows") {
+        Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+    } else {
+        let dir = path.parent().unwrap_or(path);
+        Command::new("xdg-open").arg(dir).spawn()
+    };
+    if let Err(e) = spawned {
+        log::warn!("reveal {path:?} failed: {e}");
+    }
+}
+
+/// Reseed the metadata editor from the file whenever the selection changes.
+/// Idempotent within a frame (guarded on the path) so the Inspector summary
+/// and the editor modal can both rely on it having run. Provenance is captured
+/// here (today always `Embedded`) via `read_resolved_metadata`.
+fn seed_metadata_editor(browser: &mut SampleBrowser, editor: &mut MetadataEditor) {
+    let current_path = browser.current_file().map(Path::to_path_buf);
+    if editor.path == current_path {
+        return;
+    }
+    editor.path = current_path.clone();
+    let Some(path) = current_path.as_deref() else {
+        *editor = MetadataEditor::default();
+        return;
+    };
+    let resolved = browser.read_resolved_metadata(path).unwrap_or_default();
+    let (cap, max) = browser.metadata_field_status(path, Field::Description);
+    seed_metadata_field(
+        &mut editor.description,
+        resolved.description.map(|s| (s.value, s.source)),
+        cap,
+        max,
+    );
+    let (cap, max) = browser.metadata_field_status(path, Field::Keywords);
+    seed_metadata_field(
+        &mut editor.keywords,
+        resolved.keywords.map(|s| (s.value.join(", "), s.source)),
+        cap,
+        max,
+    );
+    let (cap, max) = browser.metadata_field_status(path, Field::Category);
+    seed_metadata_field(
+        &mut editor.category,
+        resolved.category.map(|s| (s.value, s.source)),
+        cap,
+        max,
+    );
+    let (cap, max) = browser.metadata_field_status(path, Field::Creator);
+    seed_metadata_field(
+        &mut editor.creator,
+        resolved.creator.map(|s| (s.value, s.source)),
+        cap,
+        max,
+    );
+}
+
+/// Read-only, low-visual-weight metadata summary for the Inspector — one line
+/// per field showing the file's committed value (or `—`). Editing happens in
+/// the modal opened by the caller's button, not here (metadata is a ~5%-of-time
+/// concern; it shouldn't sit as always-live edit fields in the reading flow).
+fn metadata_summary(ui: &imgui::Ui, editor: &MetadataEditor) {
+    if editor.path.is_none() {
+        ui.text_disabled("No file selected");
+        return;
+    }
+    let row = |label: &str, f: &MetaField| {
+        let val = if f.seed.is_empty() {
+            "—"
+        } else {
+            f.seed.as_str()
+        };
+        ui.text_disabled(format!("{label}: {val}"));
+    };
+    row("Description", &editor.description);
+    row("Keywords", &editor.keywords);
+    row("Category", &editor.category);
+    row("Creator", &editor.creator);
+}
+
+/// The provenance-aware metadata editor, drawn inside a modal so it stays out
+/// of the primary flow until asked for. Description/Keywords/Category/Creator,
+/// each editable (or read-only, per `Capability`) with a source badge; one Save
+/// writes every dirty field in a single undoable `set_metadata` call. Assumes
+/// `seed_metadata_editor` has already run this frame.
+fn draw_metadata_editor_modal(
+    ui: &imgui::Ui,
+    browser: &mut SampleBrowser,
+    editor: &mut MetadataEditor,
+) {
+    ui.modal_popup("Edit Metadata##metadata_editor", || {
+        let Some(path) = editor.path.clone() else {
+            ui.close_current_popup();
+            return;
+        };
+        draw_metadata_field(
+            ui,
+            "Description",
+            "##meta-description",
+            "Description...",
+            &mut editor.description,
+        );
+        draw_metadata_field(
+            ui,
+            "Keywords",
+            "##meta-keywords",
+            "Keywords, comma-separated...",
+            &mut editor.keywords,
+        );
+        draw_metadata_field(
+            ui,
+            "Category",
+            "##meta-category",
+            "Category...",
+            &mut editor.category,
+        );
+        draw_metadata_field(
+            ui,
+            "Creator",
+            "##meta-creator",
+            "Creator...",
+            &mut editor.creator,
+        );
+
+        ui.separator();
+        let dirty = editor.description.dirty()
+            || editor.keywords.dirty()
+            || editor.category.dirty()
+            || editor.creator.dirty();
+        if ui.button("Save") && dirty {
+            let m = Metadata {
+                description: editor
+                    .description
+                    .dirty()
+                    .then(|| editor.description.buf.trim().to_string()),
+                keywords: if editor.keywords.dirty() {
+                    editor
+                        .keywords
+                        .buf
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                category: editor
+                    .category
+                    .dirty()
+                    .then(|| editor.category.buf.trim().to_string()),
+                creator: editor
+                    .creator
+                    .dirty()
+                    .then(|| editor.creator.buf.trim().to_string()),
+            };
+            browser.set_metadata(&path, m);
+            // Force a reseed next frame from what was actually written (picks up
+            // any backend truncation instead of echoing raw input).
+            editor.path = None;
+            ui.close_current_popup();
+        }
+        ui.same_line();
+        if ui.button("Cancel") {
+            // Discard in-progress edits: reseed from the file next frame.
+            editor.path = None;
+            ui.close_current_popup();
+        }
+    });
 }
