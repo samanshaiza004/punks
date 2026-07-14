@@ -335,17 +335,31 @@ pub(crate) fn write_bext_description(path: &Path, description: &str) -> Result<(
         BextSlot::Replace { start, end, .. } => (start, end),
         BextSlot::InsertAt(at) => (at, at),
     };
+    splice_chunk(path, head_end, tail_start, &chunk)
+}
 
-    // Splice: everything before the bext chunk, the new chunk, then everything
-    // after it (audio `data` and any unknown chunks) copied verbatim — the whole
-    // thing built into a temp file and atomically renamed over the original.
+/// Atomically rewrite `path` as: bytes `[0, head_end)` verbatim, then
+/// `chunk`, then bytes `[tail_start, EOF)` verbatim — with the RIFF size
+/// header (bytes 4..8) patched to the new total. `[head_end, tail_start)` is
+/// the region being replaced (empty when `head_end == tail_start`, i.e. an
+/// insertion). The audio `data` chunk and every unknown chunk are copied
+/// byte-for-byte; the whole thing goes to a temp file that atomically renames
+/// over the original (see [`write_atomically`]). Shared by every WAV metadata
+/// writer (bext, RIFF INFO, iXML mirror) so the splice is written and tested
+/// once.
+fn splice_chunk(
+    path: &Path,
+    head_end: usize,
+    tail_start: usize,
+    chunk: &[u8],
+) -> Result<(), PlaybackError> {
     write_atomically(path, |tmp| {
         let mut src =
             File::open(path).map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
         let mut dst =
             File::create(tmp).map_err(|e| PlaybackError::DecodeError(format!("{tmp:?}: {e}")))?;
         copy_n(&mut src, &mut dst, head_end as u64, path)?;
-        dst.write_all(&chunk)
+        dst.write_all(chunk)
             .map_err(|e| PlaybackError::DecodeError(format!("{tmp:?}: {e}")))?;
         src.seek(SeekFrom::Start(tail_start as u64))
             .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
@@ -360,6 +374,301 @@ pub(crate) fn write_bext_description(path: &Path, description: &str) -> Result<(
             .map_err(|e| PlaybackError::DecodeError(format!("{tmp:?}: {e}")))?;
         Ok(())
     })
+}
+
+// ---- RIFF INFO (a LIST/INFO chunk): Creator / Category / Keywords ----
+//
+// The RIFF INFO list holds free-text tags; punks2 maps three of them —
+// IART (artist → Creator), IGNR (genre → Category), IKEY (keywords). Every
+// other INFO subfield (INAM, ICMT, ICOP, …) is read-modify-write-preserved,
+// as is every non-INFO chunk. These fourcc tags live here, inside
+// punks-playback; nothing above `metadata::Backend` ever names them.
+
+/// The RIFF INFO subfields punks2 maps to canonical [`crate::metadata`]
+/// fields. `None` = the tag was absent or empty.
+#[derive(Default)]
+pub(crate) struct InfoFields {
+    pub creator: Option<String>,
+    pub category: Option<String>,
+    pub keywords: Option<String>,
+}
+
+/// Locate the `LIST`/`INFO` chunk (or where a new one should go — right after
+/// `bext` if present, else after `fmt `). Only looks before `data`.
+enum InfoSlot {
+    Replace {
+        start: usize,
+        end: usize,
+        body_len: usize,
+    },
+    InsertAt(usize),
+}
+
+fn locate_info(prefix: &[u8]) -> InfoSlot {
+    let mut pos = 12;
+    let mut insert_at = None;
+    while pos + 8 <= prefix.len() {
+        let id = &prefix[pos..pos + 4];
+        let size = u32::from_le_bytes(prefix[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body = pos + 8;
+        let next = body + size + (size & 1);
+        if id == b"LIST" && prefix.get(body..body + 4) == Some(b"INFO") {
+            return InfoSlot::Replace {
+                start: pos,
+                end: next.min(prefix.len()).max(body),
+                body_len: size,
+            };
+        }
+        if id == b"data" || size == 0xFFFF_FFFF {
+            break;
+        }
+        // Prefer inserting a fresh INFO list right after bext (metadata
+        // grouped together), else right after fmt.
+        if id == b"bext" || (id == b"fmt " && insert_at.is_none()) {
+            insert_at = Some(next);
+        }
+        if next <= pos || next > prefix.len() {
+            break;
+        }
+        pos = next;
+    }
+    InfoSlot::InsertAt(insert_at.unwrap_or(pos))
+}
+
+/// Parse the mapped subfields out of a `LIST`/`INFO` body (the bytes after the
+/// chunk's size, i.e. starting with the `"INFO"` form type).
+fn parse_info_body(body: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut pos = 4; // skip "INFO"
+    while pos + 8 <= body.len() {
+        let mut id = [0u8; 4];
+        id.copy_from_slice(&body[pos..pos + 4]);
+        let size = u32::from_le_bytes(body[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let sbody = pos + 8;
+        let end = (sbody + size).min(body.len());
+        out.push((id, body[sbody..end].to_vec()));
+        let next = sbody + size + (size & 1);
+        if next <= pos {
+            break;
+        }
+        pos = next;
+    }
+    out
+}
+
+/// Read the mapped RIFF INFO subfields, if a LIST/INFO chunk is present.
+pub(crate) fn parse_riff_info(prefix: &[u8]) -> InfoFields {
+    if !is_wave_prefix(prefix) {
+        return InfoFields::default();
+    }
+    let InfoSlot::Replace {
+        start, body_len, ..
+    } = locate_info(prefix)
+    else {
+        return InfoFields::default();
+    };
+    let body = &prefix[(start + 8)..(start + 8 + body_len).min(prefix.len())];
+    let mut out = InfoFields::default();
+    for (id, raw) in parse_info_body(body) {
+        let val = read_c_string(&raw);
+        let val = (!val.is_empty()).then_some(val);
+        match &id {
+            b"IART" => out.creator = val,
+            b"IGNR" => out.category = val,
+            b"IKEY" => out.keywords = val,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Which RIFF INFO fields to set (read-modify-write: `None` leaves that tag
+/// untouched, so unknown subfields and unset mapped tags survive).
+#[derive(Default)]
+pub(crate) struct InfoWrite<'a> {
+    pub creator: Option<&'a str>,
+    pub category: Option<&'a str>,
+    pub keywords: Option<&'a str>,
+}
+
+/// Write Creator/Category/Keywords into `path`'s `LIST`/`INFO` chunk (creating
+/// the list if absent), preserving every other INFO subfield and every other
+/// chunk byte-for-byte. Plain RIFF/WAVE only (same gate as bext).
+pub(crate) fn write_riff_info(path: &Path, w: &InfoWrite) -> Result<(), PlaybackError> {
+    if w.creator.is_none() && w.category.is_none() && w.keywords.is_none() {
+        return Ok(());
+    }
+    if !can_write_bext(path) {
+        return Err(PlaybackError::DecodeError(format!(
+            "{path:?}: embedded metadata write is only supported for plain WAV/BWF files"
+        )));
+    }
+    let prefix = read_header_prefix(path, HEADER_PREFIX_MAX)?;
+    let slot = locate_info(&prefix);
+
+    // Existing subfields (so unmapped ones survive), or an empty list.
+    let mut fields = match &slot {
+        InfoSlot::Replace {
+            start, body_len, ..
+        } => {
+            let body = &prefix[(start + 8)..(start + 8 + body_len).min(prefix.len())];
+            parse_info_body(body)
+        }
+        InfoSlot::InsertAt(_) => Vec::new(),
+    };
+
+    let mut set = |tag: &[u8; 4], value: Option<&str>| {
+        let Some(value) = value else { return };
+        let bytes = value.as_bytes().to_vec();
+        match fields.iter_mut().find(|(id, _)| id == tag) {
+            Some((_, v)) => *v = bytes,
+            None => fields.push((*tag, bytes)),
+        }
+    };
+    set(b"IART", w.creator);
+    set(b"IGNR", w.category);
+    set(b"IKEY", w.keywords);
+
+    // Rebuild the INFO body: "INFO" + each subchunk (NUL-terminated value,
+    // padded to even), then wrap in a LIST chunk.
+    let mut body = Vec::from(*b"INFO");
+    for (id, value) in &fields {
+        let size = value.len() + 1; // include the NUL terminator
+        body.extend_from_slice(id);
+        body.extend_from_slice(&(size as u32).to_le_bytes());
+        body.extend_from_slice(value);
+        body.push(0);
+        if size % 2 == 1 {
+            body.push(0);
+        }
+    }
+    let mut chunk = Vec::with_capacity(8 + body.len() + 1);
+    chunk.extend_from_slice(b"LIST");
+    chunk.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    chunk.extend_from_slice(&body);
+    if body.len() % 2 == 1 {
+        chunk.push(0);
+    }
+
+    let (head_end, tail_start) = match slot {
+        InfoSlot::Replace { start, end, .. } => (start, end),
+        InfoSlot::InsertAt(at) => (at, at),
+    };
+    splice_chunk(path, head_end, tail_start, &chunk)
+}
+
+// ---- iXML: keep an existing <BWF_DESCRIPTION> mirror in sync ----
+//
+// iXML is an opaque XML chunk written by field recorders. punks2 never
+// creates it, never parses it as a model, and touches exactly one leaf:
+// <BWF_DESCRIPTION>, the spec-defined mirror of bext Description. On write we
+// update that leaf iff it already exists (so the file stays self-consistent);
+// everything else in the chunk is preserved byte-for-byte. On read we use it
+// (then <NOTE>, opt-in compat) only as a Description fallback when bext is
+// absent. ponytail: this is deliberately not a real XML parser — no
+// namespaces, CDATA, or entity handling beyond the few basic escapes below;
+// upgrade path is a real XML library if pro-audio fields (L4) ever land.
+
+/// Locate the `iXML` chunk body `[start, end)` and its size, if present
+/// (before `data`).
+fn locate_ixml(prefix: &[u8]) -> Option<(usize, usize, usize)> {
+    let mut pos = 12;
+    while pos + 8 <= prefix.len() {
+        let id = &prefix[pos..pos + 4];
+        let size = u32::from_le_bytes(prefix[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body = pos + 8;
+        let next = body + size + (size & 1);
+        if id == b"iXML" {
+            return Some((pos, next.min(prefix.len()).max(body), size));
+        }
+        if id == b"data" || size == 0xFFFF_FFFF {
+            break;
+        }
+        if next <= pos || next > prefix.len() {
+            break;
+        }
+        pos = next;
+    }
+    None
+}
+
+/// The text content of the first `<tag>…</tag>` in `xml`, basic-unescaped.
+fn xml_inner(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml_unescape(&xml[start..end]))
+}
+
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Read the iXML Description fallback: `<BWF_DESCRIPTION>` then, as opt-in
+/// compat, `<NOTE>` (which is not semantically a description, but some
+/// recorders put the useful text only there).
+pub(crate) fn read_ixml_description(prefix: &[u8]) -> Option<String> {
+    let (start, end, body_len) = locate_ixml(prefix)?;
+    let body = &prefix[(start + 8)..(start + 8 + body_len).min(end)];
+    let xml = String::from_utf8_lossy(body);
+    xml_inner(&xml, "BWF_DESCRIPTION")
+        .or_else(|| xml_inner(&xml, "NOTE"))
+        .filter(|s| !s.is_empty())
+}
+
+/// If `path` has an iXML chunk with a `<BWF_DESCRIPTION>` leaf, update it to
+/// `description` so it can't disagree with the bext Description we just wrote.
+/// No-op when there's no iXML chunk or no such leaf — punks2 never creates
+/// either. Preserves the rest of the iXML (and every other chunk) verbatim.
+pub(crate) fn write_ixml_description_mirror(
+    path: &Path,
+    description: &str,
+) -> Result<(), PlaybackError> {
+    if !can_write_bext(path) {
+        return Ok(()); // not a writable WAV; nothing to mirror
+    }
+    let prefix = read_header_prefix(path, HEADER_PREFIX_MAX)?;
+    let Some((start, end, body_len)) = locate_ixml(&prefix) else {
+        return Ok(());
+    };
+    let body = &prefix[(start + 8)..(start + 8 + body_len).min(end)];
+    let xml = String::from_utf8_lossy(body).into_owned();
+    let open = "<BWF_DESCRIPTION>";
+    let close = "</BWF_DESCRIPTION>";
+    let Some(open_pos) = xml.find(open) else {
+        return Ok(()); // no mirror to maintain
+    };
+    let inner_start = open_pos + open.len();
+    let Some(rel_close) = xml[inner_start..].find(close) else {
+        return Ok(()); // malformed; leave it entirely alone
+    };
+    let inner_end = inner_start + rel_close;
+    let mut new_xml = String::with_capacity(xml.len() + description.len());
+    new_xml.push_str(&xml[..inner_start]);
+    new_xml.push_str(&xml_escape(description));
+    new_xml.push_str(&xml[inner_end..]);
+    if new_xml == xml {
+        return Ok(()); // already in sync — don't rewrite the file
+    }
+
+    let mut new_body = new_xml.into_bytes();
+    let mut chunk = Vec::with_capacity(8 + new_body.len() + 1);
+    chunk.extend_from_slice(b"iXML");
+    chunk.extend_from_slice(&(new_body.len() as u32).to_le_bytes());
+    chunk.append(&mut new_body);
+    if chunk.len() % 2 == 1 {
+        chunk.push(0);
+    }
+    splice_chunk(path, start, end, &chunk)
 }
 
 /// Atomically replace `path` with a new file that `build` writes to a sibling

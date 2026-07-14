@@ -270,23 +270,22 @@ impl WaveBackend {
 }
 
 impl MetadataBackend for WaveBackend {
-    fn capability(&self, field: Field) -> Capability {
-        match field {
-            Field::Description => {
-                if self.writable {
-                    Capability::ReadWrite
-                } else {
-                    Capability::ReadOnly // e.g. RF64: bext is readable, not writable
-                }
-            }
-            // Keywords/Category/Creator (RIFF INFO / iXML) land next pass.
-            _ => Capability::Unsupported,
+    fn capability(&self, _field: Field) -> Capability {
+        // Every mapped field (Description→bext, Creator→IART, Category→IGNR,
+        // Keywords→IKEY) is readable from any WAV and writable on a plain
+        // RIFF/WAVE; RF64 (and Ogg-in-WAV) stay read-only for all of them,
+        // since their structural rules make an in-place splice unsafe.
+        if self.writable {
+            Capability::ReadWrite
+        } else {
+            Capability::ReadOnly
         }
     }
 
     fn max_len(&self, field: Field) -> Option<usize> {
         match field {
             Field::Description => Some(decode::BEXT_DESCRIPTION_MAX),
+            // RIFF INFO strings are variable-length (NUL-terminated).
             _ => None,
         }
     }
@@ -294,20 +293,67 @@ impl MetadataBackend for WaveBackend {
     fn read(&self, path: &Path) -> Result<Metadata, MetadataError> {
         let prefix = decode::read_header_prefix(path, decode::HEADER_PREFIX_MAX)?;
         let am = decode::parse_riff_metadata(&prefix);
+        let info = decode::parse_riff_info(&prefix);
+        // Description precedence: bext, then the iXML mirror/NOTE fallback for
+        // recorders that write iXML but a minimal bext.
+        let description = am
+            .description
+            .or_else(|| decode::read_ixml_description(&prefix));
         Ok(Metadata {
-            description: am.description,
-            ..Default::default()
+            description,
+            keywords: info
+                .keywords
+                .as_deref()
+                .map(split_keywords)
+                .unwrap_or_default(),
+            category: info.category,
+            creator: info.creator,
         })
     }
 
     fn write(&self, path: &Path, m: &Metadata) -> Result<(), MetadataError> {
+        // Read-modify-write per chunk: each splice preserves every other chunk
+        // (fmt, data, cue, unknown) and every unmapped subfield byte-for-byte.
+        // ponytail: a multi-field save is several atomic passes, not one
+        // transaction — a mid-save failure can leave some fields written and
+        // others not (never a corrupt file). Fine for a user-initiated edit;
+        // unify into a single-pass header rewrite if bulk metadata edits on
+        // large WAVs become common.
         if let Some(desc) = &m.description {
-            // The bext splice preserves every other chunk (fmt, data, cue, …)
-            // and every other bext field byte-for-byte.
             decode::write_bext_description(path, desc)?;
+            // Keep an existing iXML BWF_DESCRIPTION mirror from diverging.
+            decode::write_ixml_description_mirror(path, desc)?;
         }
+        let keywords = join_keywords(&m.keywords);
+        decode::write_riff_info(
+            path,
+            &decode::InfoWrite {
+                creator: m.creator.as_deref(),
+                category: m.category.as_deref(),
+                keywords: keywords.as_deref(),
+            },
+        )?;
         Ok(())
     }
+}
+
+/// Keyword list ⇄ single tag string (RIFF `IKEY`): joined with `"; "` on
+/// write, split on `;`/`,` (trimmed, non-empty) on read.
+const KEYWORD_SEP: &str = "; ";
+
+fn join_keywords(kw: &[String]) -> Option<String> {
+    if kw.is_empty() {
+        None
+    } else {
+        Some(kw.join(KEYWORD_SEP))
+    }
+}
+
+fn split_keywords(s: &str) -> Vec<String> {
+    s.split([';', ','])
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect()
 }
 
 /// Everything WAV isn't (FLAC, MP3, OGG, AIFF, …) via `lofty`, which reads and
@@ -318,13 +364,23 @@ pub struct LoftyBackend;
 impl MetadataBackend for LoftyBackend {
     fn capability(&self, field: Field) -> Capability {
         match field {
-            Field::Description => Capability::ReadWrite,
-            _ => Capability::Unsupported,
+            // Description→Description/Comment, Creator→TrackArtist,
+            // Category→Genre all have universal `ItemKey`s lofty round-trips.
+            Field::Description | Field::Creator | Field::Category => Capability::ReadWrite,
+            // No standard cross-format keywords tag in lofty's `ItemKey` set,
+            // so Keywords stays a WAV-only (RIFF IKEY) field for now —
+            // capability, not a format check: the UI greys it out here.
+            Field::Keywords => Capability::Unsupported,
         }
     }
 
     fn read(&self, path: &Path) -> Result<Metadata, MetadataError> {
         let tagged = lofty::read_from_path(path)?;
+        let string = |key: ItemKey| {
+            tagged
+                .primary_tag()
+                .and_then(|t| t.get_string(key).map(str::to_string))
+        };
         let description = tagged.primary_tag().and_then(|t| {
             t.get_string(ItemKey::Description)
                 .or_else(|| t.get_string(ItemKey::Comment))
@@ -332,14 +388,23 @@ impl MetadataBackend for LoftyBackend {
         });
         Ok(Metadata {
             description,
+            creator: string(ItemKey::TrackArtist),
+            category: string(ItemKey::Genre),
             ..Default::default()
         })
     }
 
     fn write(&self, path: &Path, m: &Metadata) -> Result<(), MetadataError> {
-        let Some(desc) = m.description.clone() else {
+        // Only touch the fields this backend maps; leave the rest (and every
+        // other tag/picture in the file) as lofty found them.
+        let edits: [(ItemKey, Option<&str>); 3] = [
+            (ItemKey::Description, m.description.as_deref()),
+            (ItemKey::TrackArtist, m.creator.as_deref()),
+            (ItemKey::Genre, m.category.as_deref()),
+        ];
+        if edits.iter().all(|(_, v)| v.is_none()) {
             return Ok(());
-        };
+        }
         // Edit a temp copy of the original, then atomically rename it into place
         // — lofty edits a file in-place, so `write_atomically` gives it the
         // crash-safety it doesn't provide on its own. The temp keeps the
@@ -354,7 +419,11 @@ impl MetadataBackend for LoftyBackend {
                 tagged.insert_tag(Tag::new(tag_type));
             }
             if let Some(tag) = tagged.primary_tag_mut() {
-                tag.insert_text(ItemKey::Description, desc.clone());
+                for (key, value) in &edits {
+                    if let Some(v) = value {
+                        tag.insert_text(*key, v.to_string());
+                    }
+                }
             }
             tagged
                 .save_to_path(tmp, WriteOptions::default())

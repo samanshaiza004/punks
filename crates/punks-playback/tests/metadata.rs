@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use punks_playback::{Backend, Capability, Field, MetadataBackend};
+use punks_playback::{Backend, Capability, Field, Metadata, MetadataBackend};
 
 /// Append one RIFF chunk (id + LE size + body + pad byte if odd), as spec.
 fn chunk(id: &[u8; 4], body: &[u8], out: &mut Vec<u8>) {
@@ -128,35 +128,52 @@ fn foreign_wav_chunk_survives_description_edit() {
 
 #[test]
 fn capability_by_container() {
-    // Plain RIFF/WAVE: Description is writable.
+    // Plain RIFF/WAVE: every mapped field is writable (Description→bext,
+    // Creator→IART, Category→IGNR, Keywords→IKEY).
     let w = tmp("cap_wav", &wav(&[], b"\x00\x00"));
-    assert_eq!(
-        Backend::for_path(&w).capability(Field::Description),
-        Capability::ReadWrite
-    );
-    // Unmapped fields are Unsupported everywhere this pass.
-    assert_eq!(
-        Backend::for_path(&w).capability(Field::Keywords),
-        Capability::Unsupported
-    );
+    for field in [
+        Field::Description,
+        Field::Keywords,
+        Field::Category,
+        Field::Creator,
+    ] {
+        assert_eq!(
+            Backend::for_path(&w).capability(field),
+            Capability::ReadWrite,
+            "{field:?} should be writable on a plain WAV"
+        );
+    }
     let _ = std::fs::remove_file(&w);
 
-    // RF64: Description is readable but write-refused.
+    // RF64: readable but write-refused, for every field.
     let r = tmp("cap_rf64", &rf64());
     assert_eq!(
         Backend::for_path(&r).capability(Field::Description),
         Capability::ReadOnly
     );
+    assert_eq!(
+        Backend::for_path(&r).capability(Field::Creator),
+        Capability::ReadOnly
+    );
     let _ = std::fs::remove_file(&r);
 
-    // lofty formats route by extension and report Description ReadWrite without
-    // needing the file to exist (routing is the container decision).
+    // lofty formats route by extension: Description/Creator/Category are
+    // writable; Keywords has no standard lofty tag, so it's Unsupported there
+    // (WAV-only). Routing needs no file on disk.
     for ext in ["mp3", "flac", "ogg", "aiff"] {
         let fake = PathBuf::from(format!("does-not-exist.{ext}"));
+        let backend = Backend::for_path(&fake);
+        for field in [Field::Description, Field::Creator, Field::Category] {
+            assert_eq!(
+                backend.capability(field),
+                Capability::ReadWrite,
+                "{ext} {field:?} should be writable"
+            );
+        }
         assert_eq!(
-            Backend::for_path(&fake).capability(Field::Description),
-            Capability::ReadWrite,
-            "{ext} should be a writable lofty container"
+            backend.capability(Field::Keywords),
+            Capability::Unsupported,
+            "{ext} Keywords is WAV-only this pass"
         );
     }
 }
@@ -170,4 +187,141 @@ fn unknown_extension_routes_to_lofty_not_wav() {
         Backend::for_path(p).capability(Field::Description),
         Capability::ReadWrite
     );
+}
+
+#[test]
+fn wav_riff_info_round_trips_and_preserves_unmapped_subfields() {
+    // A LIST/INFO carrying an unmapped INAM subfield, plus a foreign chunk —
+    // both must survive a Creator/Category/Keywords write byte-for-byte.
+    let mut info = Vec::new();
+    info.extend_from_slice(b"INFO");
+    let name = b"Original Name\0"; // 14 bytes, even
+    info.extend_from_slice(b"INAM");
+    info.extend_from_slice(&(name.len() as u32).to_le_bytes());
+    info.extend_from_slice(name);
+    let path = tmp(
+        "info",
+        &wav(&[(b"LIST", &info), (b"PNKS", b"keepme!!")], b"AUDIODATA"),
+    );
+    let backend = Backend::for_path(&path);
+
+    let mut m = backend.read(&path).unwrap();
+    m.creator = Some("Recordist".into());
+    m.category = Some("Foley".into());
+    m.keywords = vec!["gravel".into(), "footsteps".into()];
+    backend.write(&path, &m).unwrap();
+
+    let got = Backend::for_path(&path).read(&path).unwrap();
+    assert_eq!(got.creator.as_deref(), Some("Recordist"));
+    assert_eq!(got.category.as_deref(), Some("Foley"));
+    assert_eq!(
+        got.keywords,
+        vec!["gravel".to_string(), "footsteps".to_string()]
+    );
+
+    let raw = std::fs::read(&path).unwrap();
+    assert!(
+        raw.windows(4).any(|w| w == b"INAM"),
+        "unmapped INAM subfield lost"
+    );
+    assert!(
+        raw.windows(13).any(|w| w == b"Original Name"),
+        "INAM value lost"
+    );
+    assert!(
+        raw.windows(8).any(|w| w == b"keepme!!"),
+        "foreign chunk lost on an INFO edit"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn wav_ixml_mirror_synced_and_unrelated_elements_survive() {
+    // bext absent, so read falls back to the iXML mirror; a Description edit
+    // updates bext AND the existing <BWF_DESCRIPTION> leaf, leaving <SCENE>
+    // (a field punks2 doesn't model) untouched. Different-length text
+    // exercises the chunk resize + RIFF-size patch.
+    let ixml =
+        b"<BWFXML><BEXT><BWF_DESCRIPTION>old</BWF_DESCRIPTION></BEXT><SCENE>MyScene</SCENE></BWFXML>";
+    let path = tmp("ixml", &wav(&[(b"iXML", ixml.as_slice())], b"AUDIODATA"));
+    let backend = Backend::for_path(&path);
+
+    let mut m = backend.read(&path).unwrap();
+    assert_eq!(m.description.as_deref(), Some("old"), "iXML fallback read");
+
+    m.description = Some("a much longer new description".into());
+    backend.write(&path, &m).unwrap();
+
+    let raw = std::fs::read(&path).unwrap();
+    let s = String::from_utf8_lossy(&raw);
+    assert!(
+        s.contains("<BWF_DESCRIPTION>a much longer new description</BWF_DESCRIPTION>"),
+        "iXML mirror not updated"
+    );
+    assert!(
+        s.contains("<SCENE>MyScene</SCENE>"),
+        "unrelated iXML element lost"
+    );
+    assert_eq!(
+        Backend::for_path(&path)
+            .read(&path)
+            .unwrap()
+            .description
+            .as_deref(),
+        Some("a much longer new description"),
+        "bext now carries it (precedence over the mirror)"
+    );
+    assert!(raw.windows(9).any(|w| w == b"AUDIODATA"), "audio data lost");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn wav_ixml_note_read_fallback() {
+    let ixml = b"<BWFXML><NOTE>just a note</NOTE></BWFXML>";
+    let path = tmp("note", &wav(&[(b"iXML", ixml.as_slice())], b"AUDIODATA"));
+    assert_eq!(
+        Backend::for_path(&path)
+            .read(&path)
+            .unwrap()
+            .description
+            .as_deref(),
+        Some("just a note")
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn wav_ixml_never_created_or_populated() {
+    // No iXML → an edit must not create one.
+    let path = tmp("noixml", &wav(&[], b"AUDIODATA"));
+    let mut m = Metadata {
+        description: Some("hello".into()),
+        ..Default::default()
+    };
+    Backend::for_path(&path).write(&path, &m).unwrap();
+    assert!(
+        !std::fs::read(&path)
+            .unwrap()
+            .windows(4)
+            .any(|w| w == b"iXML"),
+        "iXML must never be created"
+    );
+    let _ = std::fs::remove_file(&path);
+
+    // iXML present but with no <BWF_DESCRIPTION> mirror → an edit must not add
+    // one (never create the leaf), and must preserve the existing content.
+    let ixml = b"<BWFXML><SCENE>S1</SCENE></BWFXML>";
+    let path = tmp(
+        "nomirror",
+        &wav(&[(b"iXML", ixml.as_slice())], b"AUDIODATA"),
+    );
+    m.description = Some("desc".into());
+    Backend::for_path(&path).write(&path, &m).unwrap();
+    let s = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+    assert!(
+        !s.contains("BWF_DESCRIPTION"),
+        "must not create a mirror leaf"
+    );
+    assert!(s.contains("<SCENE>S1</SCENE>"), "iXML content preserved");
+    let _ = std::fs::remove_file(&path);
 }
