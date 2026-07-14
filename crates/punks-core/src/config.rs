@@ -22,6 +22,12 @@ pub struct Keybinds {
     pub next_tab: String,
     #[serde(default = "default_undo")]
     pub undo: String,
+    #[serde(default = "default_redo")]
+    pub redo: String,
+    #[serde(default = "default_play_stop")]
+    pub play_stop: String,
+    #[serde(default = "default_toggle_inspector")]
+    pub toggle_inspector: String,
 }
 
 fn default_navigate_up() -> String {
@@ -51,8 +57,23 @@ fn default_next_tab() -> String {
 fn default_undo() -> String {
     "U".into()
 }
+fn default_redo() -> String {
+    "R".into()
+}
+fn default_play_stop() -> String {
+    "Space".into()
+}
+fn default_toggle_inspector() -> String {
+    "I".into()
+}
 fn default_volume() -> f32 {
     1.0
+}
+fn default_true() -> bool {
+    true
+}
+fn default_inspector_width() -> f32 {
+    300.0
 }
 
 impl Default for Keybinds {
@@ -67,6 +88,9 @@ impl Default for Keybinds {
             prev_tab: default_prev_tab(),
             next_tab: default_next_tab(),
             undo: default_undo(),
+            redo: default_redo(),
+            play_stop: default_play_stop(),
+            toggle_inspector: default_toggle_inspector(),
         }
     }
 }
@@ -89,6 +113,15 @@ pub struct PunksConfig {
     /// a stale value from before some `tabs` entries vanished is harmless.
     #[serde(default)]
     pub active_tab: usize,
+    /// Whether the right-hand Inspector pane is shown. The Inspector is
+    /// secondary (metadata/facts/tags); hiding it gives Results the full width.
+    #[serde(default = "default_true")]
+    pub inspector_visible: bool,
+    /// Inspector pane width in pixels, set by dragging the splitter between
+    /// Results and the Inspector. Per-section open/closed state is deliberately
+    /// *not* persisted — sections just default sensibly each launch.
+    #[serde(default = "default_inspector_width")]
+    pub inspector_width: f32,
 }
 
 impl Default for PunksConfig {
@@ -99,6 +132,8 @@ impl Default for PunksConfig {
             volume: default_volume(),
             tabs: Vec::new(),
             active_tab: 0,
+            inspector_visible: default_true(),
+            inspector_width: default_inspector_width(),
         }
     }
 }
@@ -163,6 +198,23 @@ mod tests {
         assert!(cfg.tabs.is_empty());
         assert_eq!(cfg.active_tab, 0);
         assert_eq!(cfg.last_directory, Some(PathBuf::from("/some/dir")));
+        // Inspector keys are likewise absent in old configs: default to a
+        // visible pane at the standard width.
+        assert!(cfg.inspector_visible);
+        assert_eq!(cfg.inspector_width, default_inspector_width());
+    }
+
+    #[test]
+    fn inspector_state_round_trips_through_json() {
+        let cfg = PunksConfig {
+            inspector_visible: false,
+            inspector_width: 420.0,
+            ..PunksConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: PunksConfig = serde_json::from_str(&json).unwrap();
+        assert!(!back.inspector_visible);
+        assert_eq!(back.inspector_width, 420.0);
     }
 
     #[test]
@@ -187,5 +239,9 @@ mod tests {
         let cfg: PunksConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.keybinds.navigate_up, "W");
         assert_eq!(cfg.keybinds.undo, "U");
+        // Keybinds added after this config was written fall back to defaults.
+        assert_eq!(cfg.keybinds.redo, "R");
+        assert_eq!(cfg.keybinds.play_stop, "Space");
+        assert_eq!(cfg.keybinds.toggle_inspector, "I");
     }
 }
