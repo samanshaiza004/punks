@@ -648,7 +648,18 @@ impl Library {
         }
         let meta = std::fs::metadata(abs_path)?;
         let bytes = encode_waveform_bin(peaks, meta.len(), mtime_ms(&meta));
-        std::fs::write(&bin, bytes)?;
+        // Atomic: write a sibling temp then rename into place, so a concurrent
+        // writer (a future parallel sweep, or two workers racing the same asset)
+        // can never observe a torn `.bin`. Rename is atomic on the same
+        // filesystem; last-writer-wins is fine since same-asset content matches.
+        // A per-process atomic counter makes the temp name unique even when two
+        // threads write the same asset in the same nanosecond — otherwise both
+        // could pick one temp path and the second `rename` would hit ENOENT.
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = bin.with_extension(format!("bin.tmp.{}.{seq}", std::process::id()));
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &bin)?;
         Ok(())
     }
 
@@ -743,21 +754,34 @@ impl Library {
         Ok((updated > 0).then(|| abs_path.to_path_buf()))
     }
 
-    /// Upsert exactly the `"description"` fact for `abs_path`, without touching
+    /// Upsert one text `metric` fact for `abs_path`, without touching
     /// `analysis_jobs` (unlike [`store_analysis`](Self::store_analysis), this
-    /// isn't an analysis run — it's the cache catching up after an explicit
-    /// user edit that was already written to the file's embedded metadata).
-    pub fn set_description(&self, abs_path: &Path, description: &str) -> Result<(), LibraryError> {
+    /// isn't an analysis run — it's the display/health cache catching up
+    /// after an explicit user edit already written to the file's embedded
+    /// metadata). Used for the cached embedded-metadata fields
+    /// (`"description"`, `"category"`, `"creator"`).
+    pub fn set_metadata_text(
+        &self,
+        abs_path: &Path,
+        metric: &str,
+        value: &str,
+    ) -> Result<(), LibraryError> {
         let asset_id = self.ensure_asset(abs_path)?;
         self.conn.execute(
             "INSERT INTO audio_analysis(asset_id, metric, text_value)
-             VALUES (?1, 'description', ?2)
+             VALUES (?1, ?2, ?3)
              ON CONFLICT(asset_id, metric) DO UPDATE SET
                text_value = excluded.text_value, real_value = NULL, blob_value = NULL,
                computed_at = unixepoch()",
-            rusqlite::params![asset_id, description],
+            rusqlite::params![asset_id, metric, value],
         )?;
         Ok(())
+    }
+
+    /// [`set_metadata_text`](Self::set_metadata_text) for `"description"` —
+    /// kept as the name existing callers use.
+    pub fn set_description(&self, abs_path: &Path, description: &str) -> Result<(), LibraryError> {
+        self.set_metadata_text(abs_path, "description", description)
     }
 
     /// Store an asset's analysis facts (opaque `(metric, Fact)` pairs, e.g. from
@@ -1439,6 +1463,49 @@ mod tests {
         assert_eq!(tags[0].name, "808");
         // Exactly one asset row — no duplicate identity.
         assert_eq!(lib.list_assets().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_store_waveform_writes_one_uncorrupted_entry() {
+        // Invariant (behavior, not implementation): N simultaneous cache writes
+        // for one asset leave exactly one valid `.bin` — no torn file, no
+        // leftover temp. Guards the write half of "concurrent requests for one
+        // asset -> one persisted entry" ahead of a future parallel sweep. (The
+        // "one compute per burst" half is `request_slot_coalesces_to_latest` in
+        // punks-playback.)
+        let t = TempRoot::new("wave_race");
+        let a = write_wav(&t.0, "loop.wav", b"AUDIO-BYTES");
+        let mut lib = Library::create(&t.0).unwrap();
+        scan(&mut lib); // stable uuid before the race
+        let root = t.0.clone();
+        let peaks = vec![(-0.5, 0.5), (-1.0, 1.0), (0.0, 0.25)];
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (root, path, peaks) = (root.clone(), a.clone(), peaks.clone());
+                std::thread::spawn(move || {
+                    // Each thread opens its own connection (the crate's model).
+                    let lib = Library::open(&root).unwrap();
+                    lib.store_waveform(&path, &peaks).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Exactly one committed `.bin`, no leftover temps, and it loads cleanly.
+        let dir = root.join(".punks").join("waveforms");
+        let mut bins = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(!name.contains(".tmp."), "leftover temp file: {name}");
+            if name.ends_with(".bin") {
+                bins += 1;
+            }
+        }
+        assert_eq!(bins, 1, "concurrent writes must leave exactly one .bin");
+        assert_eq!(lib.load_waveform(&a).unwrap(), Some(peaks));
     }
 
     #[test]
