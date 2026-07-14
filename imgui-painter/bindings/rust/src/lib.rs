@@ -8,6 +8,9 @@
 //! [`Session`] is the safe wrapper over the raw `ip_ctx*` FFI calls.
 
 pub mod adapter;
+mod item_paint;
+
+pub use item_paint::{item_paint, Decorator, ItemState, Material, StateColors};
 
 mod ffi {
     #![allow(non_camel_case_types)]
@@ -427,9 +430,9 @@ impl Default for Painter {
 /// across every draw list. That makes it the reserved home for frame-level
 /// behavior — primitive/vertex counters, allocation stats, validation
 /// hooks, cross-canvas mesh batching, GPU-upload coordination — none of
-/// which belong to a single `Canvas`. None of it is built yet (punks2 draws
-/// into one window = one draw list, so there's no consumer); it lives in
-/// `ip_frame_begin`/`ip_frame_end` as reserved hooks, per CLAUDE.md §8.
+/// which belong to a single `Canvas`. None of it is built yet (current hosts
+/// draw into one window = one draw list, so there's no consumer); it lives in
+/// `ip_frame_begin`/`ip_frame_end` as reserved hooks.
 ///
 /// Invariant, total across the chain: a `Canvas` never outlives its `Frame`;
 /// a `Frame` never outlives its `Painter`; the `Painter` owns all memory.
