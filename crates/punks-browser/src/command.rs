@@ -2,7 +2,7 @@
 //! Two kinds exist today and both go through the same [`Command`] trait:
 //! SQLite writes (tags, overrides — `punks_library::Library`) and embedded
 //! file metadata writes (`punks_playback::metadata`, e.g. the bext
-//! Description). [`WriteDescriptionCommand`] shows the "unify" part
+//! Description). [`WriteMetadataCommand`] shows the "unify" part
 //! concretely: one command does *both* — the embedded write and the
 //! library's cache sync — as a single undoable step, exactly the shape
 //! `SampleBrowser::set_description` already had; this just makes it
@@ -13,9 +13,13 @@
 //!
 //! [`BatchCommand`] groups several commands into one undo step, which is
 //! what makes "batch tag" a single "undo last tag assignment" instead of N.
+//! It also backs the open-span *transaction* API (`begin_transaction` /
+//! `commit_transaction` on [`UndoStack`]): commands recorded between those
+//! calls fold into one `BatchCommand` — the shape `SampleBrowser`'s batch-tag
+//! paths use so N mutations become one undo step and one cache reload.
 //!
-//! Deliberately simple, per the deferred plan this implements: an in-memory
-//! [`UndoStack`] per library (see `LibraryContext::undo_stack`), no redo, no
+//! An in-memory [`UndoStack`] per library (see `LibraryContext::undo_stack`),
+//! linear undo **and redo** (a fresh command clears the redo branch), no
 //! persistence across restarts. Scope is intentionally narrow: tag
 //! assign/unassign and override set/mark-absent/clear/description writes
 //! are undoable; tag *creation/deletion* and library creation/deletion are
@@ -219,70 +223,78 @@ impl Command for SetOverrideCommand {
     }
 }
 
-/// Write `new_value` into `path`'s embedded Description *and* sync the
-/// library's cached copy — the two-write "unify SQLite + embedded
-/// metadata" case the module doc calls out. Captures the prior embedded
-/// value the first time it executes; undo writes that back through the
-/// same backend and re-syncs the cache to match, so the cache never
-/// disagrees with the file even after an undo (the same invariant
-/// `SampleBrowser::set_description` already holds for a forward write).
+/// Write a whole [`Metadata`] into `path`'s embedded metadata *and* sync the
+/// library's cached copies — the "unify SQLite + embedded metadata" case the
+/// module doc calls out, generalized from Description to every field the
+/// panel edits (Description/Keywords/Category/Creator; the backend writes
+/// only those its format supports). Captures the prior full `Metadata` the
+/// first time it executes; undo writes that back through the same backend and
+/// re-syncs the cache, so the cache never disagrees with the file even after
+/// an undo. One "edit metadata" undo step per panel Save.
 ///
-/// ponytail: current `MetadataBackend::write` impls only ever *set* a
-/// description (`Some` overwrites, `None` is a no-op — there's no way to
-/// clear a field back to "not present" through this API yet). So if there
-/// was no prior description, undo writes back an empty string rather than
-/// removing the field entirely; visually equivalent, not byte-identical to
-/// a file that never had the field. Upgrade path: give `MetadataBackend` an
-/// explicit clear operation if that distinction ever matters.
-pub struct WriteDescriptionCommand {
+/// ponytail: `MetadataBackend::write` only *sets* fields (`Some`/non-empty
+/// overwrites, `None`/empty is a no-op — no "clear back to absent" yet). So
+/// undoing an edit that *added* a field restores an empty value rather than
+/// removing the tag; visually equivalent, not byte-identical. Upgrade path is
+/// an explicit clear op on `MetadataBackend`.
+pub struct WriteMetadataCommand {
     pub path: PathBuf,
-    pub new_value: String,
-    prior: Option<Option<String>>,
+    pub new: Metadata,
+    prior: Option<Metadata>,
 }
 
-impl WriteDescriptionCommand {
-    pub fn new(path: PathBuf, new_value: impl Into<String>) -> Self {
-        WriteDescriptionCommand {
+impl WriteMetadataCommand {
+    pub fn new(path: PathBuf, new: Metadata) -> Self {
+        WriteMetadataCommand {
             path,
-            new_value: new_value.into(),
+            new,
             prior: None,
         }
     }
 
-    fn write_and_cache(&self, ctx: &mut CommandContext, value: &str) -> Result<(), CommandError> {
+    /// Write `m` through the backend, then mirror the scalar fields into the
+    /// library cache (normalized exactly as the backend stored them, so the
+    /// cache can't disagree with the file — that's what keeps the health
+    /// validator from flagging a punks-originated edit as drift). Keywords is
+    /// a `Vec` with no scalar `Fact`, so it isn't cached.
+    fn write_and_cache(&self, ctx: &mut CommandContext, m: &Metadata) -> Result<(), CommandError> {
         let backend = Backend::for_path(&self.path);
-        let normalized = backend.normalize(Field::Description, value);
         backend
-            .write(
-                &self.path,
-                &Metadata {
-                    description: Some(normalized.clone()),
-                    ..Default::default()
-                },
-            )
+            .write(&self.path, m)
             .map_err(CommandError::Metadata)?;
-        ctx.lib
-            .set_description(&self.path, &normalized)
-            .map_err(CommandError::Library)
+        let cache =
+            |ctx: &mut CommandContext, metric: &str, field: Field, value: &Option<String>| {
+                if let Some(v) = value {
+                    let normalized = backend.normalize(field, v);
+                    ctx.lib
+                        .set_metadata_text(&self.path, metric, &normalized)
+                        .map_err(CommandError::Library)
+                } else {
+                    Ok(())
+                }
+            };
+        cache(ctx, "description", Field::Description, &m.description)?;
+        cache(ctx, "category", Field::Category, &m.category)?;
+        cache(ctx, "creator", Field::Creator, &m.creator)?;
+        Ok(())
     }
 }
 
-impl Command for WriteDescriptionCommand {
+impl Command for WriteMetadataCommand {
     fn execute(&mut self, ctx: &mut CommandContext) -> Result<(), CommandError> {
         if self.prior.is_none() {
             let backend = Backend::for_path(&self.path);
-            let current = backend.read(&self.path).map_err(CommandError::Metadata)?;
-            self.prior = Some(current.description);
+            self.prior = Some(backend.read(&self.path).map_err(CommandError::Metadata)?);
         }
-        let new_value = self.new_value.clone();
-        self.write_and_cache(ctx, &new_value)
+        let new = self.new.clone();
+        self.write_and_cache(ctx, &new)
     }
     fn undo(&mut self, ctx: &mut CommandContext) -> Result<(), CommandError> {
-        let restore = self.prior.clone().flatten().unwrap_or_default();
-        self.write_and_cache(ctx, &restore)
+        let prior = self.prior.clone().unwrap_or_default();
+        self.write_and_cache(ctx, &prior)
     }
     fn description(&self) -> String {
-        "edit description".to_string()
+        "edit metadata".to_string()
     }
 }
 
@@ -331,23 +343,86 @@ impl Command for BatchCommand {
     }
 }
 
+/// Upper bound on retained undo history. Guards against unbounded growth over
+/// a very long session; the oldest step drops when the stack exceeds it.
+// ponytail: a memory bound, not a felt need — steps are tiny (paths + small
+// captured state), so this is a safety ceiling, not a limit users will hit.
+// Upgrade path: raise the constant, or drop it if it ever gets in the way.
+const MAX_UNDO: usize = 256;
+
 /// A library's executed-command history. Lives on `LibraryContext` (one
 /// stack per library, not global) so undo always resolves the same library
 /// a command was executed against, even if the user has since switched to
 /// a different tab/library — no separate bookkeeping needed to track which
 /// library each entry belongs to.
+///
+/// Linear history: `undo` moves a command from `done` to `undone`; `redo`
+/// re-executes it back onto `done`; recording a *fresh* command clears
+/// `undone` (a new edit invalidates the redo branch). An open transaction
+/// (`pending`) accumulates commands so several mutations collapse into one
+/// undo step at [`commit_transaction`](Self::commit_transaction).
 #[derive(Default)]
 pub struct UndoStack {
     done: Vec<Box<dyn Command>>,
+    undone: Vec<Box<dyn Command>>,
+    /// `Some((label, commands))` while a transaction is open; recorded
+    /// commands accumulate here instead of landing on `done` individually.
+    pending: Option<(String, Vec<Box<dyn Command>>)>,
 }
 
 impl UndoStack {
-    pub fn push(&mut self, command: Box<dyn Command>) {
+    /// Record an already-executed command. Inside a transaction it accumulates;
+    /// otherwise it lands as a fresh undo step (which clears the redo branch and
+    /// enforces the history cap).
+    pub fn record(&mut self, command: Box<dyn Command>) {
+        match &mut self.pending {
+            Some((_, commands)) => commands.push(command),
+            None => self.commit_single(command),
+        }
+    }
+
+    fn commit_single(&mut self, command: Box<dyn Command>) {
+        self.undone.clear();
         self.done.push(command);
+        if self.done.len() > MAX_UNDO {
+            self.done.remove(0);
+        }
+    }
+
+    /// Open a transaction: subsequent [`record`](Self::record) calls group into
+    /// one undo step until [`commit_transaction`](Self::commit_transaction).
+    /// Transactions do not nest — a nested open is a programmer bug.
+    pub fn begin_transaction(&mut self, label: impl Into<String>) {
+        debug_assert!(
+            self.pending.is_none(),
+            "begin_transaction while a transaction is already open"
+        );
+        if self.pending.is_none() {
+            self.pending = Some((label.into(), Vec::new()));
+        }
+    }
+
+    pub fn in_transaction(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Close the open transaction, folding its accumulated commands into one
+    /// [`BatchCommand`] undo step. A transaction that recorded nothing pushes
+    /// nothing. No-op if no transaction is open.
+    pub fn commit_transaction(&mut self) {
+        if let Some((label, commands)) = self.pending.take() {
+            if !commands.is_empty() {
+                self.commit_single(Box::new(BatchCommand::new(label, commands)));
+            }
+        }
     }
 
     pub fn can_undo(&self) -> bool {
         !self.done.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.undone.is_empty()
     }
 
     /// Label for the command that [`undo`](Self::undo) would undo next.
@@ -355,10 +430,29 @@ impl UndoStack {
         self.done.last().map(|c| c.description())
     }
 
-    /// Pop and undo the most recently executed command, if any.
+    /// Label for the command that [`redo`](Self::redo) would re-apply next.
+    pub fn next_redo_description(&self) -> Option<String> {
+        self.undone.last().map(|c| c.description())
+    }
+
+    /// Pop and undo the most recently executed command, moving it onto the redo
+    /// stack. `None` if there's nothing to undo.
     pub fn undo(&mut self, ctx: &mut CommandContext) -> Option<Result<(), CommandError>> {
         let mut command = self.done.pop()?;
-        Some(command.undo(ctx))
+        let result = command.undo(ctx);
+        self.undone.push(command);
+        Some(result)
+    }
+
+    /// Re-execute the most recently undone command, moving it back onto the undo
+    /// stack. Safe to re-run: every command captures its "before" state behind a
+    /// first-execute guard, so re-execute re-applies without re-capturing.
+    /// `None` if there's nothing to redo.
+    pub fn redo(&mut self, ctx: &mut CommandContext) -> Option<Result<(), CommandError>> {
+        let mut command = self.undone.pop()?;
+        let result = command.execute(ctx);
+        self.done.push(command);
+        Some(result)
     }
 }
 
@@ -505,7 +599,13 @@ mod tests {
             .unwrap();
         lib.set_description(&wav, "original").unwrap();
 
-        let mut cmd = WriteDescriptionCommand::new(wav.clone(), "edited");
+        let mut cmd = WriteMetadataCommand::new(
+            wav.clone(),
+            Metadata {
+                description: Some("edited".into()),
+                ..Default::default()
+            },
+        );
         let mut ctx = CommandContext { lib: &mut lib };
         cmd.execute(&mut ctx).unwrap();
         assert_eq!(
@@ -604,7 +704,7 @@ mod tests {
                 tag_name: "kick".to_string(),
             });
             c1.execute(&mut ctx).unwrap();
-            stack.push(c1);
+            stack.record(c1);
 
             let mut c2 = Box::new(AssignTagCommand {
                 path: wav.clone(),
@@ -612,7 +712,7 @@ mod tests {
                 tag_name: "snare".to_string(),
             });
             c2.execute(&mut ctx).unwrap();
-            stack.push(c2);
+            stack.record(c2);
         }
         assert_eq!(lib.tags_for_asset(&wav).unwrap().len(), 2);
         assert_eq!(
@@ -638,5 +738,134 @@ mod tests {
         assert!(stack.undo(&mut CommandContext { lib: &mut lib }).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One library + one asset + one tag, ready for stack-level tests.
+    fn tag_fixture(name: &str) -> (PathBuf, Library, i64) {
+        let dir = temp_dir(name);
+        let wav = dir.join("a.wav");
+        write_minimal_wav(&wav);
+        let mut lib = Library::create(&dir).unwrap();
+        lib.reconcile(&punks_library::scan_files(&dir).unwrap())
+            .unwrap();
+        let tag = lib.create_tag("kick").unwrap();
+        (wav, lib, tag.id)
+    }
+
+    fn assign(wav: &std::path::Path, tag_id: i64) -> Box<dyn Command> {
+        Box::new(AssignTagCommand {
+            path: wav.to_path_buf(),
+            tag_id,
+            tag_name: "kick".to_string(),
+        })
+    }
+
+    #[test]
+    fn redo_reapplies_an_undone_command() {
+        let (wav, mut lib, tag_id) = tag_fixture("redo");
+        let mut stack = UndoStack::default();
+        {
+            let mut ctx = CommandContext { lib: &mut lib };
+            let mut c = assign(&wav, tag_id);
+            c.execute(&mut ctx).unwrap();
+            stack.record(c);
+            stack.undo(&mut ctx).unwrap().unwrap();
+        }
+        assert_eq!(lib.tags_for_asset(&wav).unwrap().len(), 0);
+        assert!(stack.can_redo());
+        assert_eq!(
+            stack.next_redo_description(),
+            Some("assign tag \"kick\"".into())
+        );
+        {
+            let mut ctx = CommandContext { lib: &mut lib };
+            stack.redo(&mut ctx).unwrap().unwrap();
+        }
+        // Redo re-applied the assignment, and the command is undoable again.
+        assert_eq!(lib.tags_for_asset(&wav).unwrap().len(), 1);
+        assert!(!stack.can_redo());
+        assert!(stack.can_undo());
+        let _ = std::fs::remove_dir_all(wav.parent().unwrap());
+    }
+
+    #[test]
+    fn a_fresh_record_clears_the_redo_branch() {
+        let (wav, mut lib, tag_id) = tag_fixture("redoclear");
+        let mut stack = UndoStack::default();
+        {
+            let mut ctx = CommandContext { lib: &mut lib };
+            let mut c = assign(&wav, tag_id);
+            c.execute(&mut ctx).unwrap();
+            stack.record(c);
+            stack.undo(&mut ctx).unwrap().unwrap();
+            assert!(stack.can_redo());
+
+            // A new action after an undo invalidates the redo branch.
+            let mut c2 = assign(&wav, tag_id);
+            c2.execute(&mut ctx).unwrap();
+            stack.record(c2);
+        }
+        assert!(!stack.can_redo());
+        let _ = std::fs::remove_dir_all(wav.parent().unwrap());
+    }
+
+    #[test]
+    fn a_transaction_groups_into_one_undo_and_one_redo_step() {
+        let (wav, mut lib, tag_id) = tag_fixture("txn");
+        let tag2 = lib.create_tag("snare").unwrap().id;
+        let mut stack = UndoStack::default();
+        {
+            let mut ctx = CommandContext { lib: &mut lib };
+            stack.begin_transaction("assign 2 tags");
+            for id in [tag_id, tag2] {
+                let mut c = Box::new(AssignTagCommand {
+                    path: wav.clone(),
+                    tag_id: id,
+                    tag_name: "t".into(),
+                });
+                c.execute(&mut ctx).unwrap();
+                stack.record(c);
+            }
+            assert!(
+                !stack.can_undo(),
+                "nothing lands on the stack mid-transaction"
+            );
+            stack.commit_transaction();
+        }
+        assert_eq!(lib.tags_for_asset(&wav).unwrap().len(), 2);
+        // One step, not two.
+        assert_eq!(stack.next_undo_description(), Some("assign 2 tags".into()));
+        {
+            let mut ctx = CommandContext { lib: &mut lib };
+            stack.undo(&mut ctx).unwrap().unwrap();
+        }
+        assert_eq!(lib.tags_for_asset(&wav).unwrap().len(), 0);
+        assert!(!stack.can_undo(), "the whole group undid in one step");
+        {
+            let mut ctx = CommandContext { lib: &mut lib };
+            stack.redo(&mut ctx).unwrap().unwrap();
+        }
+        assert_eq!(
+            lib.tags_for_asset(&wav).unwrap().len(),
+            2,
+            "redo re-applied the whole group"
+        );
+        let _ = std::fs::remove_dir_all(wav.parent().unwrap());
+    }
+
+    #[test]
+    fn an_empty_transaction_records_nothing() {
+        let mut stack = UndoStack::default();
+        stack.begin_transaction("nothing happens");
+        stack.commit_transaction();
+        assert!(!stack.can_undo());
+    }
+
+    #[test]
+    #[should_panic(expected = "transaction is already open")]
+    fn nested_transactions_trip_the_debug_assert() {
+        let mut stack = UndoStack::default();
+        stack.begin_transaction("outer");
+        stack.begin_transaction("inner");
     }
 }
