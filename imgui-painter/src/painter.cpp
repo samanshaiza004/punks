@@ -400,7 +400,7 @@ void ip_line(ip_ctx *ctx, ip_vec2 a, ip_vec2 b, float thickness, ip_color color)
     //
     // ponytail: no anti-aliasing, unlike Dear ImGui's own AddLine (which
     // feathers the edge). Pixel-identical for axis-aligned integer-width
-    // lines (all punks2 uses today: playhead + crosshair, 1px); a visible
+    // lines (current consumers use playheads and crosshairs at 1px); a visible
     // hard edge for diagonal lines. Upgrade path: a feathered-edge stroke
     // (an inner opaque quad flanked by alpha-ramp edge quads) if a diagonal
     // consumer ever appears.

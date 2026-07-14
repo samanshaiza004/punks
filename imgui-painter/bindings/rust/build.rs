@@ -1,7 +1,6 @@
 //! Compiles imgui-painter's C++ core + C API into a static lib linked into
 //! whatever consumes this crate. Same mechanism imgui-sys itself uses to
-//! compile cimgui (see imgui-sys's own build.rs) — proven to work in this
-//! exact toolchain already.
+//! compile cimgui (see imgui-sys's own build.rs).
 //!
 //! The core (`../../src`) never includes an ImGui/cimgui header; only the
 //! Rust adapter (`src/adapter.rs`) reaches into `imgui_sys` to copy a

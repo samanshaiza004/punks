@@ -8,13 +8,11 @@ layout, or input systems.
 Closer to a 2D rendering framework specialized for Dear ImGui than to "a
 styling helper."
 
-## Status: phase 2, incubating inside punks2
+## Status: Phase 4B — Material + Decorator
 
-This library is being built and tested inside the [punks2](../) repository
-before extraction into its own standalone repo. It is **not** a punks
-product dependency — no `punks-*` crate depends on it. The only consumer
-today is `punks-standalone`'s `painter_demo` example, and only as a
-dev-dependency.
+The core, Rust adapter, tests, benchmarks, and examples live under this
+directory and build independently from any host application. The crate is
+still unpublished while its API develops.
 
 Phase 1 (design doc §12 step 1 — the go/no-go gate for everything else) is
 done: `Painter` only, `rounded_rect` + `fill_color` / `fill_gradient`
@@ -26,14 +24,32 @@ doc's phase list: adaptive (error-bounded) rounded-rect tessellation,
 Angular and Diamond gradients, benchmarks against equivalent hand-written
 tessellation (see the [comparison table](#comparison-imgui-painter-vs-handwritten-imdrawlist)
 below), and a header-only C++ fluent wrapper (`include/imgui_painter.h`)
-alongside the Rust binding. Still deferred: the item-paint bracket (§5),
-`Resolver`, `Theme`/`Material`/`Recipe`, `PushMaterial`, the Paint
-Debugger, style presets, and inset shadows.
+alongside the Rust binding.
+
+Phase 3 introduced the long-lived `Painter` → per-frame `Frame` → per-draw-list
+`Canvas` ownership chain used by host applications.
+
+Phase 4A **prototyped the item-paint bracket (§5)** — the mechanism that
+restyles a *stock* `ImGui::Button()`/`Selectable()` with no wrapper widget:
+a 3-channel draw-list split (Background → Widget → Overlay), the widget's own
+frame colors (all interaction states) pushed transparent, and the decoration
+painted behind the widget.
+
+Phase 4B graduates that prototype into the ImGui-aware Rust adapter API:
+`Material` holds the minimal shared radius/fill/border/shadow inputs,
+`Decorator` maps Button and Selectable to their ImGui color slots, and
+`item_paint` preserves the stock widget's layout, input, text, and return value.
+The ImGui-free core remains unchanged.
+
+Still deferred to Phase 5: `Resolver`, `Recipe`, themes, `PushMaterial`, the
+ergonomic scope-guard API, additional widgets, typography, overlays, and the
+Paint Debugger. A polished gallery is a later design milestone; the current
+`painter_demo` remains a development sandbox.
 
 Run the visual gate:
 
 ```
-cargo run -p punks-standalone --example painter_demo
+cargo run -p imgui-painter --example painter_demo
 ```
 
 It renders three hand-built looks (a macOS-style panel, a Fluent-style
@@ -54,7 +70,7 @@ fill + 1px border) from `painter_demo.rs`. Run it yourself with
 
 | | imgui-painter (`Session`) | handwritten `ImDrawList`-style Rust |
 |---|---|---|
-| Source lines for this one look | ~42 ([`draw_macos_panel_painted`](../punks-standalone/examples/painter_demo.rs)) | ~213 ([`benches/handwritten.rs`](bindings/rust/benches/handwritten.rs)) |
+| Source lines for this one look | ~42 ([`draw_macos_panel_painted`](bindings/rust/examples/painter_demo/main.rs)) | ~213 ([`benches/handwritten.rs`](bindings/rust/benches/handwritten.rs)) |
 | Tessellation | adaptive, error-bounded (`CornerSegments`) | fixed 8 segments/corner |
 | Shadow rings | one `add_shadow` call | hand-rolled ring loop + falloff math |
 | Gradient | generic 4-mode `GradientT` dispatch | inlined 2-stop linear lerp only |
@@ -82,14 +98,13 @@ imgui-painter Rust adapter  (bindings/rust — copies the core's mesh into a
                         PrimReserve/PrimWriteVtx/PrimWriteIdx calls, never
                         by touching ImDrawList's internal buffers directly)
         ↑
-host app (here: punks-standalone's painter_demo, via imgui-rs/imgui-sys)
+host app (via imgui-rs/imgui-sys)
 ```
 
 The core never links against Dear ImGui or cimgui — a host's adapter rides
-whichever ImGui build the host app already linked (here, the one inside
-`imgui-sys` — Cargo resolves both to one shared build since the Rust
-bindings crate pins the same `"0.12"` version punks-ui's `imgui` crate
-does), so there is never a second ImGui instance or an ABI-layout guess.
+whichever ImGui build the host app already linked. Cargo resolves the adapter
+and imgui-rs 0.12 to one shared `imgui-sys` build, so there is never a second
+ImGui instance or an ABI-layout guess.
 
 This was a deliberate design decision, not the initial one: an earlier plan
 had the core write directly into `ImDrawList`'s vertex/index buffers to
@@ -125,34 +140,38 @@ imgui-painter/
   bindings/rust/tests/      fluent_header_compiles.rs + the mock .cpp it
                              drives — proves include/imgui_painter.h
                              compiles standalone
+  bindings/rust/examples/   basic usage + the painter_demo development sandbox
   README.md                 this file
 ```
 
 ## Building
 
 `bindings/rust`'s `build.rs` compiles the C++ core with the [`cc`](https://docs.rs/cc)
-crate — the same mechanism `imgui-sys` itself already uses to compile
-cimgui, so it's proven to work in this exact workspace's toolchain. Needs a
-C++17 compiler; every platform this workspace already targets ships one
+crate — the same mechanism `imgui-sys` itself uses to compile cimgui. Needs a
+C++17 compiler; the supported desktop platforms ship one
 (GCC/Clang on Linux/macOS via `apt`/Xcode CLT, MSVC on Windows via the
-Visual Studio Build Tools `dtolnay/rust-toolchain` and GitHub's
-`windows-latest` runner already provide) — no new CI install step was
-needed for `.github/workflows/ci.yml`'s existing `cargo clippy --workspace
---all-targets` / `cargo test --workspace` steps to pick up this crate and
-`punks-standalone`'s `painter_demo` example. `cargo test` also compiles
+Visual Studio Build Tools). `cargo test` also compiles
 `include/imgui_painter.h` against a mock draw-list
 (`bindings/rust/tests/fluent_header_compiles.rs`) to catch header rot;
 `cargo bench -p imgui-painter` is separate (not part of the default test
 run) and produces the numbers in the [comparison table](#comparison-imgui-painter-vs-handwritten-imdrawlist)
 above.
 
-## Extraction plan
+To prove the tree is self-contained, copy `imgui-painter/` anywhere outside a
+host workspace and run:
 
-Once later phases (Resolver, Theme, Material, component library) are built
+```
+cd imgui-painter/bindings/rust
+cargo build --examples
+cargo test
+```
+
+The repository CI performs exactly this independent-copy check.
+
+## Future repository split
+
+Once later phases (Resolver, Recipe, themes, component library) are built
 out here, this directory becomes its own repository: `include/`, `capi/`,
-`src/` move as-is (they have no punks2
-dependency today), `bindings/rust` becomes a published crate, and
+`src/` move as-is, `bindings/rust` becomes a published crate, and
 `bindings/{c,zig,csharp,python}` land as separate binding crates against
-the same `capi/imgui_painter_c.h` surface. Nothing in punks2's product
-crates needs to change when that happens, because nothing in them depends
-on imgui-painter.
+the same `capi/imgui_painter_c.h` surface.

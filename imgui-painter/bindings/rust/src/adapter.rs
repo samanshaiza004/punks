@@ -4,9 +4,9 @@
 //! touches `ImDrawList`'s internal buffers directly (see the crate's module
 //! docs and the design doc's core/adapter split).
 //!
-//! Depends on `imgui-sys` at the same "0.12" version punks-ui's `imgui`
-//! crate pulls in, so Cargo resolves them to one shared build — this rides
-//! the host app's existing ImGui instance rather than linking a second copy.
+//! Depends on `imgui-sys` at the same "0.12" version as imgui-rs 0.12, so
+//! Cargo resolves them to one shared build — this rides the host app's
+//! existing ImGui instance rather than linking a second copy.
 
 use imgui_sys as sys;
 

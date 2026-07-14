@@ -5,21 +5,27 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Phase-1 testbed: incubating inside punks2 before extraction into its own repo
-# (see /imgui-painter/README.md). Not a punks product dependency — punks-standalone
-# only pulls this in as a dev-dependency for the painter_demo example.
+# Rust adapter over the ImGui-free C++ core. The crate and its examples build
+# independently when the imgui-painter tree is copied outside a host workspace.
 description = "Rendering/styling toolkit for Dear ImGui, built on ImDrawList (Rust bindings)"
 
 [dependencies]
-# Same "0.12" range punks-ui's `imgui` crate pulls in, so Cargo resolves both
-# to one shared imgui-sys build (one cimgui compile, one ImGui instance) —
-# see adapter.rs's module docs.
+# Keep this aligned with a host's imgui-rs 0.12 dependency so Cargo resolves
+# one shared imgui-sys build (one cimgui compile, one ImGui instance).
 imgui-sys = "0.12"
 
 [build-dependencies]
 cc = "1"
 
 [dev-dependencies]
+env_logger = "0.11"
+imgui = "0.12"
+imgui-wgpu = "0.25"
+imgui-winit-support = "0.13"
+log = "0.4"
+pollster = "0.4"
+wgpu = "25.0"
+winit = "0.30"
 # Justified over a hand-rolled Instant-loop: naive single-shot timing is a
 # known source of misleading microbenchmark numbers (warmup/cache/noise)
 # that std alone doesn't solve. Trimmed to the console-report path only

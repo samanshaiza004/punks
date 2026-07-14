@@ -1942,7 +1942,15 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "criterion",
+ "env_logger",
+ "imgui",
  "imgui-sys",
+ "imgui-wgpu",
+ "imgui-winit-support",
+ "log",
+ "pollster",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

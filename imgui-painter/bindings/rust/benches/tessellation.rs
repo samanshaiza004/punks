@@ -1,6 +1,6 @@
 // Benchmarks Session-driven mesh generation against an equivalent
 // hand-written pure-Rust tessellation (benches/handwritten.rs), both
-// producing the macOS-panel look from punks-standalone's painter_demo
+// producing the macOS-panel look from the crate's painter_demo
 // example. There's no live ImDrawList/GPU context available outside a real
 // ImGui frame, so this measures Painter's abstraction/FFI overhead
 // directly -- "is the convenience worth its cost" -- rather than something
