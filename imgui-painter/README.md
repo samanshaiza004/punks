@@ -8,7 +8,7 @@ layout, or input systems.
 Closer to a 2D rendering framework specialized for Dear ImGui than to "a
 styling helper."
 
-## Status: Phase 4B — Material + Decorator
+## Status: Phase 5 — Widget breadth and Resolver evidence
 
 The core, Rust adapter, tests, benchmarks, and examples live under this
 directory and build independently from any host application. The crate is
@@ -41,10 +41,18 @@ Phase 4B graduates that prototype into the ImGui-aware Rust adapter API:
 `item_paint` preserves the stock widget's layout, input, text, and return value.
 The ImGui-free core remains unchanged.
 
-Still deferred to Phase 5: `Resolver`, `Recipe`, themes, `PushMaterial`, the
-ergonomic scope-guard API, additional widgets, typography, overlays, and the
-Paint Debugger. A polished gallery is a later design milestone; the current
-`painter_demo` remains a development sandbox.
+Phase 5 adds Checkbox and single-line InputText without expanding `Material`.
+Their chrome rectangles are captured separately from the complete ImGui item so
+Checkbox paint excludes its label and InputText paint excludes its visible
+label. The resulting anatomy, state, type-safety, and ImGui-version coupling
+evidence is recorded in [Resolver findings](docs/resolver-findings.md).
+
+Still deferred to Phase 6 or later: Resolver implementation, typed decorator
+entry points, Material changes, checkmark and focus-ring styling, disabled and
+checked state variants, multiline InputText, `Recipe`, themes, `PushMaterial`,
+typography, overlays, scope guards, and the Paint Debugger. A polished gallery
+is a later design milestone; the current `painter_demo` remains a development
+sandbox.
 
 Run the visual gate:
 
@@ -52,12 +60,13 @@ Run the visual gate:
 cargo run -p imgui-painter --example painter_demo
 ```
 
-It renders three hand-built looks (a macOS-style panel, a Fluent-style
-button, a GitHub-style button), each next to a plain-`ImDrawList` attempt at
-the same look, so a human can judge whether Painter alone renders
-convincingly. That judgment — not a test suite — is phase 1's actual pass
-criterion; the automated tests below cover mesh-generation correctness,
-not visual quality.
+It renders three hand-built looks (a macOS-style panel, a Fluent-style button,
+a GitHub-style button), each next to a plain-`ImDrawList` attempt at the same
+look. It also renders stock Button, Selectable, Checkbox, and InputText widgets
+through one shared `Material`. A human must verify the multipart widget chrome,
+checkmark, hint, text editing, caret, selection, clipboard, hover, and focus
+behavior; automated tests cover geometry and mesh correctness, not visual
+alignment with Dear ImGui internals.
 
 ## Comparison: imgui-painter vs. handwritten ImDrawList
 
@@ -141,6 +150,7 @@ imgui-painter/
                              drives — proves include/imgui_painter.h
                              compiles standalone
   bindings/rust/examples/   basic usage + the painter_demo development sandbox
+  docs/resolver-findings.md Phase 5 evidence and Phase 6 requirements
   README.md                 this file
 ```
 

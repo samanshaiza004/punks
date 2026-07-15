@@ -5,9 +5,10 @@
 //!   imgui-painter, each next to a plain-`ImDrawList` attempt at the same look,
 //!   so a human can judge whether Painter alone (gradients/shadows/borders on
 //!   `rounded_rect`) renders convincingly.
-//! - **Phase 4B** (`draw_decorated_widgets`): stock `ui.button()` and
-//!   `ui.selectable()` calls driven by the crate's `Material` + `Decorator`
-//!   API, with no wrapper widget.
+//! - **Phase 5** (`draw_decorated_widgets`): stock `ui.button()`,
+//!   `ui.selectable()`, `ui.checkbox()`, and single-line `ui.input_text()`
+//!   calls driven by one shared `Material` + `Decorator` API, with no wrapper
+//!   widget.
 //!
 //! The human's judgment — not a test suite — is the pass/fail gate for both.
 //!
@@ -241,12 +242,17 @@ fn draw_demo(ui: &imgui::Ui, painter: &mut Session) {
 type PlainFn = fn(&imgui::Ui, [f32; 2], [f32; 2]);
 type PaintedFn = fn(&mut Session, PainterVec2, *mut imgui::sys::ImDrawList, [f32; 2], [f32; 2]);
 
-/// The Phase 4B section: stock widgets restyled through Material + Decorator.
-fn draw_decorated_widgets(ui: &imgui::Ui, painter: &mut Painter) {
+/// The Phase 5 section: broader stock-widget anatomy exercised through one Material.
+fn draw_decorated_widgets(
+    ui: &imgui::Ui,
+    painter: &mut Painter,
+    checked: &mut bool,
+    input: &mut String,
+) {
     ui.spacing();
     ui.separator();
-    ui.text("imgui-painter phase 4B \u{2014} Material + Decorator API");
-    ui.text_disabled("Stock ui.button()/ui.selectable(), restyled with no wrapper widget.");
+    ui.text("imgui-painter phase 5 \u{2014} widget breadth gate");
+    ui.text_disabled("One Material across Button, Selectable, Checkbox, and InputText.");
     ui.spacing();
 
     let primary = Material {
@@ -270,8 +276,9 @@ fn draw_decorated_widgets(ui: &imgui::Ui, painter: &mut Painter) {
     };
 
     let mut frame = painter.begin_frame();
-    // SAFETY: both calls run inside the current ImGui window and frame, and
-    // each closure issues exactly one stock widget item.
+    // SAFETY: all calls run inside the current ImGui window and frame, no
+    // caller-owned channel split is active, and each closure emits exactly one
+    // stock widget matching its Decorator.
     unsafe {
         item_paint(&mut frame, Decorator::Button, &primary, || {
             ui.button("Save##dec")
@@ -284,12 +291,29 @@ fn draw_decorated_widgets(ui: &imgui::Ui, painter: &mut Painter) {
             ui.selectable("A selectable row##dec")
         });
     }
+    ui.spacing();
+    unsafe {
+        item_paint(&mut frame, Decorator::Checkbox, &primary, || {
+            ui.checkbox("Enable processing##dec", checked)
+        });
+    }
+    ui.spacing();
+    ui.set_next_item_width(260.0);
+    unsafe {
+        item_paint(&mut frame, Decorator::InputText, &primary, || {
+            ui.input_text("Name##dec_input", input)
+                .hint("Type, select, copy, paste")
+                .build()
+        });
+    }
 }
 
 fn main() {
     let mut session = Session::new();
+    let mut checked = false;
+    let mut input = String::new();
     common::run("imgui-painter demo", move |ui, painter| {
         draw_demo(ui, &mut session);
-        draw_decorated_widgets(ui, painter);
+        draw_decorated_widgets(ui, painter, &mut checked, &mut input);
     });
 }
