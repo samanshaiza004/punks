@@ -1,7 +1,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-use imgui_painter::{item_paint, rgba, Border, Decorator, Material, StateColors};
+use imgui_painter::{decorate_button, rgba, Border, Material, StateColors};
 
 fn main() {
     common::run("imgui-painter basic example", |ui, painter| {
@@ -26,9 +26,7 @@ fn main() {
         // SAFETY: this runs inside the current ImGui window and frame, and
         // the closure issues exactly one stock widget item.
         unsafe {
-            item_paint(&mut frame, Decorator::Button, &material, || {
-                ui.button("Decorated Button")
-            });
+            decorate_button(&mut frame, &material, || ui.button("Decorated Button"));
         }
     });
 }

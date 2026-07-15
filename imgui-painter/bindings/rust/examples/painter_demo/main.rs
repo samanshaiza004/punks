@@ -5,10 +5,10 @@
 //!   imgui-painter, each next to a plain-`ImDrawList` attempt at the same look,
 //!   so a human can judge whether Painter alone (gradients/shadows/borders on
 //!   `rounded_rect`) renders convincingly.
-//! - **Phase 5** (`draw_decorated_widgets`): stock `ui.button()`,
+//! - **Phase 6** (`draw_decorated_widgets`): stock `ui.button()`,
 //!   `ui.selectable()`, `ui.checkbox()`, and single-line `ui.input_text()`
-//!   calls driven by one shared `Material` + `Decorator` API, with no wrapper
-//!   widget.
+//!   calls driven by one shared `Material` through typed decoration entry
+//!   points, with no wrapper widget.
 //!
 //! The human's judgment — not a test suite — is the pass/fail gate for both.
 //!
@@ -18,8 +18,9 @@
 mod common;
 
 use imgui_painter::{
-    adapter, item_paint, rgba, Border, ColorStop, Decorator, Gradient, GradientMode, Material,
-    Painter, Rect as PainterRect, Session, Shadow, StateColors, Vec2 as PainterVec2,
+    adapter, decorate_button, decorate_checkbox, decorate_input_text, decorate_selectable, rgba,
+    Border, ColorStop, Gradient, GradientMode, Material, Painter, Rect as PainterRect, Session,
+    Shadow, StateColors, Vec2 as PainterVec2,
 };
 
 fn pv2(x: f32, y: f32) -> PainterVec2 {
@@ -278,29 +279,27 @@ fn draw_decorated_widgets(
     let mut frame = painter.begin_frame();
     // SAFETY: all calls run inside the current ImGui window and frame, no
     // caller-owned channel split is active, and each closure emits exactly one
-    // stock widget matching its Decorator.
+    // matching stock widget.
     unsafe {
-        item_paint(&mut frame, Decorator::Button, &primary, || {
-            ui.button("Save##dec")
-        });
+        decorate_button(&mut frame, &primary, || ui.button("Save##dec"));
     }
     ui.spacing();
     ui.set_next_item_width(260.0);
     unsafe {
-        item_paint(&mut frame, Decorator::Selectable, &primary, || {
+        decorate_selectable(&mut frame, &primary, || {
             ui.selectable("A selectable row##dec")
         });
     }
     ui.spacing();
     unsafe {
-        item_paint(&mut frame, Decorator::Checkbox, &primary, || {
+        decorate_checkbox(&mut frame, &primary, || {
             ui.checkbox("Enable processing##dec", checked)
         });
     }
     ui.spacing();
     ui.set_next_item_width(260.0);
     unsafe {
-        item_paint(&mut frame, Decorator::InputText, &primary, || {
+        decorate_input_text(&mut frame, &primary, || {
             ui.input_text("Name##dec_input", input)
                 .hint("Type, select, copy, paste")
                 .build()

@@ -1,7 +1,7 @@
 //! ImGui-aware item decoration built on the renderer-agnostic painter core.
 //!
-//! [`item_paint`] brackets a stock ImGui widget: its normal frame colors are
-//! suppressed, its item state is captured, and a [`Decorator`] paints the
+//! The typed decoration entry points bracket a stock ImGui widget: its normal
+//! frame colors are suppressed, its item state is captured, and a decorator paints the
 //! corresponding [`Material`] behind it through a [`crate::Canvas`].
 
 use imgui_sys as sys;
@@ -13,11 +13,11 @@ use crate::{Border, Canvas, Color, Frame, Rect, Shadow, Vec2};
 /// other non-chrome parts; the decorator resolves its private paint rectangle
 /// separately.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ItemState {
-    pub min: [f32; 2],
-    pub max: [f32; 2],
-    pub hovered: bool,
-    pub active: bool,
+struct ItemState {
+    min: [f32; 2],
+    max: [f32; 2],
+    hovered: bool,
+    active: bool,
 }
 
 /// Fill colors for the interaction states shared by the current decorators.
@@ -30,7 +30,7 @@ pub struct StateColors {
 
 impl StateColors {
     /// Resolve the active color first because an active item is also hovered.
-    pub fn for_state(&self, state: &ItemState) -> Color {
+    fn for_state(&self, state: &ItemState) -> Color {
         if state.active {
             self.active
         } else if state.hovered {
@@ -57,7 +57,7 @@ pub struct Material {
 
 /// The closed set of stock ImGui widgets whose frame colors can be decorated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decorator {
+enum Decorator {
     Button,
     Selectable,
     Checkbox,
@@ -171,27 +171,144 @@ const TRANSPARENT: sys::ImVec4 = sys::ImVec4 {
     w: 0.0,
 };
 
-/// Paint a [`Material`] behind one stock ImGui widget while preserving the
-/// widget's layout, input handling, text, and return value.
+/// Decorate one stock ImGui Button while preserving its layout, input handling,
+/// text, and return value.
 ///
-/// `widget` must issue exactly one item whose rectangle and interaction state
-/// are available through ImGui's `GetItemRect*`/`IsItem*` calls afterward.
+/// Active-slot semantics — what the widget maps into `StateColors::active`:
+///
+/// Button.active = pressed/held
+///
+/// Ownership — painted chrome vs ImGui-owned foreground (never styled, no ownership claimed):
+///
+/// Button: paints the complete item rectangle. ImGui owns: label text, navigation highlight.
 ///
 /// # Safety
 ///
-/// Must be called inside a live ImGui window on the context-owning thread.
-/// The current window draw list must be valid and must not already be inside
-/// an ImGui channel split. `frame` must belong to the current ImGui frame.
+/// Must be called inside a live ImGui window on the context-owning thread; the
+/// current window draw list must be valid and not already inside an ImGui channel
+/// split; `frame` must belong to the current ImGui frame.
 ///
 /// # Correctness
 ///
-/// `decorator` must match the one stock widget emitted by `widget`, and
-/// [`Decorator::InputText`] supports single-line input only. Dear ImGui exposes
-/// generic last-item geometry/state but no stable public widget-type tag, so
-/// this cannot be reliably checked without fragile heuristics. A mismatch is
-/// not a memory-safety violation; it typically suppresses the wrong color slots
-/// and quietly double-paints or mis-sizes the widget.
-pub unsafe fn item_paint(
+/// The closure must emit exactly one stock widget of the matching kind (exactly
+/// one `ui.button(..)` for `decorate_button`). Typed entry points remove explicit
+/// decorator-selection mismatch from normal use and make misuse obvious, while
+/// the closure still has a documented correctness contract requiring exactly one
+/// matching stock widget.
+/// A mismatched closure (e.g. `decorate_checkbox(.., || ui.button("Wrong"))`) still
+/// compiles; it is rendering-incorrect, not memory-unsafe.
+pub unsafe fn decorate_button(
+    frame: &mut Frame<'_>,
+    material: &Material,
+    widget: impl FnOnce() -> bool,
+) -> bool {
+    item_paint(frame, Decorator::Button, material, widget)
+}
+
+/// Decorate one stock ImGui Selectable while preserving its layout, input
+/// handling, text, and return value.
+///
+/// Active-slot semantics — what the widget maps into `StateColors::active`:
+///
+/// Selectable.active = activation state (interaction-driven, not persistent selection)
+///
+/// Ownership — painted chrome vs ImGui-owned foreground (never styled, no ownership claimed):
+///
+/// Selectable: paints the complete item rectangle (row). ImGui owns: label text, navigation highlight.
+///
+/// # Safety
+///
+/// Must be called inside a live ImGui window on the context-owning thread; the
+/// current window draw list must be valid and not already inside an ImGui channel
+/// split; `frame` must belong to the current ImGui frame.
+///
+/// # Correctness
+///
+/// The closure must emit exactly one stock widget of the matching kind (exactly
+/// one `ui.selectable(..)` for `decorate_selectable`). Typed entry points remove
+/// explicit decorator-selection mismatch from normal use and make misuse obvious,
+/// while the closure still has a documented correctness contract requiring exactly
+/// one matching stock widget.
+/// A mismatched closure (e.g. `decorate_checkbox(.., || ui.button("Wrong"))`) still
+/// compiles; it is rendering-incorrect, not memory-unsafe.
+pub unsafe fn decorate_selectable(
+    frame: &mut Frame<'_>,
+    material: &Material,
+    widget: impl FnOnce() -> bool,
+) -> bool {
+    item_paint(frame, Decorator::Selectable, material, widget)
+}
+
+/// Decorate one stock ImGui Checkbox while preserving its layout, input
+/// handling, foreground, and return value.
+///
+/// Active-slot semantics — what the widget maps into `StateColors::active`:
+///
+/// Checkbox.active = pressed/held (checked/mixed are separate states, not styled in Phase 6)
+///
+/// Ownership — painted chrome vs ImGui-owned foreground (never styled, no ownership claimed):
+///
+/// Checkbox: paints the frame-height box only (label excluded). ImGui owns: checkmark, mixed indicator, label text, navigation highlight.
+///
+/// # Safety
+///
+/// Must be called inside a live ImGui window on the context-owning thread; the
+/// current window draw list must be valid and not already inside an ImGui channel
+/// split; `frame` must belong to the current ImGui frame.
+///
+/// # Correctness
+///
+/// The closure must emit exactly one stock widget of the matching kind (exactly
+/// one `ui.checkbox(..)` for `decorate_checkbox`). Typed entry points remove
+/// explicit decorator-selection mismatch from normal use and make misuse obvious,
+/// while the closure still has a documented correctness contract requiring exactly
+/// one matching stock widget.
+/// A mismatched closure (e.g. `decorate_checkbox(.., || ui.button("Wrong"))`) still
+/// compiles; it is rendering-incorrect, not memory-unsafe.
+pub unsafe fn decorate_checkbox(
+    frame: &mut Frame<'_>,
+    material: &Material,
+    widget: impl FnOnce() -> bool,
+) -> bool {
+    item_paint(frame, Decorator::Checkbox, material, widget)
+}
+
+/// Decorate one stock single-line ImGui InputText while preserving its layout,
+/// input handling, foreground, and return value.
+///
+/// Active-slot semantics — what the widget maps into `StateColors::active`:
+///
+/// InputText.active = focused/editing and may persist across frames — choose this color knowing it can be long-lived, not a momentary flash
+///
+/// Ownership — painted chrome vs ImGui-owned foreground (never styled, no ownership claimed):
+///
+/// InputText: paints the CalcItemWidth × frame-height frame only (visible label excluded). ImGui owns: text, hint, selection highlight, caret, clipping, navigation highlight.
+///
+/// # Safety
+///
+/// Must be called inside a live ImGui window on the context-owning thread; the
+/// current window draw list must be valid and not already inside an ImGui channel
+/// split; `frame` must belong to the current ImGui frame.
+///
+/// # Correctness
+///
+/// The closure must emit exactly one stock widget of the matching kind (exactly
+/// one `ui.input_text(..)` for `decorate_input_text`). Typed entry points remove
+/// explicit decorator-selection mismatch from normal use and make misuse obvious,
+/// while the closure still has a documented correctness contract requiring exactly
+/// one matching stock widget.
+/// A mismatched closure (e.g. `decorate_checkbox(.., || ui.button("Wrong"))`) still
+/// compiles; it is rendering-incorrect, not memory-unsafe. Single-line InputText
+/// only; multiline owns a child-window rendering path outside this contract.
+pub unsafe fn decorate_input_text(
+    frame: &mut Frame<'_>,
+    material: &Material,
+    widget: impl FnOnce() -> bool,
+) -> bool {
+    item_paint(frame, Decorator::InputText, material, widget)
+}
+
+unsafe fn item_paint(
     frame: &mut Frame<'_>,
     decorator: Decorator,
     material: &Material,

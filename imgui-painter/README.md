@@ -8,7 +8,13 @@ layout, or input systems.
 Closer to a 2D rendering framework specialized for Dear ImGui than to "a
 styling helper."
 
-## Status: Phase 5 — Widget breadth and Resolver evidence
+## Status: Phase 6 — Typed decoration entry points
+
+Phase 6 replaces the public item_paint/Decorator pair with
+decorate_button/decorate_selectable/decorate_checkbox/decorate_input_text, removing
+explicit decorator-selection mismatch from normal use; the raw mechanism is now
+private. Note that widget-specific active-slot semantics and chrome-vs-ImGui
+ownership are documented on each entry point.
 
 The core, Rust adapter, tests, benchmarks, and examples live under this
 directory and build independently from any host application. The crate is
@@ -47,12 +53,11 @@ Checkbox paint excludes its label and InputText paint excludes its visible
 label. The resulting anatomy, state, type-safety, and ImGui-version coupling
 evidence is recorded in [Resolver findings](docs/resolver-findings.md).
 
-Still deferred to Phase 6 or later: Resolver implementation, typed decorator
-entry points, Material changes, checkmark and focus-ring styling, disabled and
-checked state variants, multiline InputText, `Recipe`, themes, `PushMaterial`,
-typography, overlays, scope guards, and the Paint Debugger. A polished gallery
-is a later design milestone; the current `painter_demo` remains a development
-sandbox.
+Still deferred to Phase 6 or later: Resolver implementation, Material changes,
+checkmark and focus-ring styling, disabled and checked state variants, multiline
+InputText, `Recipe`, themes, `PushMaterial`, typography, overlays, scope guards,
+and the Paint Debugger. A polished gallery is a later design milestone; the
+current `painter_demo` remains a development sandbox.
 
 Run the visual gate:
 
@@ -67,6 +72,16 @@ through one shared `Material`. A human must verify the multipart widget chrome,
 checkmark, hint, text editing, caret, selection, clipboard, hover, and focus
 behavior; automated tests cover geometry and mesh correctness, not visual
 alignment with Dear ImGui internals.
+
+## Dependency bump checklist
+
+On any imgui/imgui-sys version bump, rerun
+`cargo run -p imgui-painter --example painter_demo` and visually re-verify: all
+four widgets show decorated chrome reacting to hover/press; Checkbox paint stays
+confined to the box and excludes its label; InputText paint stops before the
+visible label and its text, hint, caret, selection, and focus behavior are intact.
+Reconstructed chrome geometry (Checkbox box, InputText frame) is not a stable
+upstream contract and can silently desynchronize on a bump.
 
 ## Comparison: imgui-painter vs. handwritten ImDrawList
 

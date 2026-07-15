@@ -10,7 +10,10 @@
 pub mod adapter;
 mod item_paint;
 
-pub use item_paint::{item_paint, Decorator, ItemState, Material, StateColors};
+pub use item_paint::{
+    decorate_button, decorate_checkbox, decorate_input_text, decorate_selectable, Material,
+    StateColors,
+};
 
 mod ffi {
     #![allow(non_camel_case_types)]
