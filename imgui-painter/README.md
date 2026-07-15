@@ -83,6 +83,12 @@ visible label and its text, hint, caret, selection, and focus behavior are intac
 Reconstructed chrome geometry (Checkbox box, InputText frame) is not a stable
 upstream contract and can silently desynchronize on a bump.
 
+This checklist is CI-enforced, not advisory: the independent-build job resolves
+imgui-sys fresh (no lockfile) and fails whenever the resolved version differs
+from [`VERIFIED_IMGUI_SYS`](VERIFIED_IMGUI_SYS) — the version a human last ran
+this checklist against. Upstream point releases trip it too, by design. To
+acknowledge a bump: run the checklist above, then update that file.
+
 ## Comparison: imgui-painter vs. handwritten ImDrawList
 
 `bindings/rust/benches/tessellation.rs` benchmarks `Session`-driven mesh
