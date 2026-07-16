@@ -9,6 +9,7 @@
 
 pub mod adapter;
 mod item_paint;
+pub mod recipes;
 
 pub use item_paint::{
     decorate_button, decorate_checkbox, decorate_combo, decorate_input_text, decorate_selectable,

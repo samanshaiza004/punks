@@ -8,17 +8,16 @@ layout, or input systems.
 Closer to a 2D rendering framework specialized for Dear ImGui than to "a
 styling helper."
 
-## Status: Phase 8 — Widget anatomy from real breadth
+## Status: Phase 9 — Part-specific widget styling
 
-Phase 8 adds typed horizontal `f32` Slider, standard Combo, and unframed
-TreeNode decorators. They cover three different anatomy classes—value parts,
-parent/popup lifecycle, and hierarchical rows—without changing `Material` or
-moving stock layout/input/navigation into imgui-painter. Unwind-safe
-color/channel guards protect the shared bracket. Combo uses a dedicated
-two-stage lifecycle: imgui-painter restores parent-frame colors before popup
-contents, owns the token through `EndCombo`, then captures restored parent state
-and merges the parent draw list. TreeNode tokens still return to callers after
-the parent draw list has merged.
+Typed `SliderStyle`/`ComboStyle`/`TreeStyle` give each reconstructed part an
+independent appearance, while private per-widget visual states replace the
+overloaded active bit. `recipes::Palette` (9 tokens) plus a small recipe family
+(`raised_button`, `toolbar_button`, `inset_control`, `selected_row`,
+`browser_tree_row`, `parameter_slider`, `combo_field`, `panel`, `inset_panel`)
+reproduce the reference desktop chrome. The rack gate exercises hovered,
+pressed, adjusting, open, selected, focused, and disabled (style-alpha)
+treatments at 1x/1.5x/2x.
 
 Slider, Combo, and TreeNode anatomy is centralized in a private allocation-free
 enum. That earns private anatomy resolution, but not a public Resolver: the
@@ -95,11 +94,9 @@ Checkbox paint excludes its label and InputText paint excludes its visible
 label. The resulting anatomy, state, type-safety, and ImGui-version coupling
 evidence is recorded in [Resolver findings](docs/resolver-findings.md).
 
-Still deferred after Phase 8: a public Resolver, Material part styles,
-logarithmic/integer/vertical sliders, Combo flag variants, framed TreeNodes,
-icons, tabs, segmented controls, knobs, checked/focus-specific styling,
-multiline InputText, `Recipe`, themes, `PushMaterial`, typography, and the Paint
-Debugger.
+Still deferred after Phase 9: a public Resolver, `CheckboxStyle`, focus-ring
+styling, disabled-specific appearance, icons, themes, `PushMaterial`, and
+typography.
 
 Run the visual gate:
 
@@ -108,16 +105,17 @@ cargo run -p imgui-painter --example painter_demo
 ```
 
 It renders three hand-built looks (a macOS-style panel, a Fluent-style button,
-a GitHub-style button), stock Button/Selectable/Checkbox/InputText widgets, and
-the Phase 7 layered-chrome state row plus the Phase 8 Slider/Combo/TreeNode
-gallery. A human must verify the multipart widgets and confirm that inner shadows stay clipped,
-bevel/gloss bands follow rounded corners, stacked borders remain distinct,
-pressed chrome reads inset, focus reads as focus rather than hover, and
-hairlines stay crisp at the current display scale. Slider dragging/keyboard
-editing, Combo popup selection and stock Button/InputText chrome inside the
-popup, and TreeNode disclosure/navigation must remain stock behavior. Automated
-tests cover mesh geometry, lifecycle cleanup, and composition invariants, not
-final rasterized appearance.
+a GitHub-style button), stock Button/Selectable/Checkbox/InputText widgets, the
+Phase 7 layered-chrome state row, the Phase 8 Slider/Combo/TreeNode gallery, and
+the Phase 9 Ableton-inspired recipe rack. A human must verify the multipart
+widgets and rack at `IMGUI_PAINTER_DEMO_UI_SCALE=1.0/1.5/2.0`, and confirm that
+inner shadows stay clipped, bevel/gloss bands follow rounded corners, stacked
+borders remain distinct, pressed chrome reads inset, focus reads as focus
+rather than hover, and hairlines stay crisp at the current display scale.
+Slider dragging/keyboard editing, Combo popup selection and stock
+Button/InputText chrome inside the popup, and TreeNode disclosure/navigation
+must remain stock behavior. Automated tests cover mesh geometry, lifecycle
+cleanup, and composition invariants, not final rasterized appearance.
 
 The example accepts a demo-only logical UI scale for compatibility screenshots.
 Framebuffer scale remains the real host value so renderer/scissor coordinates

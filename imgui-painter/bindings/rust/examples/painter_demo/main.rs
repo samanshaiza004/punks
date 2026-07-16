@@ -16,6 +16,8 @@
 //! - **Phase 8** (`draw_widget_anatomy`): stock Slider, Combo, and TreeNode
 //!   controls exercising value, popup, and hierarchy anatomy while preserving
 //!   ImGui's foreground and behavior.
+//! - **Phase 9** (`draw_recipe_rack`): a token palette and fixed recipe family
+//!   composed into an Ableton-inspired rack visual gate.
 //!
 //! The human's judgment — not a test suite — is the pass/fail gate for all three.
 //!
@@ -24,6 +26,10 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+use imgui_painter::recipes::{
+    browser_tree_row, combo_field, inset_control, inset_panel, panel, parameter_slider,
+    raised_button, selected_row, toolbar_button, Palette,
+};
 use imgui_painter::{
     adapter, decorate_button, decorate_checkbox, decorate_combo, decorate_input_text,
     decorate_selectable, decorate_slider_f32, decorate_tree_node, rgba, Border, Canvas, Color,
@@ -33,6 +39,15 @@ use imgui_painter::{
 
 fn pv2(x: f32, y: f32) -> PainterVec2 {
     PainterVec2 { x, y }
+}
+
+fn style_color(color: Color) -> [f32; 4] {
+    [
+        (color & 0xff) as f32 / 255.0,
+        ((color >> 8) & 0xff) as f32 / 255.0,
+        ((color >> 16) & 0xff) as f32 / 255.0,
+        ((color >> 24) & 0xff) as f32 / 255.0,
+    ]
 }
 
 #[derive(Clone, Copy)]
@@ -773,6 +788,269 @@ fn draw_widget_anatomy(
     });
 }
 
+struct RackState {
+    tree_selection: usize,
+    parameters: [f32; 3],
+    mode: usize,
+    row_selection: usize,
+    name: String,
+    disabled_parameter: f32,
+}
+
+/// Phase 9's token recipes composed without app-owned draw-list geometry.
+fn draw_recipe_rack(ui: &imgui::Ui, painter: &mut Painter, state: &mut RackState) {
+    const MODES: [&str; 3] = ["Warp", "Repitch", "Complex"];
+    let palette = Palette {
+        surface: rgba(61, 73, 82, 255),
+        surface_raised: rgba(83, 99, 110, 255),
+        surface_inset: rgba(34, 43, 49, 255),
+        border_light: rgba(132, 151, 163, 155),
+        border_dark: rgba(16, 22, 26, 235),
+        accent: rgba(72, 173, 222, 255),
+        selection: rgba(54, 116, 151, 255),
+        text: rgba(231, 238, 242, 255),
+        text_muted: rgba(158, 174, 184, 255),
+    };
+
+    ui.spacing();
+    ui.separator();
+    ui.text("imgui-painter phase 9 \u{2014} recipe rack gate");
+    {
+        let _muted = ui.push_style_color(imgui::StyleColor::Text, style_color(palette.text_muted));
+        ui.text("Palette tokens + stock ImGui behavior + recipe-owned chrome.");
+    }
+    ui.spacing();
+
+    let line_height = ui.text_line_height_with_spacing();
+    let frame_height = ui.frame_height_with_spacing();
+    let padding = line_height * 0.7;
+    let rack_width = ui.content_region_avail()[0].clamp(420.0, 900.0);
+    let rack_height = frame_height * 9.0 + line_height * 10.0 + padding * 10.0;
+    let rack_origin = ui.cursor_screen_pos();
+    let rack_rect = PainterRect {
+        min: pv2(rack_origin[0], rack_origin[1]),
+        max: pv2(rack_origin[0] + rack_width, rack_origin[1] + rack_height),
+    };
+    let dl = unsafe { imgui::sys::igGetWindowDrawList() };
+    let mut frame = painter.begin_frame();
+    {
+        let mut canvas = unsafe { frame.canvas(dl) };
+        panel(&mut canvas, rack_rect, &palette);
+    }
+
+    let content_x = rack_origin[0] + padding;
+    let content_width = rack_width - padding * 2.0;
+    ui.set_cursor_screen_pos([content_x, rack_origin[1] + padding]);
+    let _text = ui.push_style_color(imgui::StyleColor::Text, style_color(palette.text));
+
+    let raised = raised_button(&palette);
+    let toolbar = toolbar_button(&palette);
+    for (index, label) in ["Play", "Stop", "Record"].into_iter().enumerate() {
+        if index > 0 {
+            ui.same_line();
+        }
+        unsafe {
+            decorate_button(&mut frame, &raised, || ui.button(label));
+        }
+    }
+    for label in ["Loop", "Metronome"] {
+        ui.same_line();
+        unsafe {
+            decorate_button(&mut frame, &toolbar, || ui.button(label));
+        }
+    }
+
+    ui.spacing();
+    {
+        let _muted = ui.push_style_color(imgui::StyleColor::Text, style_color(palette.text_muted));
+        ui.text("BROWSER");
+    }
+    let well_origin = ui.cursor_screen_pos();
+    let well_height = line_height * 5.0 + padding * 2.0;
+    let well_rect = PainterRect {
+        min: pv2(well_origin[0], well_origin[1]),
+        max: pv2(well_origin[0] + content_width, well_origin[1] + well_height),
+    };
+    {
+        let mut canvas = unsafe { frame.canvas(dl) };
+        inset_panel(&mut canvas, well_rect, &palette);
+    }
+    ui.set_cursor_screen_pos([well_origin[0] + padding, well_origin[1] + padding * 0.5]);
+
+    let tree_style = browser_tree_row(&palette);
+    let branch_flags = imgui::TreeNodeFlags::SPAN_AVAIL_WIDTH | imgui::TreeNodeFlags::OPEN_ON_ARROW;
+    let root = unsafe {
+        decorate_tree_node(
+            &mut frame,
+            &tree_style,
+            state.tree_selection == 0,
+            false,
+            || {
+                ui.tree_node_config("Packs##phase9_tree")
+                    .flags(branch_flags | imgui::TreeNodeFlags::DEFAULT_OPEN)
+                    .selected(state.tree_selection == 0)
+                    .push()
+            },
+        )
+    };
+    if ui.is_item_clicked() {
+        state.tree_selection = 0;
+    }
+    if let Some(root_token) = root {
+        let child = unsafe {
+            decorate_tree_node(
+                &mut frame,
+                &tree_style,
+                state.tree_selection == 1,
+                false,
+                || {
+                    ui.tree_node_config("Drums##phase9_tree")
+                        .flags(branch_flags | imgui::TreeNodeFlags::DEFAULT_OPEN)
+                        .selected(state.tree_selection == 1)
+                        .push()
+                },
+            )
+        };
+        if ui.is_item_clicked() {
+            state.tree_selection = 1;
+        }
+        if let Some(child_token) = child {
+            let leaf_flags = imgui::TreeNodeFlags::SPAN_AVAIL_WIDTH
+                | imgui::TreeNodeFlags::LEAF
+                | imgui::TreeNodeFlags::NO_TREE_PUSH_ON_OPEN;
+            for (index, label) in [
+                "Kick 01.wav##phase9_tree",
+                "Snare Tight.wav##phase9_tree",
+                "Hat Closed.wav##phase9_tree",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let selection = index + 2;
+                let leaf = unsafe {
+                    decorate_tree_node(
+                        &mut frame,
+                        &tree_style,
+                        state.tree_selection == selection,
+                        true,
+                        || {
+                            ui.tree_node_config(label)
+                                .flags(leaf_flags)
+                                .selected(state.tree_selection == selection)
+                                .push()
+                        },
+                    )
+                };
+                drop(leaf);
+                if ui.is_item_clicked() {
+                    state.tree_selection = selection;
+                }
+            }
+            child_token.end();
+        }
+        root_token.end();
+    }
+    ui.set_cursor_screen_pos([well_origin[0], well_origin[1] + well_height + padding * 0.5]);
+
+    {
+        let _muted = ui.push_style_color(imgui::StyleColor::Text, style_color(palette.text_muted));
+        ui.text("PARAMETERS");
+    }
+    let slider = parameter_slider(&palette);
+    for (index, (label, range)) in [
+        ("Gain", (-24.0, 6.0)),
+        ("Transpose", (-12.0, 12.0)),
+        ("Dry / Wet", (0.0, 100.0)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ui.set_next_item_width(content_width * 0.62);
+        unsafe {
+            decorate_slider_f32(
+                &mut frame,
+                &slider,
+                range.0,
+                range.1,
+                &mut state.parameters[index],
+                |value| ui.slider_config(label, range.0, range.1).build(value),
+            );
+        }
+    }
+
+    ui.set_next_item_width(content_width * 0.45);
+    let combo = combo_field(&palette);
+    let preview = MODES[state.mode];
+    unsafe {
+        decorate_combo(
+            &mut frame,
+            &combo,
+            || ui.begin_combo("Warp mode", preview),
+            |_token| {
+                for (index, mode) in MODES.iter().enumerate() {
+                    if ui
+                        .selectable_config(mode)
+                        .selected(index == state.mode)
+                        .build()
+                    {
+                        state.mode = index;
+                    }
+                }
+            },
+        );
+    }
+
+    {
+        let _muted = ui.push_style_color(imgui::StyleColor::Text, style_color(palette.text_muted));
+        ui.text("CLIP ROWS");
+    }
+    let row = selected_row(&palette);
+    for (index, label) in ["Transient layer", "Texture layer"].into_iter().enumerate() {
+        if unsafe {
+            decorate_selectable(&mut frame, &row, || {
+                ui.selectable_config(label)
+                    .selected(state.row_selection == index)
+                    .build()
+            })
+        } {
+            state.row_selection = index;
+        }
+    }
+
+    ui.set_next_item_width(content_width * 0.62);
+    let inset = inset_control(&palette);
+    unsafe {
+        decorate_input_text(&mut frame, &inset, || {
+            ui.input_text("Clip name", &mut state.name).build()
+        });
+    }
+
+    {
+        let _muted = ui.push_style_color(imgui::StyleColor::Text, style_color(palette.text_muted));
+        ui.text("Disabled integration behavior (style alpha)");
+    }
+    ui.disabled(true, || {
+        unsafe {
+            decorate_button(&mut frame, &raised, || ui.button("Commit"));
+        }
+        ui.same_line();
+        ui.set_next_item_width(content_width * 0.42);
+        unsafe {
+            decorate_slider_f32(
+                &mut frame,
+                &slider,
+                0.0,
+                1.0,
+                &mut state.disabled_parameter,
+                |value| ui.slider("Disabled amount", 0.0, 1.0, value),
+            );
+        }
+    });
+
+    drop(_text);
+    ui.set_cursor_screen_pos([rack_origin[0], rack_rect.max.y + padding]);
+}
+
 fn main() {
     let mut session = Session::new();
     let mut checked = false;
@@ -782,6 +1060,14 @@ fn main() {
     let mut mode = 0;
     let mut combo_input = String::new();
     let mut tree_selection = 2;
+    let mut rack = RackState {
+        tree_selection: 3,
+        parameters: [-6.0, 2.0, 72.0],
+        mode: 0,
+        row_selection: 0,
+        name: "Warehouse Kit".to_owned(),
+        disabled_parameter: 0.45,
+    };
     common::run("imgui-painter demo", move |ui, painter| {
         draw_demo(ui, &mut session);
         draw_decorated_widgets(ui, painter, &mut checked, &mut input);
@@ -795,5 +1081,6 @@ fn main() {
             &mut combo_input,
             &mut tree_selection,
         );
+        draw_recipe_rack(ui, painter, &mut rack);
     });
 }
