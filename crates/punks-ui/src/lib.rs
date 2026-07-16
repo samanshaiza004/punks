@@ -311,6 +311,12 @@ pub struct BrowserPanel {
     /// Warning shown when a rebind was refused because the chosen key is
     /// already bound to another action. Cleared when a new rebind starts.
     rebind_conflict: Option<String>,
+    /// One native drag-out per physical press-drag gesture. Without this
+    /// latch the hold-and-move gesture re-fires `start_file_drag` every
+    /// frame — stacking OS drag sessions (flickering copy cursor) and
+    /// repeatedly early-returning out of `draw`, blanking the lower UI.
+    /// Reset when the left button is released.
+    drag_out_sent: bool,
     search_buf: String,
     last_typed_query: String,
     query_change_time: Instant,
@@ -381,6 +387,7 @@ impl BrowserPanel {
             prefs,
             rebinding: None,
             rebind_conflict: None,
+            drag_out_sent: false,
             search_buf: String::new(),
             last_typed_query: String::new(),
             query_change_time: Instant::now(),
@@ -432,6 +439,12 @@ impl BrowserPanel {
     ) {
         #[cfg(debug_assertions)]
         self.row_decorations.set(0);
+
+        // The drag-out latch lives for one physical gesture: releasing the
+        // left button re-arms it.
+        if !ui.is_mouse_down(imgui::MouseButton::Left) {
+            self.drag_out_sent = false;
+        }
 
         browser.poll();
         let palette = theme::neon_palette();
@@ -823,6 +836,11 @@ impl BrowserPanel {
         }
 
         if let Some(path) = drag_requested.as_deref() {
+            // Latch before handing off: exactly one native drag session per
+            // gesture, and therefore exactly one early-returned frame (the
+            // skipped waveform/transport redraw is imperceptible at one frame;
+            // un-latched it blanked the lower UI for the whole drag).
+            self.drag_out_sent = true;
             if let Some(on_drag_file) = on_drag_file {
                 on_drag_file(path);
             }
@@ -1789,8 +1807,11 @@ impl BrowserPanel {
                 #[cfg(debug_assertions)]
                 self.row_decorations.set(self.row_decorations.get() + 1);
                 // Capture the row's hover/click/rect state while the selectable
-                // is still ImGui's last item.
-                let row_hovered = ui.is_item_hovered();
+                // is still ImGui's last item. `row_active` is the press-origin
+                // signal: only the row that captured the mouse press may start
+                // a drag-out, so sweeping the cursor across rows (a box-select
+                // gesture) can't fire native drags from every row it crosses.
+                let row_active = ui.is_item_active();
                 let row_right_clicked = ui.is_item_clicked_with_button(imgui::MouseButton::Right);
                 let row_rect = (ui.item_rect_min(), ui.item_rect_max());
 
@@ -1802,7 +1823,8 @@ impl BrowserPanel {
                 if !names.is_empty() {
                     draw_tag_pills(ui, &names, frame, row_rect.0, row_rect.1);
                 }
-                if row_hovered
+                if row_active
+                    && !self.drag_out_sent
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
                     *drag_requested = Some(path);
@@ -1985,8 +2007,11 @@ impl BrowserPanel {
                 #[cfg(debug_assertions)]
                 self.row_decorations.set(self.row_decorations.get() + 1);
                 // Capture the row's hover/click/rect state while the selectable
-                // is still ImGui's last item.
-                let row_hovered = ui.is_item_hovered();
+                // is still ImGui's last item. `row_active` is the press-origin
+                // signal: only the row that captured the mouse press may start
+                // a drag-out, so sweeping the cursor across rows (a box-select
+                // gesture) can't fire native drags from every row it crosses.
+                let row_active = ui.is_item_active();
                 let row_right_clicked = ui.is_item_clicked_with_button(imgui::MouseButton::Right);
                 let row_rect = (ui.item_rect_min(), ui.item_rect_max());
 
@@ -2005,7 +2030,8 @@ impl BrowserPanel {
                     }
                 }
                 if !is_dir
-                    && row_hovered
+                    && row_active
+                    && !self.drag_out_sent
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
                     *drag_requested = Some(path);

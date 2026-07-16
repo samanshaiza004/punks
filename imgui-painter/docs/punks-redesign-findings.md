@@ -97,3 +97,23 @@ must absorb.
   — unlike `decorate_tree_node`'s selected flag. punks swaps materials per row
   (tab-bar pattern). Recommend a `selected: bool` parameter for parity.
 - Nothing further.
+
+## Observed at the R3 gate (drag-select glitch)
+
+- Not an imgui-painter defect: a pre-existing punks gesture bug. Drag-out
+  detection was hover-based (`row_hovered && is_mouse_dragging`), so sweeping
+  the cursor across rows — a box-select gesture — fired a new native OS drag
+  session from every row crossed, every frame (flickering copy cursor), and
+  each trigger early-returned out of `draw`, blanking the waveform/transport.
+  Fixed with press-origin detection (`is_item_active`) plus a one-per-gesture
+  latch. Decorated rows preserve `is_item_active` after the bracket, which the
+  fix relies on.
+- Dear ImGui / upstream limitation: the official multi-select API
+  (`BeginMultiSelect`/`EndMultiSelect`, `ImGuiMultiSelectFlags_BoxSelect*`)
+  landed in Dear ImGui 1.91.0. punks pins 1.89.2 (the anatomy/version gate)
+  and imgui-rs 0.12 does not wrap it, so upstream box-select is unavailable
+  without the full dependency-bump procedure. Multi-select remains
+  ctrl/cmd-click + shift-click; drag-from-row is reserved for native drag-out.
+  A hand-rolled rubber-band select is possible app-side if wanted, but it
+  competes with the drag-out gesture on dense lists and is deferred as a
+  product decision.
