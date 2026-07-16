@@ -12,8 +12,8 @@ pub(crate) fn neon_palette() -> Palette {
         border_dark: rgba(90, 107, 128, 255),
         accent: rgba(240, 145, 58, 255),
         selection: rgba(59, 120, 208, 255),
-        text: rgba(26, 36, 51, 255),
-        text_muted: rgba(81, 97, 122, 255),
+        text: rgba(16, 23, 34, 255),
+        text_muted: rgba(58, 72, 92, 255),
     }
 }
 

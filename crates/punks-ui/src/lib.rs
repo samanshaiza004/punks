@@ -182,7 +182,7 @@ const TAB_INACTIVE_BG: [f32; 4] = [0.86275, 0.90588, 0.94902, 1.0];
 // surface_raised lightened 10%.
 const TAB_INACTIVE_HOVER: [f32; 4] = [0.87647, 0.91529, 0.95412, 1.0];
 // text_muted.
-const TAB_CLOSE_TEXT: [f32; 4] = [0.31765, 0.38039, 0.47843, 1.0];
+const TAB_CLOSE_TEXT: [f32; 4] = [0.22745, 0.28235, 0.36078, 1.0];
 
 // selection darkened 20%.
 const DIR_TEXT_COLOR: [f32; 4] = [0.18510, 0.37647, 0.65255, 1.0];
@@ -199,7 +199,7 @@ const SIDEBAR_BG: [f32; 4] = [0.77255, 0.82745, 0.88627, 1.0];
 // surface_inset.
 const PILL_BG: [f32; 4] = [0.68235, 0.74902, 0.82353, 1.0];
 // text.
-const PILL_TEXT: [f32; 4] = [0.10196, 0.14118, 0.20000, 1.0];
+const PILL_TEXT: [f32; 4] = [0.06275, 0.09020, 0.13333, 1.0];
 
 // File list lays out entries in width-adaptive columns; each column is at least
 // this wide, so wide windows show 2+ columns and narrow ones collapse to 1.
@@ -1965,11 +1965,11 @@ const WAVEFORM_BG: [f32; 4] = [0.68235, 0.74902, 0.82353, 1.0];
 // accent.
 const WAVEFORM_BAR: [f32; 4] = [0.94118, 0.56863, 0.22745, 1.0];
 // text at 0.9 alpha.
-const WAVEFORM_PLAYHEAD: [f32; 4] = [0.10196, 0.14118, 0.20000, 0.9];
+const WAVEFORM_PLAYHEAD: [f32; 4] = [0.06275, 0.09020, 0.13333, 0.9];
 // text at 0.85 alpha.
-const WAVEFORM_TEXT: [f32; 4] = [0.10196, 0.14118, 0.20000, 0.85];
+const WAVEFORM_TEXT: [f32; 4] = [0.06275, 0.09020, 0.13333, 0.85];
 // text at 0.35 alpha for the hover/scrub crosshair.
-const WAVEFORM_HOVER: [f32; 4] = [0.10196, 0.14118, 0.20000, 0.35];
+const WAVEFORM_HOVER: [f32; 4] = [0.06275, 0.09020, 0.13333, 0.35];
 
 fn color_u32(c: [f32; 4]) -> u32 {
     let r = (c[0] * 255.0) as u32;
