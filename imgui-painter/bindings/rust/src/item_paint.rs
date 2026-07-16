@@ -189,23 +189,27 @@ fn combo_state_color_slot(state: ComboVisualState) -> StateColorSlot {
 enum TreeVisualState {
     Pressed,
     Selected,
-    Open,
     Focused,
     Hovered,
+    Open,
     Idle,
 }
 
+/// Open ranks below Hovered/Focused: openness is already communicated by the
+/// disclosure arrow, and letting it outrank hover made expanded rows feel
+/// inert. It stays a named state (currently painting like Idle) so a future
+/// distinct open treatment needs no re-plumbing.
 fn tree_visual_state(state: &ItemState, selected: bool, open: bool) -> TreeVisualState {
     if state.active {
         TreeVisualState::Pressed
     } else if selected {
         TreeVisualState::Selected
-    } else if open {
-        TreeVisualState::Open
     } else if state.focused {
         TreeVisualState::Focused
     } else if state.hovered {
         TreeVisualState::Hovered
+    } else if open {
+        TreeVisualState::Open
     } else {
         TreeVisualState::Idle
     }
@@ -959,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_visual_state_priority_is_pressed_selected_open_focused_hovered_idle() {
+    fn tree_visual_state_priority_is_pressed_selected_focused_hovered_open_idle() {
         assert_eq!(
             tree_visual_state(&focused_state(true, true, true), true, true),
             TreeVisualState::Pressed
@@ -970,15 +974,17 @@ mod tests {
         );
         assert_eq!(
             tree_visual_state(&focused_state(true, false, true), false, true),
-            TreeVisualState::Open
-        );
-        assert_eq!(
-            tree_visual_state(&focused_state(true, false, true), false, false),
             TreeVisualState::Focused
         );
+        // The regression this order fixes: hovering an expanded row must show
+        // hover feedback — Open no longer suppresses it.
         assert_eq!(
-            tree_visual_state(&focused_state(true, false, false), false, false),
+            tree_visual_state(&focused_state(true, false, false), false, true),
             TreeVisualState::Hovered
+        );
+        assert_eq!(
+            tree_visual_state(&focused_state(false, false, false), false, true),
+            TreeVisualState::Open
         );
         assert_eq!(
             tree_visual_state(&focused_state(false, false, false), false, false),
