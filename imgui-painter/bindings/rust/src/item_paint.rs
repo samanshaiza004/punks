@@ -6,7 +6,7 @@
 
 use imgui_sys as sys;
 
-use crate::{rgba, Border, Canvas, Color, Frame, Rect, Shadow, Vec2};
+use crate::{Border, Canvas, Color, Frame, Rect, Shadow, Vec2};
 
 const ANATOMY_COMPATIBILITY: &str = "Dear ImGui 1.89.2 / imgui-rs 0.12 / imgui-sys 0.12.0";
 const ANATOMY_IMGUI_VERSION: &str = "1.89.2";
@@ -25,6 +25,13 @@ const FRAME_COLS: [sys::ImGuiCol; 3] = [
     sys::ImGuiCol_FrameBg as _,
     sys::ImGuiCol_FrameBgHovered as _,
     sys::ImGuiCol_FrameBgActive as _,
+];
+const SLIDER_COLS: [sys::ImGuiCol; 5] = [
+    sys::ImGuiCol_FrameBg as _,
+    sys::ImGuiCol_FrameBgHovered as _,
+    sys::ImGuiCol_FrameBgActive as _,
+    sys::ImGuiCol_SliderGrab as _,
+    sys::ImGuiCol_SliderGrabActive as _,
 ];
 const COMBO_COLS: [sys::ImGuiCol; 6] = [
     sys::ImGuiCol_FrameBg as _,
@@ -83,6 +90,135 @@ pub struct Material {
     pub shadow: Option<Shadow>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SliderStyle {
+    pub track: Material,
+    pub fill: Material,
+    pub grab: Material,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ComboStyle {
+    pub frame: Material,
+    pub arrow_region: Material,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TreeStyle {
+    pub row: Material,
+    pub disclosure: Material,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateColorSlot {
+    Base,
+    Hover,
+    Active,
+}
+
+impl StateColorSlot {
+    fn color(self, colors: &StateColors) -> Color {
+        match self {
+            Self::Base => colors.base,
+            Self::Hover => colors.hover,
+            Self::Active => colors.active,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SliderVisualState {
+    Adjusting,
+    Focused,
+    Hovered,
+    Idle,
+}
+
+fn slider_visual_state(state: &ItemState) -> SliderVisualState {
+    if state.active {
+        SliderVisualState::Adjusting
+    } else if state.focused {
+        SliderVisualState::Focused
+    } else if state.hovered {
+        SliderVisualState::Hovered
+    } else {
+        SliderVisualState::Idle
+    }
+}
+
+fn slider_state_color_slot(state: SliderVisualState) -> StateColorSlot {
+    match state {
+        SliderVisualState::Idle => StateColorSlot::Base,
+        SliderVisualState::Hovered | SliderVisualState::Focused => StateColorSlot::Hover,
+        SliderVisualState::Adjusting => StateColorSlot::Active,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComboVisualState {
+    Open,
+    Pressed,
+    Focused,
+    Hovered,
+    Idle,
+}
+
+fn combo_visual_state(state: &ItemState, popup_open: bool) -> ComboVisualState {
+    if popup_open {
+        ComboVisualState::Open
+    } else if state.active {
+        ComboVisualState::Pressed
+    } else if state.focused {
+        ComboVisualState::Focused
+    } else if state.hovered {
+        ComboVisualState::Hovered
+    } else {
+        ComboVisualState::Idle
+    }
+}
+
+fn combo_state_color_slot(state: ComboVisualState) -> StateColorSlot {
+    match state {
+        ComboVisualState::Idle => StateColorSlot::Base,
+        ComboVisualState::Hovered | ComboVisualState::Focused => StateColorSlot::Hover,
+        ComboVisualState::Open | ComboVisualState::Pressed => StateColorSlot::Active,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeVisualState {
+    Pressed,
+    Selected,
+    Open,
+    Focused,
+    Hovered,
+    Idle,
+}
+
+fn tree_visual_state(state: &ItemState, selected: bool, open: bool) -> TreeVisualState {
+    if state.active {
+        TreeVisualState::Pressed
+    } else if selected {
+        TreeVisualState::Selected
+    } else if open {
+        TreeVisualState::Open
+    } else if state.focused {
+        TreeVisualState::Focused
+    } else if state.hovered {
+        TreeVisualState::Hovered
+    } else {
+        TreeVisualState::Idle
+    }
+}
+
+fn tree_state_color_slot(state: TreeVisualState) -> StateColorSlot {
+    match state {
+        TreeVisualState::Idle | TreeVisualState::Open => StateColorSlot::Base,
+        TreeVisualState::Hovered | TreeVisualState::Focused => StateColorSlot::Hover,
+        TreeVisualState::Pressed | TreeVisualState::Selected => StateColorSlot::Active,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decorator {
     Button,
@@ -99,7 +235,8 @@ impl Decorator {
         match self {
             Self::Button => &BUTTON_COLS,
             Self::Selectable | Self::Tree => &HEADER_COLS,
-            Self::Checkbox | Self::InputText | Self::Slider => &FRAME_COLS,
+            Self::Checkbox | Self::InputText => &FRAME_COLS,
+            Self::Slider => &SLIDER_COLS,
             Self::Combo => &COMBO_COLS,
         }
     }
@@ -341,16 +478,6 @@ fn with_style_alpha(color: Color, style_alpha: f32) -> Color {
     (color & 0x00ff_ffff) | (resolved << 24)
 }
 
-fn color_from_imgui(value: sys::ImVec4, style_alpha: f32) -> Color {
-    let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
-    rgba(
-        byte(value.x),
-        byte(value.y),
-        byte(value.z),
-        byte(value.w * style_alpha.clamp(0.0, 1.0)),
-    )
-}
-
 fn resolved_border(border: Border, alpha: f32) -> Border {
     Border {
         color: with_style_alpha(border.color, alpha),
@@ -378,31 +505,41 @@ fn paint_material(canvas: &mut Canvas<'_>, rect: Rect, material: &Material, stat
     canvas.add_border(&resolved_border(material.border, state.style_alpha));
 }
 
+fn paint_material_slot(
+    canvas: &mut Canvas<'_>,
+    rect: Rect,
+    material: &Material,
+    slot: StateColorSlot,
+    style_alpha: f32,
+) {
+    debug_assert!(rect_is_valid(rect));
+    canvas.rounded_rect(rect, material.radius.min(rect_height(rect) * 0.5));
+    if let Some(shadow) = material.shadow {
+        canvas.add_shadow(&resolved_shadow(shadow, style_alpha));
+    }
+    canvas.fill_color(with_style_alpha(slot.color(&material.fill), style_alpha));
+    canvas.add_border(&resolved_border(material.border, style_alpha));
+}
+
 fn paint_slider(
     canvas: &mut Canvas<'_>,
     anatomy: WidgetAnatomy,
-    material: &Material,
+    style: &SliderStyle,
     state: &ItemState,
-    neutral_track: Color,
+    visual_state: SliderVisualState,
 ) {
-    let WidgetAnatomy::Slider { track, fill, .. } = anatomy else {
+    let WidgetAnatomy::Slider {
+        track, fill, grab, ..
+    } = anatomy
+    else {
         unreachable!("slider painter requires slider anatomy")
     };
-    let radius = material.radius.min(rect_height(track) * 0.5);
-    canvas.rounded_rect(track, radius);
-    if let Some(shadow) = material.shadow {
-        canvas.add_shadow(&resolved_shadow(shadow, state.style_alpha));
-    }
-    canvas.fill_color(neutral_track);
+    let slot = slider_state_color_slot(visual_state);
+    paint_material_slot(canvas, track, &style.track, slot, state.style_alpha);
     if rect_width(fill) > 0.0 {
-        canvas.rounded_rect(fill, radius.min(rect_width(fill) * 0.5));
-        canvas.fill_color(with_style_alpha(
-            material.fill.for_state(state),
-            state.style_alpha,
-        ));
+        paint_material_slot(canvas, fill, &style.fill, slot, state.style_alpha);
     }
-    canvas.rounded_rect(track, radius);
-    canvas.add_border(&resolved_border(material.border, state.style_alpha));
+    paint_material_slot(canvas, grab, &style.grab, slot, state.style_alpha);
 }
 
 unsafe fn capture_item_state() -> ItemState {
@@ -563,6 +700,9 @@ pub unsafe fn decorate_input_text(
 
 /// Decorate one horizontal, linear stock ImGui `f32` Slider.
 ///
+/// paints track, completed fill, and grab (SliderGrab* now suppressed).
+/// ImGui owns: formatted value text, label, navigation highlight.
+///
 /// # Safety
 /// A live current ImGui context/window/frame and unsplit current draw list are required.
 ///
@@ -573,7 +713,7 @@ pub unsafe fn decorate_input_text(
 /// produce plausible but incorrect fill geometry.
 pub unsafe fn decorate_slider_f32(
     frame: &mut Frame<'_>,
-    material: &Material,
+    style: &SliderStyle,
     min: f32,
     max: f32,
     value: &mut f32,
@@ -588,14 +728,14 @@ pub unsafe fn decorate_slider_f32(
         },
         |(_, post_value), state, captured, canvas| {
             let frame_rect = captured.expect("slider frame captured before submission");
-            let style = &*sys::igGetStyle();
+            let imgui_style = &*sys::igGetStyle();
             let io = &*sys::igGetIO();
             let anatomy = slider_anatomy(
                 frame_rect,
                 min,
                 max,
                 *post_value,
-                style.GrabMinSize,
+                imgui_style.GrabMinSize,
                 io.DisplayFramebufferScale.x,
             );
             debug_assert!(
@@ -603,21 +743,17 @@ pub unsafe fn decorate_slider_f32(
                 "Slider frame {frame_rect:?} must be contained by item {:?}",
                 item_rect(state)
             );
-            let frame_col = if state.active {
-                sys::ImGuiCol_FrameBgActive as _
-            } else if state.hovered {
-                sys::ImGuiCol_FrameBgHovered as _
-            } else {
-                sys::ImGuiCol_FrameBg as _
-            };
-            let neutral = color_from_imgui(*sys::igGetStyleColorVec4(frame_col), state.style_alpha);
-            paint_slider(canvas, anatomy, material, state, neutral);
+            let visual_state = slider_visual_state(state);
+            paint_slider(canvas, anatomy, style, state, visual_state);
         },
     );
     changed
 }
 
 /// Decorate one standard preview-and-arrow Combo and its popup contents.
+///
+/// paints frame and arrow-region background.
+/// ImGui owns: preview text, arrow glyph, label, popup contents, navigation.
 ///
 /// Suppressed parent-frame colors are restored before `contents` runs. The
 /// Combo token remains alive for that closure, then is dropped internally so
@@ -631,7 +767,7 @@ pub unsafe fn decorate_slider_f32(
 /// and custom-preview variants are outside this prototype.
 pub unsafe fn decorate_combo<R, T>(
     frame: &mut Frame<'_>,
-    material: &Material,
+    style: &ComboStyle,
     begin: impl FnOnce() -> Option<R>,
     contents: impl FnOnce(&R) -> T,
 ) -> Option<T> {
@@ -661,13 +797,23 @@ pub unsafe fn decorate_combo<R, T>(
         item_rect(&state)
     );
     let anatomy = combo_anatomy(frame_rect);
-    let mut semantic = state;
-    semantic.active |= popup_open;
+    let visual_state = combo_visual_state(&state, popup_open);
+    let slot = combo_state_color_slot(visual_state);
 
     channels.background();
     {
         let mut canvas = frame.canvas(draw_list);
-        paint_material(&mut canvas, anatomy.chrome(), material, &semantic);
+        let WidgetAnatomy::Combo { frame, arrow, .. } = anatomy else {
+            unreachable!("combo painter requires combo anatomy")
+        };
+        paint_material_slot(&mut canvas, frame, &style.frame, slot, state.style_alpha);
+        paint_material_slot(
+            &mut canvas,
+            arrow,
+            &style.arrow_region,
+            slot,
+            state.style_alpha,
+        );
     }
     channels.merge();
     result
@@ -675,6 +821,9 @@ pub unsafe fn decorate_combo<R, T>(
 
 /// Decorate one unframed, span-available-width stock TreeNode row.
 /// Parent channels are merged before children are drawn through the token.
+///
+/// paints row and disclosure-slot background.
+/// ImGui owns: disclosure arrow glyph, label, indentation, navigation.
 ///
 /// # Safety
 /// A live current ImGui context/window/frame and unsplit current draw list are required.
@@ -685,7 +834,7 @@ pub unsafe fn decorate_combo<R, T>(
 /// while leaves must also use `LEAF | NO_TREE_PUSH_ON_OPEN`.
 pub unsafe fn decorate_tree_node<R>(
     frame: &mut Frame<'_>,
-    material: &Material,
+    style: &TreeStyle,
     selected: bool,
     leaf: bool,
     widget: impl FnOnce() -> Option<R>,
@@ -696,10 +845,21 @@ pub unsafe fn decorate_tree_node<R>(
         widget,
         |result, state, _, canvas| {
             let anatomy = tree_anatomy(item_rect(state), leaf, sys::igGetTreeNodeToLabelSpacing());
-            let mut semantic = *state;
-            semantic.active |= selected;
-            let _open = result.is_some();
-            paint_material(canvas, anatomy.chrome(), material, &semantic);
+            let visual_state = tree_visual_state(state, selected, result.is_some());
+            let slot = tree_state_color_slot(visual_state);
+            let WidgetAnatomy::Tree { row, disclosure } = anatomy else {
+                unreachable!("tree painter requires tree anatomy")
+            };
+            paint_material_slot(canvas, row, &style.row, slot, state.style_alpha);
+            if let Some(disclosure) = disclosure {
+                paint_material_slot(
+                    canvas,
+                    disclosure,
+                    &style.disclosure,
+                    slot,
+                    state.style_alpha,
+                );
+            }
         },
     )
 }
@@ -707,6 +867,7 @@ pub unsafe fn decorate_tree_node<R>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rgba;
     use std::ffi::CStr;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::Mutex;
@@ -727,6 +888,13 @@ mod tests {
         }
     }
 
+    fn focused_state(hovered: bool, active: bool, focused: bool) -> ItemState {
+        ItemState {
+            focused,
+            ..state(hovered, active)
+        }
+    }
+
     #[test]
     fn bundled_imgui_matches_anatomy_compatibility() {
         let actual = unsafe { CStr::from_ptr(sys::igGetVersion()) };
@@ -744,6 +912,150 @@ mod tests {
         assert_eq!(colors.for_state(&state(false, false)), BASE);
         assert_eq!(colors.for_state(&state(true, false)), HOVER);
         assert_eq!(colors.for_state(&state(true, true)), ACTIVE);
+    }
+
+    #[test]
+    fn slider_visual_state_priority_is_adjusting_focused_hovered_idle() {
+        assert_eq!(
+            slider_visual_state(&focused_state(true, true, true)),
+            SliderVisualState::Adjusting
+        );
+        assert_eq!(
+            slider_visual_state(&focused_state(true, false, true)),
+            SliderVisualState::Focused
+        );
+        assert_eq!(
+            slider_visual_state(&focused_state(true, false, false)),
+            SliderVisualState::Hovered
+        );
+        assert_eq!(
+            slider_visual_state(&focused_state(false, false, false)),
+            SliderVisualState::Idle
+        );
+    }
+
+    #[test]
+    fn combo_visual_state_priority_is_open_pressed_focused_hovered_idle() {
+        assert_eq!(
+            combo_visual_state(&focused_state(true, true, true), true),
+            ComboVisualState::Open
+        );
+        assert_eq!(
+            combo_visual_state(&focused_state(true, true, true), false),
+            ComboVisualState::Pressed
+        );
+        assert_eq!(
+            combo_visual_state(&focused_state(true, false, true), false),
+            ComboVisualState::Focused
+        );
+        assert_eq!(
+            combo_visual_state(&focused_state(true, false, false), false),
+            ComboVisualState::Hovered
+        );
+        assert_eq!(
+            combo_visual_state(&focused_state(false, false, false), false),
+            ComboVisualState::Idle
+        );
+    }
+
+    #[test]
+    fn tree_visual_state_priority_is_pressed_selected_open_focused_hovered_idle() {
+        assert_eq!(
+            tree_visual_state(&focused_state(true, true, true), true, true),
+            TreeVisualState::Pressed
+        );
+        assert_eq!(
+            tree_visual_state(&focused_state(true, false, true), true, true),
+            TreeVisualState::Selected
+        );
+        assert_eq!(
+            tree_visual_state(&focused_state(true, false, true), false, true),
+            TreeVisualState::Open
+        );
+        assert_eq!(
+            tree_visual_state(&focused_state(true, false, true), false, false),
+            TreeVisualState::Focused
+        );
+        assert_eq!(
+            tree_visual_state(&focused_state(true, false, false), false, false),
+            TreeVisualState::Hovered
+        );
+        assert_eq!(
+            tree_visual_state(&focused_state(false, false, false), false, false),
+            TreeVisualState::Idle
+        );
+    }
+
+    #[test]
+    fn slider_visual_states_map_to_material_slots() {
+        assert_eq!(
+            slider_state_color_slot(SliderVisualState::Idle),
+            StateColorSlot::Base
+        );
+        assert_eq!(
+            slider_state_color_slot(SliderVisualState::Hovered),
+            StateColorSlot::Hover
+        );
+        assert_eq!(
+            slider_state_color_slot(SliderVisualState::Focused),
+            StateColorSlot::Hover
+        );
+        assert_eq!(
+            slider_state_color_slot(SliderVisualState::Adjusting),
+            StateColorSlot::Active
+        );
+    }
+
+    #[test]
+    fn combo_visual_states_map_to_material_slots() {
+        assert_eq!(
+            combo_state_color_slot(ComboVisualState::Idle),
+            StateColorSlot::Base
+        );
+        assert_eq!(
+            combo_state_color_slot(ComboVisualState::Hovered),
+            StateColorSlot::Hover
+        );
+        assert_eq!(
+            combo_state_color_slot(ComboVisualState::Focused),
+            StateColorSlot::Hover
+        );
+        assert_eq!(
+            combo_state_color_slot(ComboVisualState::Pressed),
+            StateColorSlot::Active
+        );
+        assert_eq!(
+            combo_state_color_slot(ComboVisualState::Open),
+            StateColorSlot::Active
+        );
+    }
+
+    #[test]
+    fn tree_visual_states_map_to_material_slots() {
+        assert_eq!(
+            tree_state_color_slot(TreeVisualState::Idle),
+            StateColorSlot::Base
+        );
+        assert_eq!(
+            tree_state_color_slot(TreeVisualState::Hovered),
+            StateColorSlot::Hover
+        );
+        assert_eq!(
+            tree_state_color_slot(TreeVisualState::Focused),
+            StateColorSlot::Hover
+        );
+        assert_eq!(
+            tree_state_color_slot(TreeVisualState::Pressed),
+            StateColorSlot::Active
+        );
+        assert_eq!(
+            tree_state_color_slot(TreeVisualState::Selected),
+            StateColorSlot::Active
+        );
+        assert_eq!(
+            tree_state_color_slot(TreeVisualState::Open),
+            StateColorSlot::Base
+        );
     }
 
     #[test]
@@ -843,7 +1155,7 @@ mod tests {
         assert_eq!(Decorator::Selectable.suppress_cols(), HEADER_COLS);
         assert_eq!(Decorator::Checkbox.suppress_cols(), FRAME_COLS);
         assert_eq!(Decorator::InputText.suppress_cols(), FRAME_COLS);
-        assert_eq!(Decorator::Slider.suppress_cols(), FRAME_COLS);
+        assert_eq!(Decorator::Slider.suppress_cols(), SLIDER_COLS);
         assert_eq!(Decorator::Combo.suppress_cols(), COMBO_COLS);
         assert_eq!(Decorator::Tree.suppress_cols(), HEADER_COLS);
     }
@@ -885,7 +1197,6 @@ mod tests {
             },
             shadow: None,
         };
-
         ui.window("panic cleanup").build(|| {
             let before = unsafe { *sys::igGetStyleColorVec4(sys::ImGuiCol_Button as _) };
             let panicked = catch_unwind(AssertUnwindSafe(|| unsafe {
@@ -935,6 +1246,10 @@ mod tests {
             },
             shadow: None,
         };
+        let combo_style = ComboStyle {
+            frame: material,
+            arrow_region: material,
+        };
         let button_color = unsafe { *sys::igGetStyleColorVec4(sys::ImGuiCol_Button as _) };
         let mut painter = crate::Painter::new();
         let mut popup_contents_ran = false;
@@ -954,7 +1269,7 @@ mod tests {
                 .build(|| unsafe {
                     decorate_combo(
                         &mut frame,
-                        &material,
+                        &combo_style,
                         || ui.begin_combo("Mode", "Classic"),
                         |_token| {
                             popup_contents_ran = true;

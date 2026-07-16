@@ -27,8 +27,8 @@ mod common;
 use imgui_painter::{
     adapter, decorate_button, decorate_checkbox, decorate_combo, decorate_input_text,
     decorate_selectable, decorate_slider_f32, decorate_tree_node, rgba, Border, Canvas, Color,
-    ColorStop, Gradient, GradientMode, Material, Painter, Rect as PainterRect, Session, Shadow,
-    StateColors, Vec2 as PainterVec2,
+    ColorStop, ComboStyle, Gradient, GradientMode, Material, Painter, Rect as PainterRect, Session,
+    Shadow, SliderStyle, StateColors, TreeStyle, Vec2 as PainterVec2,
 };
 
 fn pv2(x: f32, y: f32) -> PainterVec2 {
@@ -618,13 +618,57 @@ fn draw_widget_anatomy(
             inset: false,
         }),
     };
+    let slider_style = SliderStyle {
+        track: Material {
+            fill: StateColors {
+                base: rgba(31, 51, 62, 255),
+                hover: rgba(38, 65, 79, 255),
+                active: rgba(26, 45, 55, 255),
+            },
+            shadow: None,
+            ..material
+        },
+        fill: material,
+        grab: Material {
+            fill: StateColors {
+                base: rgba(114, 201, 230, 255),
+                hover: rgba(142, 221, 246, 255),
+                active: rgba(83, 166, 199, 255),
+            },
+            ..material
+        },
+    };
+    let combo_style = ComboStyle {
+        frame: material,
+        arrow_region: Material {
+            fill: StateColors {
+                base: rgba(42, 82, 103, 255),
+                hover: rgba(53, 107, 134, 255),
+                active: rgba(31, 68, 88, 255),
+            },
+            shadow: None,
+            ..material
+        },
+    };
+    let tree_style = TreeStyle {
+        row: material,
+        disclosure: Material {
+            fill: StateColors {
+                base: rgba(42, 82, 103, 255),
+                hover: rgba(53, 107, 134, 255),
+                active: rgba(31, 68, 88, 255),
+            },
+            shadow: None,
+            ..material
+        },
+    };
 
     let mut frame = painter.begin_frame();
     ui.set_next_item_width(300.0);
     // SAFETY: each closure submits exactly the documented stock widget in
     // the current window, and no caller-owned channel split is active.
     unsafe {
-        decorate_slider_f32(&mut frame, &material, 0.0, 1.0, gain, |value| {
+        decorate_slider_f32(&mut frame, &slider_style, 0.0, 1.0, gain, |value| {
             ui.slider_config("Gain", 0.0, 1.0)
                 .display_format("%.2f")
                 .build(value)
@@ -636,7 +680,7 @@ fn draw_widget_anatomy(
     unsafe {
         decorate_combo(
             &mut frame,
-            &material,
+            &combo_style,
             || ui.begin_combo("Mode", preview),
             |_token| {
                 // These stock controls must retain ordinary chrome while the
@@ -657,7 +701,7 @@ fn draw_widget_anatomy(
     unsafe {
         decorate_combo(
             &mut frame,
-            &material,
+            &combo_style,
             || ui.begin_combo("##hidden_mode", MODES[*mode]),
             |_token| {
                 ui.text_disabled("Hidden-label Combo uses the same frame anatomy.");
@@ -669,7 +713,7 @@ fn draw_widget_anatomy(
     ui.text("Browser tree");
     let branch_flags = imgui::TreeNodeFlags::SPAN_AVAIL_WIDTH | imgui::TreeNodeFlags::OPEN_ON_ARROW;
     let root = unsafe {
-        decorate_tree_node(&mut frame, &material, *tree_selection == 0, false, || {
+        decorate_tree_node(&mut frame, &tree_style, *tree_selection == 0, false, || {
             ui.tree_node_config("Library##phase8_tree")
                 .flags(branch_flags | imgui::TreeNodeFlags::DEFAULT_OPEN)
                 .selected(*tree_selection == 0)
@@ -681,7 +725,7 @@ fn draw_widget_anatomy(
     }
     if let Some(root_token) = root {
         let branch = unsafe {
-            decorate_tree_node(&mut frame, &material, *tree_selection == 1, false, || {
+            decorate_tree_node(&mut frame, &tree_style, *tree_selection == 1, false, || {
                 ui.tree_node_config("Drums##phase8_tree")
                     .flags(branch_flags | imgui::TreeNodeFlags::DEFAULT_OPEN)
                     .selected(*tree_selection == 1)
@@ -696,7 +740,7 @@ fn draw_widget_anatomy(
                 | imgui::TreeNodeFlags::LEAF
                 | imgui::TreeNodeFlags::NO_TREE_PUSH_ON_OPEN;
             let leaf = unsafe {
-                decorate_tree_node(&mut frame, &material, *tree_selection == 2, true, || {
+                decorate_tree_node(&mut frame, &tree_style, *tree_selection == 2, true, || {
                     ui.tree_node_config("Kick 01.wav##phase8_tree")
                         .flags(leaf_flags)
                         .selected(*tree_selection == 2)
@@ -717,9 +761,14 @@ fn draw_widget_anatomy(
     ui.disabled(true, || {
         ui.set_next_item_width(300.0);
         unsafe {
-            decorate_slider_f32(&mut frame, &material, 0.0, 1.0, disabled_gain, |value| {
-                ui.slider("Disabled gain", 0.0, 1.0, value)
-            });
+            decorate_slider_f32(
+                &mut frame,
+                &slider_style,
+                0.0,
+                1.0,
+                disabled_gain,
+                |value| ui.slider("Disabled gain", 0.0, 1.0, value),
+            );
         }
     });
 }
