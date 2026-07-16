@@ -106,12 +106,21 @@ mod ffi {
         pub fn ip_ctx_create() -> *mut ip_ctx;
         pub fn ip_ctx_destroy(ctx: *mut ip_ctx);
         pub fn ip_begin(ctx: *mut ip_ctx, white_pixel_uv: ip_vec2);
+        pub fn ip_set_pixel_scale(ctx: *mut ip_ctx, scale: f32);
         pub fn ip_rounded_rect(ctx: *mut ip_ctx, rect: ip_rect, radius: f32);
         pub fn ip_fill_color(ctx: *mut ip_ctx, color: ip_color);
         pub fn ip_fill_gradient(ctx: *mut ip_ctx, gradient: *const ip_gradient);
+        pub fn ip_fill_band_color(ctx: *mut ip_ctx, y0: f32, y1: f32, color: ip_color);
+        pub fn ip_fill_band_gradient(
+            ctx: *mut ip_ctx,
+            y0: f32,
+            y1: f32,
+            gradient: *const ip_gradient,
+        );
         pub fn ip_line(ctx: *mut ip_ctx, a: ip_vec2, b: ip_vec2, thickness: f32, color: ip_color);
         pub fn ip_add_shadow(ctx: *mut ip_ctx, shadow: *const ip_shadow);
         pub fn ip_add_border(ctx: *mut ip_ctx, border: *const ip_border);
+        pub fn ip_add_border_inset(ctx: *mut ip_ctx, inset: f32, border: *const ip_border);
         pub fn ip_end(ctx: *mut ip_ctx) -> ip_mesh;
     }
 }
@@ -207,10 +216,8 @@ pub struct Gradient {
     pub stops: Vec<ColorStop>,
 }
 
-/// A soft shadow around the current shape. `blur <= 0.0` draws a single
-/// hard-edged ring at exactly `spread`, with no falloff. `inset` is accepted
-/// for forward compatibility but not implemented yet (outer shadows only
-/// this pass — see the C header).
+/// A soft shadow around or inside the current shape. `blur <= 0.0` draws a
+/// single hard-edged ring at exactly `spread`, with no falloff.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shadow {
     pub offset: Vec2,
@@ -232,9 +239,8 @@ impl Default for Shadow {
     }
 }
 
-/// A stroke around the current shape's outline. `thickness < 1.0` is drawn
-/// at 1px with proportionally reduced alpha — see the C header's hairline
-/// note.
+/// A stroke around the current shape's outline. Thickness below one device
+/// pixel is compensated using [`Session::set_pixel_scale`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Border {
     pub thickness: f32,
@@ -261,6 +267,13 @@ impl Session {
     /// draw path).
     pub fn begin(&mut self, white_pixel_uv: Vec2) {
         unsafe { ffi::ip_begin(self.ctx, white_pixel_uv) };
+    }
+
+    /// Set logical-to-device pixel scale so direct `Session` consumers can
+    /// render crisp hairline borders on scaled displays. The ImGui-aware
+    /// [`Frame`] path samples this automatically.
+    pub fn set_pixel_scale(&mut self, scale: f32) {
+        unsafe { ffi::ip_set_pixel_scale(self.ctx, scale) };
     }
 
     /// Set the shape subsequent fill/shadow/border calls apply to.
@@ -300,6 +313,34 @@ impl Session {
         unsafe { ffi::ip_fill_gradient(self.ctx, &raw) };
     }
 
+    /// Fill the current shape only within an absolute horizontal band. This
+    /// is the Phase 7 layer stack and painter_demo primitive for gloss,
+    /// highlights, shades, and bevels.
+    pub fn fill_band_color(&mut self, y0: f32, y1: f32, color: Color) {
+        unsafe { ffi::ip_fill_band_color(self.ctx, y0, y1, color) };
+    }
+
+    /// Gradient-fill the current shape only within an absolute horizontal
+    /// band for the Phase 7 layer stack and painter_demo.
+    pub fn fill_band_gradient(&mut self, y0: f32, y1: f32, gradient: &Gradient) {
+        let stops: Vec<ffi::ip_color_stop> = gradient
+            .stops
+            .iter()
+            .map(|s| ffi::ip_color_stop {
+                t: s.t,
+                color: s.color,
+            })
+            .collect();
+        let raw = ffi::ip_gradient {
+            mode: gradient.mode.into(),
+            from: gradient.from,
+            to: gradient.to,
+            stops: stops.as_ptr(),
+            stop_count: stops.len() as std::os::raw::c_int,
+        };
+        unsafe { ffi::ip_fill_band_gradient(self.ctx, y0, y1, &raw) };
+    }
+
     /// Rasterize a soft shadow around the current shape and append it to
     /// the mesh. Paint order follows call order — call this before a
     /// `fill_*` to put the shadow behind the fill. Stackable: call it more
@@ -322,6 +363,16 @@ impl Session {
             color: border.color,
         };
         unsafe { ffi::ip_add_border(self.ctx, &raw) };
+    }
+
+    /// Stroke an outline inset from the current shape's outer edge. Stack
+    /// borders by calling this with increasing inset values.
+    pub fn add_border_inset(&mut self, inset: f32, border: &Border) {
+        let raw = ffi::ip_border {
+            thickness: border.thickness,
+            color: border.color,
+        };
+        unsafe { ffi::ip_add_border_inset(self.ctx, inset, &raw) };
     }
 
     /// Append a straight `thickness`-px segment from `a` to `b`. Independent
@@ -411,9 +462,17 @@ impl Painter {
     /// scoped to this frame; open a [`Canvas`] per draw list from it.
     pub fn begin_frame(&mut self) -> Frame<'_> {
         let white_uv = unsafe { adapter::white_pixel_uv() };
+        // Dear ImGui desktop backends use a uniform framebuffer scale. Keep
+        // the C core scalar and sample X here; a non-uniform backend would
+        // need a two-axis core API before it could promise exact hairlines.
+        let pixel_scale = unsafe {
+            let io = &*imgui_sys::igGetIO();
+            io.DisplayFramebufferScale.x
+        };
         Frame {
             painter: self,
             white_uv,
+            pixel_scale,
         }
     }
 }
@@ -446,6 +505,7 @@ impl Default for Painter {
 pub struct Frame<'a> {
     painter: &'a mut Painter,
     white_uv: Vec2,
+    pixel_scale: f32,
 }
 
 impl Frame<'_> {
@@ -460,9 +520,16 @@ impl Frame<'_> {
     /// only one canvas open at a time.
     pub unsafe fn canvas(&mut self, dl: *mut imgui_sys::ImDrawList) -> Canvas<'_> {
         self.painter.session.begin(self.white_uv);
+        let pixel_scale = if self.pixel_scale.is_finite() && self.pixel_scale > 0.0 {
+            self.pixel_scale
+        } else {
+            1.0
+        };
+        self.painter.session.set_pixel_scale(pixel_scale);
         Canvas {
             session: &mut self.painter.session,
             dl,
+            pixel_scale,
         }
     }
 }
@@ -485,14 +552,61 @@ impl Drop for Frame<'_> {
 pub struct Canvas<'a> {
     session: &'a mut Session,
     dl: *mut imgui_sys::ImDrawList,
+    pixel_scale: f32,
 }
 
 impl Canvas<'_> {
+    /// One physical device pixel expressed in the current ImGui logical
+    /// coordinate space. Useful for exact bevel strips and stacked hairlines.
+    pub fn device_pixel(&self) -> f32 {
+        1.0 / self.pixel_scale
+    }
+
+    /// Set the shape subsequent styling-depth operations apply to.
+    pub fn rounded_rect(&mut self, rect: Rect, radius: f32) {
+        self.session.rounded_rect(rect, radius);
+    }
+
+    /// Fill the current shape with one color.
+    pub fn fill_color(&mut self, color: Color) {
+        self.session.fill_color(color);
+    }
+
+    /// Fill the current shape with a multi-stop gradient.
+    pub fn fill_gradient(&mut self, gradient: &Gradient) {
+        self.session.fill_gradient(gradient);
+    }
+
+    /// Fill an absolute horizontal band clipped to the current shape.
+    pub fn fill_band_color(&mut self, y0: f32, y1: f32, color: Color) {
+        self.session.fill_band_color(y0, y1, color);
+    }
+
+    /// Gradient-fill an absolute horizontal band clipped to the current shape.
+    pub fn fill_band_gradient(&mut self, y0: f32, y1: f32, gradient: &Gradient) {
+        self.session.fill_band_gradient(y0, y1, gradient);
+    }
+
+    /// Add an outer or inset shadow to the current shape.
+    pub fn add_shadow(&mut self, shadow: &Shadow) {
+        self.session.add_shadow(shadow);
+    }
+
+    /// Stroke the current shape's outer outline.
+    pub fn add_border(&mut self, border: &Border) {
+        self.session.add_border(border);
+    }
+
+    /// Stroke an outline inset from the current shape's outer edge.
+    pub fn add_border_inset(&mut self, inset: f32, border: &Border) {
+        self.session.add_border_inset(inset, border);
+    }
+
     /// A solid-filled (optionally rounded) rect. `radius <= 0.0` is a plain
     /// rectangle — pixel-identical to `ImDrawList::add_rect(...).filled(true)`.
     pub fn fill_rect(&mut self, rect: Rect, radius: f32, color: Color) {
-        self.session.rounded_rect(rect, radius);
-        self.session.fill_color(color);
+        self.rounded_rect(rect, radius);
+        self.fill_color(color);
     }
 
     /// A straight `thickness`-px segment from `a` to `b`. Not anti-aliased —
@@ -548,7 +662,7 @@ mod tests {
 
     #[test]
     fn version_is_reachable_through_ffi() {
-        assert_eq!(version(), 1);
+        assert_eq!(version(), 2);
     }
 
     #[test]
@@ -1103,6 +1217,167 @@ mod tests {
     }
 
     #[test]
+    fn band_fill_clips_vertices_and_accepts_inverted_endpoints() {
+        let mesh_of = |y0: f32, y1: f32| {
+            let mut s = Session::new();
+            s.begin(uv());
+            s.rounded_rect(rect((10.0, 20.0), (90.0, 80.0)), 12.0);
+            s.fill_band_color(y0, y1, rgba(0xFF, 0xFF, 0xFF, 0xFF));
+            s.end()
+        };
+        let forward = mesh_of(35.0, 55.0);
+        let inverted = mesh_of(55.0, 35.0);
+        assert!(!forward.vertices.is_empty());
+        assert!(forward
+            .vertices
+            .iter()
+            .all(|v| v.pos.y >= 35.0 - 0.001 && v.pos.y <= 55.0 + 0.001));
+        assert_eq!(forward, inverted);
+    }
+
+    #[test]
+    fn band_outside_shape_is_empty_and_full_height_matches_fill_bounds() {
+        let shape = rect((10.0, 20.0), (90.0, 80.0));
+        let bounds = |mesh: &Mesh| {
+            mesh.vertices.iter().fold(
+                (
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ),
+                |(min_x, min_y, max_x, max_y), v| {
+                    (
+                        min_x.min(v.pos.x),
+                        min_y.min(v.pos.y),
+                        max_x.max(v.pos.x),
+                        max_y.max(v.pos.y),
+                    )
+                },
+            )
+        };
+
+        let mut s = Session::new();
+        s.begin(uv());
+        s.rounded_rect(shape, 12.0);
+        s.fill_band_color(100.0, 120.0, rgba(0xFF, 0xFF, 0xFF, 0xFF));
+        assert!(s.end().vertices.is_empty());
+
+        let plain = {
+            let mut s = Session::new();
+            s.begin(uv());
+            s.rounded_rect(shape, 12.0);
+            s.fill_color(rgba(0xFF, 0xFF, 0xFF, 0xFF));
+            s.end()
+        };
+        let band = {
+            let mut s = Session::new();
+            s.begin(uv());
+            s.rounded_rect(shape, 12.0);
+            s.fill_band_color(20.0, 80.0, rgba(0xFF, 0xFF, 0xFF, 0xFF));
+            s.end()
+        };
+        assert_eq!(bounds(&plain), bounds(&band));
+    }
+
+    #[test]
+    fn gradient_band_clips_to_the_requested_interval() {
+        let mut s = Session::new();
+        s.begin(uv());
+        s.rounded_rect(rect((0.0, 0.0), (40.0, 40.0)), 4.0);
+        s.fill_band_gradient(
+            8.0,
+            12.0,
+            &Gradient {
+                mode: GradientMode::Linear,
+                from: Vec2 { x: 0.0, y: 8.0 },
+                to: Vec2 { x: 40.0, y: 8.0 },
+                stops: vec![
+                    ColorStop {
+                        t: 0.0,
+                        color: rgba(0xFF, 0, 0, 0xFF),
+                    },
+                    ColorStop {
+                        t: 1.0,
+                        color: rgba(0, 0, 0xFF, 0xFF),
+                    },
+                ],
+            },
+        );
+        let mesh = s.end();
+        assert!(!mesh.vertices.is_empty());
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|v| v.pos.y >= 8.0 - 0.001 && v.pos.y <= 12.0 + 0.001));
+    }
+
+    #[test]
+    fn inset_shadow_stays_inside_and_hard_band_reaches_only_spread() {
+        let shape = rect((10.0, 20.0), (90.0, 80.0));
+        let spread = 6.0;
+        let mut s = Session::new();
+        s.begin(uv());
+        s.rounded_rect(shape, 0.0);
+        s.add_shadow(&Shadow {
+            offset: Vec2 { x: 0.0, y: 0.0 },
+            blur: 0.0,
+            spread,
+            color: rgba(0, 0, 0, 0xFF),
+            inset: true,
+        });
+        let mesh = s.end();
+        assert!(!mesh.vertices.is_empty());
+        assert!(mesh.vertices.iter().all(|v| {
+            v.pos.x >= shape.min.x - 0.5
+                && v.pos.x <= shape.max.x + 0.5
+                && v.pos.y >= shape.min.y - 0.5
+                && v.pos.y <= shape.max.y + 0.5
+        }));
+        assert!(mesh.vertices.iter().all(|v| {
+            let edge_distance = (v.pos.x - shape.min.x)
+                .min(shape.max.x - v.pos.x)
+                .min(v.pos.y - shape.min.y)
+                .min(shape.max.y - v.pos.y);
+            edge_distance <= spread + 0.001
+        }));
+    }
+
+    #[test]
+    fn blurred_offset_inset_shadow_stays_inside_shape() {
+        let shape = rect((10.0, 20.0), (90.0, 80.0));
+        let mut s = Session::new();
+        s.begin(uv());
+        s.rounded_rect(shape, 8.0);
+        s.add_shadow(&Shadow {
+            offset: Vec2 { x: 5.0, y: -3.0 },
+            blur: 12.0,
+            spread: 2.0,
+            color: rgba(0, 0, 0, 0xFF),
+            inset: true,
+        });
+        let mesh = s.end();
+        assert!(!mesh.vertices.is_empty());
+        assert!(mesh.vertices.iter().all(|v| {
+            v.pos.x >= shape.min.x - 0.5
+                && v.pos.x <= shape.max.x + 0.5
+                && v.pos.y >= shape.min.y - 0.5
+                && v.pos.y <= shape.max.y + 0.5
+        }));
+    }
+
+    #[test]
+    fn inset_shadow_without_shape_emits_nothing() {
+        let mut s = Session::new();
+        s.begin(uv());
+        s.add_shadow(&Shadow {
+            inset: true,
+            ..Shadow::default()
+        });
+        assert!(s.end().vertices.is_empty());
+    }
+
+    #[test]
     fn hard_edged_shadow_is_a_single_uniform_ring() {
         // blur <= 0 collapses to one ring with no falloff (f == 0, so the
         // quadratic falloff is exactly 1.0) — every vertex keeps the
@@ -1221,6 +1496,97 @@ mod tests {
         // alpha 0xFF scaled by 0.5 (float-truncated in the core) == 0x7F;
         // the RGB channels are untouched.
         assert!(mesh
+            .vertices
+            .iter()
+            .all(|v| v.col == rgba(0xFF, 0xFF, 0xFF, 0x7F)));
+    }
+
+    #[test]
+    fn pixel_scale_makes_half_logical_pixel_a_crisp_device_pixel() {
+        let mesh_at = |scale: f32| {
+            let mut s = Session::new();
+            s.begin(uv());
+            s.set_pixel_scale(scale);
+            s.rounded_rect(rect((0.0, 0.0), (50.0, 50.0)), 0.0);
+            s.add_border(&Border {
+                thickness: 0.5,
+                color: rgba(0xFF, 0xFF, 0xFF, 0xFF),
+            });
+            s.end()
+        };
+        assert!(mesh_at(2.0)
+            .vertices
+            .iter()
+            .all(|v| v.col == rgba(0xFF, 0xFF, 0xFF, 0xFF)));
+        assert!(mesh_at(1.0)
+            .vertices
+            .iter()
+            .all(|v| v.col == rgba(0xFF, 0xFF, 0xFF, 0x7F)));
+    }
+
+    #[test]
+    fn inset_borders_stack_on_distinct_outlines() {
+        let outer_color = rgba(0x11, 0x22, 0x33, 0xFF);
+        let inner_color = rgba(0xDD, 0xEE, 0xFF, 0xFF);
+        let mut s = Session::new();
+        s.begin(uv());
+        s.rounded_rect(rect((0.0, 0.0), (50.0, 30.0)), 4.0);
+        s.add_border(&Border {
+            thickness: 1.0,
+            color: outer_color,
+        });
+        s.add_border_inset(
+            1.0,
+            &Border {
+                thickness: 1.0,
+                color: inner_color,
+            },
+        );
+        let mesh = s.end();
+
+        let min_x_for = |color| {
+            mesh.vertices
+                .iter()
+                .filter(|v| v.col == color)
+                .map(|v| v.pos.x)
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!((min_x_for(outer_color) - 0.0).abs() < 0.001);
+        assert!((min_x_for(inner_color) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn invalid_border_geometry_is_ignored() {
+        let mut s = Session::new();
+        s.begin(uv());
+        s.rounded_rect(rect((0.0, 0.0), (50.0, 30.0)), 4.0);
+        s.add_border_inset(
+            -1.0,
+            &Border {
+                thickness: 1.0,
+                color: rgba(0xFF, 0xFF, 0xFF, 0xFF),
+            },
+        );
+        s.add_border(&Border {
+            thickness: f32::NAN,
+            color: rgba(0xFF, 0xFF, 0xFF, 0xFF),
+        });
+        assert!(s.end().vertices.is_empty());
+    }
+
+    #[test]
+    fn begin_resets_pixel_scale() {
+        let mut s = Session::new();
+        s.begin(uv());
+        s.set_pixel_scale(2.0);
+        s.begin(uv());
+        s.rounded_rect(rect((0.0, 0.0), (50.0, 50.0)), 0.0);
+        s.add_border(&Border {
+            thickness: 0.5,
+            color: rgba(0xFF, 0xFF, 0xFF, 0xFF),
+        });
+        assert!(s
+            .end()
             .vertices
             .iter()
             .all(|v| v.col == rgba(0xFF, 0xFF, 0xFF, 0x7F)));

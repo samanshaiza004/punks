@@ -66,6 +66,10 @@ void ip_ctx_destroy(ip_ctx *ctx);
  * flat-color/gradient fills need no separate "untextured" draw path). */
 void ip_begin(ip_ctx *ctx, ip_vec2 white_pixel_uv);
 
+/* Set logical-to-device pixel scale for hairline borders. Invalid scales are
+ * ignored. ip_begin resets the scale to 1.0. */
+void ip_set_pixel_scale(ip_ctx *ctx, float scale);
+
 /* Set the shape subsequent fill/shadow/border calls apply to. `radius <= 0`
  * is a plain rectangle. Replaces any shape set earlier in this session. */
 void ip_rounded_rect(ip_ctx *ctx, ip_rect rect, float radius);
@@ -112,6 +116,14 @@ typedef struct {
  * == 0` is a no-op; `== 1` fills solid with that one stop's color). */
 void ip_fill_gradient(ip_ctx *ctx, const ip_gradient *gradient);
 
+/* Fill only the part of the current shape inside the absolute-coordinate
+ * horizontal band between y0 and y1. The endpoints may be inverted. */
+void ip_fill_band_color(ip_ctx *ctx, float y0, float y1, ip_color color);
+
+/* Gradient-fill only the part of the current shape inside the
+ * absolute-coordinate horizontal band between y0 and y1. */
+void ip_fill_band_gradient(ip_ctx *ctx, float y0, float y1, const ip_gradient *gradient);
+
 /* Append a straight segment from `a` to `b`, `thickness` px wide, as a quad.
  * Independent of the current shape, so it composes with fills in one
  * accumulation. Not anti-aliased (see painter.cpp's ponytail): pixel-exact
@@ -123,8 +135,7 @@ typedef struct {
     float blur;
     float spread;
     ip_color color;
-    /* Accepted for forward ABI compatibility; not implemented yet (outer
-     * shadows only this pass) — ip_add_shadow ignores it. */
+    /* When true, paint the shadow inward and keep it inside the shape. */
     bool inset;
 } ip_shadow;
 
@@ -139,10 +150,14 @@ typedef struct {
  * layered shadows. */
 void ip_add_shadow(ip_ctx *ctx, const ip_shadow *shadow);
 
-/* Stroke the current shape's outline. Thickness below 1px is drawn at 1px
- * with proportionally reduced alpha (a hairline approximation — real
- * sub-pixel geometry rasterizes unreliably without MSAA). */
+/* Stroke the current shape's outline. Thickness below one device pixel is
+ * drawn at one device pixel with proportionally reduced alpha. */
 void ip_add_border(ip_ctx *ctx, const ip_border *border);
+
+/* Stroke an outline inset from the current shape's outer edge. Repeated calls
+ * with increasing inset values produce distinct stacked borders instead of
+ * repainting the same outline. Negative/non-finite insets are ignored. */
+void ip_add_border_inset(ip_ctx *ctx, float inset, const ip_border *border);
 
 /* Finish the session and return the accumulated mesh. */
 ip_mesh ip_end(ip_ctx *ctx);

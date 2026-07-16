@@ -62,6 +62,21 @@ public:
         return *this;
     }
 
+    Painter &band(float y0, float y1, ip_color color) {
+        ip_fill_band_color(ctx_, y0, y1, color);
+        return *this;
+    }
+
+    Painter &band(float y0, float y1, const ip_gradient &gradient) {
+        ip_fill_band_gradient(ctx_, y0, y1, &gradient);
+        return *this;
+    }
+
+    Painter &pixel_scale(float scale) {
+        ip_set_pixel_scale(ctx_, scale);
+        return *this;
+    }
+
     Painter &shadow(const ip_shadow &s) {
         ip_add_shadow(ctx_, &s);
         return *this;
@@ -69,6 +84,11 @@ public:
 
     Painter &border(const ip_border &b) {
         ip_add_border(ctx_, &b);
+        return *this;
+    }
+
+    Painter &border(float inset, const ip_border &b) {
+        ip_add_border_inset(ctx_, inset, &b);
         return *this;
     }
 

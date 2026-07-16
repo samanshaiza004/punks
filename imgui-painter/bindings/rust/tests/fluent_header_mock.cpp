@@ -47,8 +47,11 @@ void fluent_header_mock_entry_point() {
 
     // Solid fill + border, the ip_color overload of fill().
     ip::Painter(ip_vec2{0.5f, 0.5f}, rect, 4.0f)
+        .pixel_scale(2.0f)
         .fill(ip_color(0xFFAABBCCu))
+        .band(0.0f, 1.0f, ip_color(0xFFFFFFFFu))
         .border(ip_border{1.0f, ip_color(0xFF000000u)})
+        .border(1.0f, ip_border{1.0f, ip_color(0x40FFFFFFu)})
         .draw(dl);
 
     // Shadow + gradient fill, the ip_gradient overload of fill() -- proves
@@ -63,5 +66,6 @@ void fluent_header_mock_entry_point() {
     ip::Painter(ip_vec2{0.5f, 0.5f}, rect, 4.0f)
         .shadow(ip_shadow{{0.0f, 2.0f}, 8.0f, 0.0f, ip_color(0x3C000000u), false})
         .fill(gradient)
+        .band(20.0f, 40.0f, gradient)
         .draw(dl);
 }

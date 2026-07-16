@@ -1,3 +1,3 @@
 #include "imgui_painter_c.h"
 
-int32_t ip_version(void) { return 1; }
+int32_t ip_version(void) { return 2; }

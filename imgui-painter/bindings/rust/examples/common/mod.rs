@@ -4,7 +4,7 @@ use std::time::Instant;
 use imgui::FontSource;
 use imgui_painter::Painter;
 use imgui_wgpu::{Renderer, RendererConfig};
-use imgui_winit_support::WinitPlatform;
+use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use pollster::block_on;
 use winit::{
     application::ApplicationHandler,
@@ -97,16 +97,24 @@ impl AppWindow {
         let mut context = imgui::Context::create();
         context.set_ini_filename(None);
 
+        let logical_ui_scale = std::env::var("IMGUI_PAINTER_DEMO_UI_SCALE")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(1.0);
+
         let mut platform = WinitPlatform::new(&mut context);
-        platform.attach_window(
-            context.io_mut(),
-            &gpu.window,
-            imgui_winit_support::HiDpiMode::Default,
-        );
+        // Keep framebuffer scale tied to the real render target. Faking it
+        // with HiDpiMode::Locked makes scissor coordinates disagree with
+        // wgpu on a Retina display. The environment override scales logical
+        // font/style metrics only; physical-pixel behavior remains driven by
+        // DisplayFramebufferScale and is tested independently.
+        platform.attach_window(context.io_mut(), &gpu.window, HiDpiMode::Default);
 
         let hidpi = gpu.window.scale_factor();
-        let font_size = (14.0 * hidpi) as f32;
+        let font_size = (14.0 * hidpi) as f32 * logical_ui_scale;
         context.io_mut().font_global_scale = (1.0 / hidpi) as f32;
+        context.style_mut().scale_all_sizes(logical_ui_scale);
         context.fonts().add_font(&[FontSource::DefaultFontData {
             config: Some(imgui::FontConfig {
                 oversample_h: 1,

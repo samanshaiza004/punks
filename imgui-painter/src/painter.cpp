@@ -156,6 +156,38 @@ void FillConvexFan(const std::vector<ip_vec2> &poly, ColorAt color_at, ip_vec2 u
     }
 }
 
+// Clip a convex polygon to one horizontal half-plane. Sutherland-Hodgman
+// preserves convexity, so the result remains suitable for FillConvexFan.
+void ClipHorizontal(const std::vector<ip_vec2> &in, float y, bool keep_below,
+                    std::vector<ip_vec2> &out) {
+    out.clear();
+    if (in.empty()) {
+        return;
+    }
+    auto inside = [y, keep_below](ip_vec2 p) { return keep_below ? p.y <= y : p.y >= y; };
+    ip_vec2 previous = in.back();
+    bool previous_inside = inside(previous);
+    for (const ip_vec2 current : in) {
+        const bool current_inside = inside(current);
+        if (current_inside != previous_inside) {
+            const float dy = current.y - previous.y;
+            const float t = dy != 0.0f ? (y - previous.y) / dy : 0.0f;
+            out.push_back({previous.x + (current.x - previous.x) * t, y});
+        }
+        if (current_inside) {
+            out.push_back(current);
+        }
+        previous = current;
+        previous_inside = current_inside;
+    }
+}
+
+void ClipToBand(std::vector<ip_vec2> &poly, float y0, float y1) {
+    std::vector<ip_vec2> scratch;
+    ClipHorizontal(poly, y0, /*keep_below=*/false, scratch);
+    ClipHorizontal(scratch, y1, /*keep_below=*/true, poly);
+}
+
 ip_color LerpColor(ip_color a, ip_color b, float t) {
     t = std::clamp(t, 0.0f, 1.0f);
     auto lerp_channel = [t](uint32_t ca, uint32_t cb) -> uint32_t {
@@ -341,10 +373,44 @@ void StrokeRing(ip_rect rect, float radius, float thickness, ip_color color, ip_
     }
 }
 
+// Zip two rounded-rect outlines into a colored strip. Both outlines use the
+// same segment count, just like StrokeRing, so corresponding vertices match.
+void RoundedRectStrip(ip_rect outer_rect, float outer_radius, ip_color outer_color,
+                      ip_rect inner_rect, float inner_radius, ip_color inner_color, ip_vec2 uv,
+                      std::vector<ip_vertex> &vtx, std::vector<uint16_t> &idx) {
+    const float w = outer_rect.max.x - outer_rect.min.x;
+    const float h = outer_rect.max.y - outer_rect.min.y;
+    const float clamped_outer_radius =
+        std::clamp(outer_radius, 0.0f, std::min(w, h) * 0.5f);
+    const int segments = CornerSegments(clamped_outer_radius);
+    std::vector<ip_vec2> outer;
+    std::vector<ip_vec2> inner;
+    RoundedRectOutline(outer_rect, clamped_outer_radius, segments, 1, outer);
+    RoundedRectOutline(inner_rect, inner_radius, segments, 1, inner);
+    const size_t n = std::min(outer.size(), inner.size());
+    if (n < 2) {
+        return;
+    }
+    const uint16_t base = static_cast<uint16_t>(vtx.size());
+    for (size_t i = 0; i < n; ++i) {
+        vtx.push_back({outer[i], uv, outer_color});
+        vtx.push_back({inner[i], uv, inner_color});
+    }
+    const uint16_t un = static_cast<uint16_t>(n);
+    for (uint16_t i = 0; i < un; ++i) {
+        const uint16_t i0 = base + i * 2;
+        const uint16_t i1 = i0 + 1;
+        const uint16_t j0 = base + ((i + 1) % un) * 2;
+        const uint16_t j1 = j0 + 1;
+        idx.insert(idx.end(), {i0, j0, i1, i1, j0, j1});
+    }
+}
+
 } // namespace
 
 struct ip_ctx {
     ip_vec2 white_uv{0.0f, 0.0f};
+    float pixel_scale = 1.0f;
     std::vector<ip_vertex> vtx;
     std::vector<uint16_t> idx;
 
@@ -362,6 +428,13 @@ void ip_begin(ip_ctx *ctx, ip_vec2 white_pixel_uv) {
     ctx->vtx.clear();
     ctx->idx.clear();
     ctx->has_shape = false;
+    ctx->pixel_scale = 1.0f;
+}
+
+void ip_set_pixel_scale(ip_ctx *ctx, float scale) {
+    if (std::isfinite(scale) && scale > 0.0f) {
+        ctx->pixel_scale = scale;
+    }
 }
 
 void ip_rounded_rect(ip_ctx *ctx, ip_rect rect, float radius) {
@@ -386,6 +459,41 @@ void ip_fill_gradient(ip_ctx *ctx, const ip_gradient *gradient) {
     }
     std::vector<ip_vec2> outline;
     RoundedRectOutlineAuto(ctx->shape_rect, ctx->shape_radius, kGradientEdgeSubdivisions, outline);
+    const ip_gradient grad = *gradient;
+    FillConvexFan(
+        outline, [&grad](ip_vec2 p) { return EvalGradient(grad, p); }, ctx->white_uv, ctx->vtx,
+        ctx->idx);
+}
+
+void ip_fill_band_color(ip_ctx *ctx, float y0, float y1, ip_color color) {
+    if (!ctx->has_shape || !std::isfinite(y0) || !std::isfinite(y1)) {
+        return;
+    }
+    const float band_min = std::min(y0, y1);
+    const float band_max = std::max(y0, y1);
+    if (band_max < ctx->shape_rect.min.y || band_min > ctx->shape_rect.max.y) {
+        return;
+    }
+    std::vector<ip_vec2> outline;
+    RoundedRectOutlineAuto(ctx->shape_rect, ctx->shape_radius, 1, outline);
+    ClipToBand(outline, band_min, band_max);
+    FillConvexFan(
+        outline, [color](ip_vec2) { return color; }, ctx->white_uv, ctx->vtx, ctx->idx);
+}
+
+void ip_fill_band_gradient(ip_ctx *ctx, float y0, float y1, const ip_gradient *gradient) {
+    if (!ctx->has_shape || gradient == nullptr || gradient->stop_count == 0 ||
+        !std::isfinite(y0) || !std::isfinite(y1)) {
+        return;
+    }
+    const float band_min = std::min(y0, y1);
+    const float band_max = std::max(y0, y1);
+    if (band_max < ctx->shape_rect.min.y || band_min > ctx->shape_rect.max.y) {
+        return;
+    }
+    std::vector<ip_vec2> outline;
+    RoundedRectOutlineAuto(ctx->shape_rect, ctx->shape_radius, kGradientEdgeSubdivisions, outline);
+    ClipToBand(outline, band_min, band_max);
     const ip_gradient grad = *gradient;
     FillConvexFan(
         outline, [&grad](ip_vec2 p) { return EvalGradient(grad, p); }, ctx->white_uv, ctx->vtx,
@@ -431,6 +539,10 @@ void ip_add_shadow(ip_ctx *ctx, const ip_shadow *shadow) {
     if (!ctx->has_shape || shadow == nullptr) {
         return;
     }
+    if (!std::isfinite(shadow->offset.x) || !std::isfinite(shadow->offset.y) ||
+        !std::isfinite(shadow->blur) || !std::isfinite(shadow->spread)) {
+        return;
+    }
     const float spread = shadow->spread;
     const float blur = std::max(shadow->blur, 0.0f);
     // Ring count is the quality knob: more rings for a bigger blur radius,
@@ -438,6 +550,61 @@ void ip_add_shadow(ip_ctx *ctx, const ip_shadow *shadow) {
     // ring at exactly `spread` — no falloff to approximate.
     const int ring_count =
         blur > 0.0f ? std::clamp(static_cast<int>(blur / 2.0f) + 3, 3, 12) : 1;
+
+    if (shadow->inset) {
+        if (!std::isfinite(ctx->shape_rect.min.x) || !std::isfinite(ctx->shape_rect.min.y) ||
+            !std::isfinite(ctx->shape_rect.max.x) || !std::isfinite(ctx->shape_rect.max.y) ||
+            !std::isfinite(ctx->shape_radius)) {
+            return;
+        }
+        const float hard_width = std::max(spread, 0.0f);
+        const float reach = hard_width + blur;
+        if (reach <= 0.0f && shadow->offset.x == 0.0f && shadow->offset.y == 0.0f) {
+            return;
+        }
+        ip_rect previous_rect = ctx->shape_rect;
+        float previous_radius = ctx->shape_radius;
+        ip_color previous_color = shadow->color;
+        const int last_ring = blur > 0.0f ? ring_count : 0;
+        for (int i = 0; i <= last_ring; ++i) {
+            const float f = blur > 0.0f
+                                ? static_cast<float>(i) / static_cast<float>(ring_count)
+                                : 0.0f;
+            const float inset = hard_width + blur * f;
+            ip_rect inner_rect{
+                {ctx->shape_rect.min.x + inset + shadow->offset.x,
+                 ctx->shape_rect.min.y + inset + shadow->offset.y},
+                {ctx->shape_rect.max.x - inset + shadow->offset.x,
+                 ctx->shape_rect.max.y - inset + shadow->offset.y},
+            };
+            inner_rect.min.x = std::clamp(inner_rect.min.x, ctx->shape_rect.min.x,
+                                          ctx->shape_rect.max.x);
+            inner_rect.max.x = std::clamp(inner_rect.max.x, ctx->shape_rect.min.x,
+                                          ctx->shape_rect.max.x);
+            inner_rect.min.y = std::clamp(inner_rect.min.y, ctx->shape_rect.min.y,
+                                          ctx->shape_rect.max.y);
+            inner_rect.max.y = std::clamp(inner_rect.max.y, ctx->shape_rect.min.y,
+                                          ctx->shape_rect.max.y);
+            if (inner_rect.min.x > inner_rect.max.x) {
+                inner_rect.min.x = inner_rect.max.x =
+                    (ctx->shape_rect.min.x + ctx->shape_rect.max.x) * 0.5f;
+            }
+            if (inner_rect.min.y > inner_rect.max.y) {
+                inner_rect.min.y = inner_rect.max.y =
+                    (ctx->shape_rect.min.y + ctx->shape_rect.max.y) * 0.5f;
+            }
+            const float inner_radius = std::max(ctx->shape_radius - inset, 0.0f);
+            const float falloff = (1.0f - f) * (1.0f - f);
+            const ip_color inner_color = blur > 0.0f ? ScaleAlpha(shadow->color, falloff)
+                                                     : shadow->color;
+            RoundedRectStrip(previous_rect, previous_radius, previous_color, inner_rect,
+                             inner_radius, inner_color, ctx->white_uv, ctx->vtx, ctx->idx);
+            previous_rect = inner_rect;
+            previous_radius = inner_radius;
+            previous_color = inner_color;
+        }
+        return;
+    }
 
     // Outermost (largest, weakest) ring first, innermost (smallest,
     // strongest) last, so the more-opaque rings paint on top of the softer
@@ -468,19 +635,39 @@ void ip_add_shadow(ip_ctx *ctx, const ip_shadow *shadow) {
     }
 }
 
-void ip_add_border(ip_ctx *ctx, const ip_border *border) {
-    if (!ctx->has_shape || border == nullptr || border->thickness <= 0.0f) {
+void ip_add_border_inset(ip_ctx *ctx, float inset, const ip_border *border) {
+    if (!ctx->has_shape || border == nullptr || !std::isfinite(inset) || inset < 0.0f ||
+        !std::isfinite(border->thickness) || border->thickness <= 0.0f) {
         return;
     }
     // Hairline compensation: sub-pixel geometry rasterizes unreliably
     // without MSAA, so thicknesses under 1px are drawn at a full 1px but
     // with proportionally reduced alpha instead — the same trick many 2D
     // vector renderers use to approximate a true hairline.
-    const float draw_thickness = std::max(border->thickness, 1.0f);
-    const float alpha_scale = border->thickness < 1.0f ? border->thickness : 1.0f;
+    const float device_thickness = border->thickness * ctx->pixel_scale;
+    const float draw_thickness =
+        device_thickness < 1.0f ? 1.0f / ctx->pixel_scale : border->thickness;
+    const float alpha_scale = device_thickness < 1.0f ? device_thickness : 1.0f;
     const ip_color draw_color = ScaleAlpha(border->color, alpha_scale);
-    StrokeRing(ctx->shape_rect, ctx->shape_radius, draw_thickness, draw_color, ctx->white_uv,
-               ctx->vtx, ctx->idx);
+    ip_rect border_rect{
+        {ctx->shape_rect.min.x + inset, ctx->shape_rect.min.y + inset},
+        {ctx->shape_rect.max.x - inset, ctx->shape_rect.max.y - inset},
+    };
+    if (border_rect.min.x > border_rect.max.x) {
+        border_rect.min.x = border_rect.max.x =
+            (ctx->shape_rect.min.x + ctx->shape_rect.max.x) * 0.5f;
+    }
+    if (border_rect.min.y > border_rect.max.y) {
+        border_rect.min.y = border_rect.max.y =
+            (ctx->shape_rect.min.y + ctx->shape_rect.max.y) * 0.5f;
+    }
+    const float border_radius = std::max(ctx->shape_radius - inset, 0.0f);
+    StrokeRing(border_rect, border_radius, draw_thickness, draw_color, ctx->white_uv, ctx->vtx,
+               ctx->idx);
+}
+
+void ip_add_border(ip_ctx *ctx, const ip_border *border) {
+    ip_add_border_inset(ctx, 0.0f, border);
 }
 
 ip_mesh ip_end(ip_ctx *ctx) {
