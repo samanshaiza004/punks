@@ -46,8 +46,14 @@ must absorb.
 
 - Baseline (R3a, stock rows, debug build, small smoke directory ~20 visible
   rows): avg draw 0.66–0.91 ms typical, ~128–142 allocs/frame, decorated
-  rows/frame 0. After-numbers with decorated rows land at the R3b gate;
-  real-library numbers are captured by the user.
+  rows/frame 0.
+- After (R3b, decorated rows, same environment, 7 decorated rows/frame):
+  avg draw 0.79–1.0 ms typical (occasional 1.8 ms samples during window
+  activity), ~120–133 allocs/frame — *lower* than baseline: removing the
+  per-row + buttons freed more allocations than decoration added, and the
+  decorators ride the zero-alloc Canvas path. Per-row decoration cost at this
+  scale is within noise. Real-library / large-search numbers are captured by
+  the user at the R4 gate.
 
 ## Observed during R1
 
@@ -83,3 +89,11 @@ must absorb.
   draw milliseconds, allocations per frame, and decorated rows per frame at a
   one-second cadence. Baseline (stock rows) and after (decorated rows) numbers
   will be recorded at the R3 gates.
+
+## Observed during R3b
+
+- API/DX (parity gap): `decorate_selectable` lacks a persistent-selection
+  parameter — `Selectable.active` means activation interaction, not selection
+  — unlike `decorate_tree_node`'s selected flag. punks swaps materials per row
+  (tab-bar pattern). Recommend a `selected: bool` parameter for parity.
+- Nothing further.

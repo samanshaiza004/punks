@@ -83,6 +83,50 @@ pub(crate) fn toolbar_material() -> Material {
     material
 }
 
+// decorate_selectable has no persistent-selection parameter (Selectable.active
+// is activation interaction, not selection), so the app swaps materials per
+// row — the same pattern the tab bar uses.
+pub(crate) fn row_material() -> Material {
+    let palette = neon_palette();
+    Material {
+        radius: 1.0,
+        fill: StateColors {
+            base: palette.surface,
+            hover: mix(palette.surface, palette.selection, 0.15),
+            active: mix(palette.surface, palette.selection, 0.35),
+        },
+        border: Border {
+            thickness: 0.0,
+            color: palette.surface,
+        },
+        shadow: None,
+    }
+}
+
+pub(crate) fn row_selected_material() -> Material {
+    let palette = neon_palette();
+    Material {
+        radius: 1.0,
+        fill: StateColors {
+            base: palette.selection,
+            hover: tint(palette.selection, 0.08),
+            active: shade(palette.selection, 0.90),
+        },
+        border: Border {
+            thickness: 0.0,
+            color: palette.selection,
+        },
+        shadow: None,
+    }
+}
+
+pub(crate) fn inset_field_material() -> Material {
+    let palette = neon_palette();
+    let mut material = recipes::inset_control(&palette);
+    material.fill.hover = mix(palette.surface_inset, palette.selection, 0.12);
+    material
+}
+
 pub(crate) fn raised_material() -> Material {
     let palette = neon_palette();
     let mut material = recipes::raised_button(&palette);

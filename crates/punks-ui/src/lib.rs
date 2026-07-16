@@ -417,8 +417,7 @@ impl BrowserPanel {
     }
 
     /// Probe-only counter consumed by punks-standalone's PUNKS_UI_PERF probe;
-    /// counts decorated rows painted in the most recent draw (increments arrive
-    /// when rows are decorated in the next slice; currently 0).
+    /// counts decorated clipped-list rows painted in the most recent draw.
     #[cfg(debug_assertions)]
     pub fn row_decorations_last_frame(&self) -> u32 {
         self.row_decorations.get()
@@ -440,6 +439,7 @@ impl BrowserPanel {
         let tab_inactive_material = theme::tab_inactive_material();
         let toolbar_material = theme::toolbar_material();
         let raised_material = theme::raised_material();
+        let inset_material = theme::inset_field_material();
         let volume_slider_style = theme::volume_slider_style();
 
         // When the active tab changes, reload the search box from that tab's
@@ -734,9 +734,14 @@ impl BrowserPanel {
                     ui.set_keyboard_focus_here();
                 }
                 ui.set_next_item_width(w);
-                ui.input_text("##search", &mut self.search_buf)
-                    .hint("Search...")
-                    .build();
+                // SAFETY: the closure submits exactly one stock single-line InputText.
+                unsafe {
+                    imgui_painter::decorate_input_text(frame, &inset_material, || {
+                        ui.input_text("##search", &mut self.search_buf)
+                            .hint("Search...")
+                            .build()
+                    })
+                };
                 let sf = ui.is_item_active();
                 search_focused = sf;
 
@@ -1070,7 +1075,12 @@ impl BrowserPanel {
                     } else {
                         current.contains(&t.id)
                     };
-                    if ui.checkbox(format!("{}##ptag{}", t.name, t.id), &mut has) {
+                    // SAFETY: the closure submits exactly one stock Checkbox.
+                    if unsafe {
+                        imgui_painter::decorate_checkbox(frame, &toolbar_material, || {
+                            ui.checkbox(format!("{}##ptag{}", t.name, t.id), &mut has)
+                        })
+                    } {
                         if batch {
                             if has {
                                 browser.assign_tag_batch(paths, t.id);
@@ -1087,11 +1097,15 @@ impl BrowserPanel {
 
                 ui.separator();
                 ui.set_next_item_width(150.0);
-                let entered = ui
-                    .input_text("##popup_new_tag", &mut self.popup_tag_buf)
-                    .hint("New tag...")
-                    .enter_returns_true(true)
-                    .build();
+                // SAFETY: the closure submits exactly one stock single-line InputText.
+                let entered = unsafe {
+                    imgui_painter::decorate_input_text(frame, &inset_material, || {
+                        ui.input_text("##popup_new_tag", &mut self.popup_tag_buf)
+                            .hint("New tag...")
+                            .enter_returns_true(true)
+                            .build()
+                    })
+                };
                 ui.same_line();
                 // SAFETY: the closure submits exactly one stock button in the active window.
                 let add = unsafe {
@@ -1132,6 +1146,8 @@ impl BrowserPanel {
     ) {
         let toolbar_material = theme::toolbar_material();
         let raised_material = theme::raised_material();
+        let row_material = theme::row_material();
+        let row_selected_material = theme::row_selected_material();
         ui.spacing();
         ui.text_disabled("LIBRARY");
         ui.separator();
@@ -1234,7 +1250,17 @@ impl BrowserPanel {
                 for t in &tags {
                     let selected = filter.contains(&t.id);
                     let label = format!("{}  ({})##sbtag{}", t.name, t.count, t.id);
-                    if ui.selectable_config(&label).selected(selected).build() {
+                    let material = if selected {
+                        &row_selected_material
+                    } else {
+                        &row_material
+                    };
+                    // SAFETY: the closure submits exactly one stock Selectable in the active window.
+                    if unsafe {
+                        imgui_painter::decorate_selectable(frame, material, || {
+                            ui.selectable_config(&label).selected(selected).build()
+                        })
+                    } {
                         browser.toggle_tag_filter(t.id);
                     }
                     if ui.is_item_clicked_with_button(imgui::MouseButton::Right) {
@@ -1334,6 +1360,7 @@ impl BrowserPanel {
         frame: &mut imgui_painter::Frame<'_>,
     ) {
         let toolbar_material = theme::toolbar_material();
+        let inset_material = theme::inset_field_material();
         let Some(facets) = browser.library_fact_facets().cloned() else {
             return;
         };
@@ -1374,7 +1401,12 @@ impl BrowserPanel {
             ui.spacing();
             ui.text_disabled(format!("BPM ({lo:.0}-{hi:.0})"));
             let mut active = filter.bpm_min.is_some() || filter.bpm_max.is_some();
-            if ui.checkbox("Filter by BPM##bpmfilter", &mut active) {
+            // SAFETY: the closure submits exactly one stock Checkbox.
+            if unsafe {
+                imgui_painter::decorate_checkbox(frame, &toolbar_material, || {
+                    ui.checkbox("Filter by BPM##bpmfilter", &mut active)
+                })
+            } {
                 if active {
                     self.bpm_min = filter.bpm_min.unwrap_or(lo);
                     self.bpm_max = filter.bpm_max.unwrap_or(hi);
@@ -1385,10 +1417,20 @@ impl BrowserPanel {
             }
             if active {
                 ui.set_next_item_width(70.0);
-                let mut changed = ui.input_float("Min##bpmmin", &mut self.bpm_min).build();
+                // SAFETY: the closure submits exactly one stock single-line InputText.
+                let mut changed = unsafe {
+                    imgui_painter::decorate_input_text(frame, &inset_material, || {
+                        ui.input_float("Min##bpmmin", &mut self.bpm_min).build()
+                    })
+                };
                 ui.same_line();
                 ui.set_next_item_width(70.0);
-                changed |= ui.input_float("Max##bpmmax", &mut self.bpm_max).build();
+                // SAFETY: the closure submits exactly one stock single-line InputText.
+                changed |= unsafe {
+                    imgui_painter::decorate_input_text(frame, &inset_material, || {
+                        ui.input_float("Max##bpmmax", &mut self.bpm_max).build()
+                    })
+                };
                 if changed {
                     browser.set_bpm_filter(Some(self.bpm_min), Some(self.bpm_max));
                 }
@@ -1689,6 +1731,8 @@ impl BrowserPanel {
 
         let selected = browser.search_selected();
         let mut click_action: Option<(usize, PathBuf)> = None;
+        let row_material = theme::row_material();
+        let row_selected_material = theme::row_selected_material();
 
         // Width-adaptive columns; the clipper iterates rows of `cols` items so
         // only visible rows allocate label strings.
@@ -1727,11 +1771,23 @@ impl BrowserPanel {
                 };
 
                 let sel_w = col_w - COLUMN_GUTTER;
-                let clicked = ui
-                    .selectable_config(&label)
-                    .selected(selected == Some(i))
-                    .size([sel_w.max(40.0), 0.0])
-                    .build();
+                let is_selected = selected == Some(i);
+                let material = if is_selected {
+                    &row_selected_material
+                } else {
+                    &row_material
+                };
+                // SAFETY: the closure submits exactly one stock Selectable in the active window.
+                let clicked = unsafe {
+                    imgui_painter::decorate_selectable(frame, material, || {
+                        ui.selectable_config(&label)
+                            .selected(is_selected)
+                            .size([sel_w.max(40.0), 0.0])
+                            .build()
+                    })
+                };
+                #[cfg(debug_assertions)]
+                self.row_decorations.set(self.row_decorations.get() + 1);
                 // Capture the row's hover/click/rect state while the selectable
                 // is still ImGui's last item.
                 let row_hovered = ui.is_item_hovered();
@@ -1838,6 +1894,8 @@ impl BrowserPanel {
         let selected = browser.selected();
         let entry_count = browser.entries().len();
         let mut click_action: Option<(usize, bool, PathBuf)> = None;
+        let row_material = theme::row_material();
+        let row_selected_material = theme::row_selected_material();
 
         if entry_count == 0 {
             if browser.current_directory().is_some() {
@@ -1893,23 +1951,39 @@ impl BrowserPanel {
                 };
 
                 let is_selected = selected == Some(i) || browser.selection().contains(&i);
+                let material = if is_selected {
+                    &row_selected_material
+                } else {
+                    &row_material
+                };
                 let sel_w = col_w - COLUMN_GUTTER;
                 let size = [sel_w.max(40.0), 0.0];
                 let clicked = if is_dir {
                     let color = ui.push_style_color(imgui::StyleColor::Text, DIR_TEXT_COLOR);
-                    let clicked = ui
-                        .selectable_config(&label)
-                        .selected(is_selected)
-                        .size(size)
-                        .build();
+                    // SAFETY: the closure submits exactly one stock Selectable in the active window.
+                    let clicked = unsafe {
+                        imgui_painter::decorate_selectable(frame, material, || {
+                            ui.selectable_config(&label)
+                                .selected(is_selected)
+                                .size(size)
+                                .build()
+                        })
+                    };
                     color.pop();
                     clicked
                 } else {
-                    ui.selectable_config(&label)
-                        .selected(is_selected)
-                        .size(size)
-                        .build()
+                    // SAFETY: the closure submits exactly one stock Selectable in the active window.
+                    unsafe {
+                        imgui_painter::decorate_selectable(frame, material, || {
+                            ui.selectable_config(&label)
+                                .selected(is_selected)
+                                .size(size)
+                                .build()
+                        })
+                    }
                 };
+                #[cfg(debug_assertions)]
+                self.row_decorations.set(self.row_decorations.get() + 1);
                 // Capture the row's hover/click/rect state while the selectable
                 // is still ImGui's last item.
                 let row_hovered = ui.is_item_hovered();
@@ -2435,7 +2509,15 @@ fn seed_metadata_field(
 /// One editable metadata row: label + provenance badge, then the input
 /// itself (greyed out with a tooltip when the backend can't write it), then
 /// a truncation warning if the edited value would be cut on save.
-fn draw_metadata_field(ui: &imgui::Ui, label: &str, id: &str, hint: &str, field: &mut MetaField) {
+fn draw_metadata_field(
+    ui: &imgui::Ui,
+    label: &str,
+    id: &str,
+    hint: &str,
+    field: &mut MetaField,
+    frame: &mut imgui_painter::Frame<'_>,
+    inset_material: &imgui_painter::Material,
+) {
     ui.text_disabled(label);
     ui.same_line();
     let badge = field.source.map(source_label).unwrap_or("—");
@@ -2443,10 +2525,15 @@ fn draw_metadata_field(ui: &imgui::Ui, label: &str, id: &str, hint: &str, field:
 
     let w = ui.content_region_avail()[0];
     ui.set_next_item_width(w.max(80.0));
-    ui.input_text(id, &mut field.buf)
-        .hint(hint)
-        .read_only(!field.writable)
-        .build();
+    // SAFETY: the closure submits exactly one stock single-line InputText.
+    unsafe {
+        imgui_painter::decorate_input_text(frame, inset_material, || {
+            ui.input_text(id, &mut field.buf)
+                .hint(hint)
+                .read_only(!field.writable)
+                .build()
+        })
+    };
     let hovered = ui.is_item_hovered();
     if !field.writable {
         if hovered {
@@ -2570,6 +2657,7 @@ fn draw_metadata_editor_modal(
 ) {
     let toolbar_material = theme::toolbar_material();
     let raised_material = theme::raised_material();
+    let inset_material = theme::inset_field_material();
     ui.modal_popup("Edit Metadata##metadata_editor", || {
         let Some(path) = editor.path.clone() else {
             ui.close_current_popup();
@@ -2581,6 +2669,8 @@ fn draw_metadata_editor_modal(
             "##meta-description",
             "Description...",
             &mut editor.description,
+            frame,
+            &inset_material,
         );
         draw_metadata_field(
             ui,
@@ -2588,6 +2678,8 @@ fn draw_metadata_editor_modal(
             "##meta-keywords",
             "Keywords, comma-separated...",
             &mut editor.keywords,
+            frame,
+            &inset_material,
         );
         draw_metadata_field(
             ui,
@@ -2595,6 +2687,8 @@ fn draw_metadata_editor_modal(
             "##meta-category",
             "Category...",
             &mut editor.category,
+            frame,
+            &inset_material,
         );
         draw_metadata_field(
             ui,
@@ -2602,6 +2696,8 @@ fn draw_metadata_editor_modal(
             "##meta-creator",
             "Creator...",
             &mut editor.creator,
+            frame,
+            &inset_material,
         );
 
         ui.separator();
