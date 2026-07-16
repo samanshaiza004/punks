@@ -197,11 +197,6 @@ const PILL_TEXT: [f32; 4] = [0.06275, 0.09020, 0.13333, 1.0];
 // this wide, so wide windows show 2+ columns and narrow ones collapse to 1.
 const MIN_COLUMN_WIDTH: f32 = 300.0;
 const COLUMN_GUTTER: f32 = 8.0;
-// Small always-visible button at the end of each row that opens the tag
-// popup via left-click. Right-click does the same but isn't reliable on all
-// platforms/input devices (e.g. some macOS trackpad configurations), so
-// tagging must not depend on it exclusively.
-const TAG_BUTTON_WIDTH: f32 = 22.0;
 
 fn column_count(avail_width: f32) -> usize {
     ((avail_width / MIN_COLUMN_WIDTH).floor() as usize).max(1)
@@ -335,8 +330,8 @@ pub struct BrowserPanel {
     new_tag_buf: String,
     /// "New tag" buffer inside the per-file tag popup.
     popup_tag_buf: String,
-    /// File the tag-editor popup is editing (set by the row's tag button, or
-    /// by right-click where that works).
+    /// File the tag-editor popup is editing (set by the Inspector, or by
+    /// right-click where that works).
     tag_popup_path: Option<PathBuf>,
     open_tag_editor: bool,
     /// Tag pending delete confirmation (set by right-click in the sidebar).
@@ -366,6 +361,8 @@ pub struct BrowserPanel {
     /// in-progress edit into another.
     bpm_min: f32,
     bpm_max: f32,
+    #[cfg(debug_assertions)]
+    row_decorations: std::cell::Cell<u32>,
 }
 
 /// The correctable detected facts the override popup edits, as
@@ -407,6 +404,8 @@ impl BrowserPanel {
             open_metadata_editor: false,
             bpm_min: 0.0,
             bpm_max: 0.0,
+            #[cfg(debug_assertions)]
+            row_decorations: std::cell::Cell::new(0),
         }
     }
 
@@ -417,6 +416,14 @@ impl BrowserPanel {
         &self.prefs
     }
 
+    /// Probe-only counter consumed by punks-standalone's PUNKS_UI_PERF probe;
+    /// counts decorated rows painted in the most recent draw (increments arrive
+    /// when rows are decorated in the next slice; currently 0).
+    #[cfg(debug_assertions)]
+    pub fn row_decorations_last_frame(&self) -> u32 {
+        self.row_decorations.get()
+    }
+
     pub fn draw(
         &mut self,
         ui: &imgui::Ui,
@@ -424,6 +431,9 @@ impl BrowserPanel {
         frame: &mut imgui_painter::Frame<'_>,
         on_drag_file: Option<&mut dyn FnMut(&Path)>,
     ) {
+        #[cfg(debug_assertions)]
+        self.row_decorations.set(0);
+
         browser.poll();
         let palette = theme::neon_palette();
         let tab_active_material = theme::tab_active_material();
@@ -1716,14 +1726,14 @@ impl BrowserPanel {
                     (label, e.path.clone())
                 };
 
-                let sel_w = col_w - COLUMN_GUTTER - TAG_BUTTON_WIDTH;
+                let sel_w = col_w - COLUMN_GUTTER;
                 let clicked = ui
                     .selectable_config(&label)
                     .selected(selected == Some(i))
                     .size([sel_w.max(40.0), 0.0])
                     .build();
-                // Capture the row's hover/click/rect state now, before adding
-                // the tag button below shifts what "the last item" refers to.
+                // Capture the row's hover/click/rect state while the selectable
+                // is still ImGui's last item.
                 let row_hovered = ui.is_item_hovered();
                 let row_right_clicked = ui.is_item_clicked_with_button(imgui::MouseButton::Right);
                 let row_rect = (ui.item_rect_min(), ui.item_rect_max());
@@ -1736,15 +1746,6 @@ impl BrowserPanel {
                 if !names.is_empty() {
                     draw_tag_pills(ui, &names, frame, row_rect.0, row_rect.1);
                 }
-                ui.same_line();
-                if ui.small_button(format!("+##stagbtn{i}")) {
-                    self.tag_popup_path = Some(path.clone());
-                    self.open_tag_editor = true;
-                }
-                if ui.is_item_hovered() {
-                    ui.tooltip_text("Tag this sample");
-                }
-
                 if row_hovered
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
@@ -1892,13 +1893,7 @@ impl BrowserPanel {
                 };
 
                 let is_selected = selected == Some(i) || browser.selection().contains(&i);
-                // Reserve room for the tag button so it doesn't spill into the
-                // next column.
-                let sel_w = if is_dir {
-                    col_w - COLUMN_GUTTER
-                } else {
-                    col_w - COLUMN_GUTTER - TAG_BUTTON_WIDTH
-                };
+                let sel_w = col_w - COLUMN_GUTTER;
                 let size = [sel_w.max(40.0), 0.0];
                 let clicked = if is_dir {
                     let color = ui.push_style_color(imgui::StyleColor::Text, DIR_TEXT_COLOR);
@@ -1915,8 +1910,8 @@ impl BrowserPanel {
                         .size(size)
                         .build()
                 };
-                // Capture the row's hover/click/rect state now, before adding
-                // the tag button below shifts what "the last item" refers to.
+                // Capture the row's hover/click/rect state while the selectable
+                // is still ImGui's last item.
                 let row_hovered = ui.is_item_hovered();
                 let row_right_clicked = ui.is_item_clicked_with_button(imgui::MouseButton::Right);
                 let row_rect = (ui.item_rect_min(), ui.item_rect_max());
@@ -1924,8 +1919,8 @@ impl BrowserPanel {
                 if !is_dir {
                     // Right-click opens the tag editor where the platform
                     // delivers it (works on Windows; unreliable on some macOS
-                    // trackpad configurations), so it's a bonus, not the only
-                    // path — see the button below.
+                    // trackpad configurations); the Inspector is the primary
+                    // path on every platform.
                     if row_right_clicked {
                         self.tag_popup_path = Some(path.clone());
                         self.open_tag_editor = true;
@@ -1933,14 +1928,6 @@ impl BrowserPanel {
                     let names = browser.tag_names_for_path(&path);
                     if !names.is_empty() {
                         draw_tag_pills(ui, &names, frame, row_rect.0, row_rect.1);
-                    }
-                    ui.same_line();
-                    if ui.small_button(format!("+##tagbtn{i}")) {
-                        self.tag_popup_path = Some(path.clone());
-                        self.open_tag_editor = true;
-                    }
-                    if ui.is_item_hovered() {
-                        ui.tooltip_text("Tag this sample");
                     }
                 }
                 if !is_dir

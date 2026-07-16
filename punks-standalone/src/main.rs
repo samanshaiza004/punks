@@ -1,6 +1,13 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(debug_assertions)]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(debug_assertions)]
+use std::time::Duration;
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use drag::{DragItem, Image};
 use imgui::FontSource;
@@ -17,6 +24,77 @@ use winit::{
 
 use punks_browser::SampleBrowser;
 use punks_ui::BrowserPanel;
+
+#[cfg(debug_assertions)]
+struct CountingAllocator(System);
+
+#[cfg(debug_assertions)]
+static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(debug_assertions)]
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        unsafe { self.0.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { self.0.dealloc(ptr, layout) }
+    }
+}
+
+#[cfg(debug_assertions)]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator(System);
+
+#[cfg(debug_assertions)]
+struct UiPerfProbe {
+    enabled: bool,
+    interval_start: Instant,
+    draw_time: Duration,
+    allocations: usize,
+    decorated_rows: u64,
+    frames: u64,
+}
+
+#[cfg(debug_assertions)]
+impl UiPerfProbe {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("PUNKS_UI_PERF").is_some_and(|value| value == "1"),
+            interval_start: Instant::now(),
+            draw_time: Duration::ZERO,
+            allocations: 0,
+            decorated_rows: 0,
+            frames: 0,
+        }
+    }
+
+    fn record(&mut self, started: Instant, allocations_before: usize, decorated_rows: u32) {
+        self.draw_time += started.elapsed();
+        self.allocations += ALLOCATION_COUNT
+            .load(Ordering::Relaxed)
+            .saturating_sub(allocations_before);
+        self.decorated_rows += u64::from(decorated_rows);
+        self.frames += 1;
+
+        if self.interval_start.elapsed() >= Duration::from_secs(1) {
+            let frames = self.frames as f64;
+            log::info!(
+                "UI perf: frames={}, avg draw ms={:.2}, avg allocs/frame={:.2}, avg decorated rows/frame={:.2}",
+                self.frames,
+                self.draw_time.as_secs_f64() * 1000.0 / frames,
+                self.allocations as f64 / frames,
+                self.decorated_rows as f64 / frames,
+            );
+            self.interval_start = Instant::now();
+            self.draw_time = Duration::ZERO;
+            self.allocations = 0;
+            self.decorated_rows = 0;
+            self.frames = 0;
+        }
+    }
+}
 
 /// Routes imgui's copy/paste to the real OS clipboard via `arboard`. Without
 /// this, imgui falls back to an internal no-op backend: text can be selected
@@ -92,6 +170,8 @@ struct AppWindow {
     // is opened from this each render pass and threaded into the panel; the
     // &mut borrow it takes makes two concurrent frames a compile error.
     painter: imgui_painter::Painter,
+    #[cfg(debug_assertions)]
+    ui_perf: UiPerfProbe,
 }
 
 impl AppWindow {
@@ -109,6 +189,8 @@ impl AppWindow {
             browser,
             panel,
             painter: imgui_painter::Painter::new(),
+            #[cfg(debug_assertions)]
+            ui_perf: UiPerfProbe::new(),
         }
     }
 
@@ -280,6 +362,12 @@ impl ApplicationHandler for App {
                     .no_decoration()
                     .movable(false)
                     .build(|| {
+                        #[cfg(debug_assertions)]
+                        let perf_start = app
+                            .ui_perf
+                            .enabled
+                            .then(|| (Instant::now(), ALLOCATION_COUNT.load(Ordering::Relaxed)));
+
                         #[cfg(any(target_os = "macos", target_os = "windows"))]
                         {
                             let mut on_drag_file =
@@ -296,6 +384,15 @@ impl ApplicationHandler for App {
                         {
                             app.panel
                                 .draw(ui, &mut app.browser, &mut frame_painter, None);
+                        }
+
+                        #[cfg(debug_assertions)]
+                        if let Some((started, allocations_before)) = perf_start {
+                            app.ui_perf.record(
+                                started,
+                                allocations_before,
+                                app.panel.row_decorations_last_frame(),
+                            );
                         }
                     });
 

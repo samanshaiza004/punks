@@ -44,8 +44,10 @@ must absorb.
 
 ## Performance evidence
 
-- (pending: PUNKS_UI_PERF probe numbers, baseline stock rows vs decorated
-  rows, recorded in R3)
+- Baseline (R3a, stock rows, debug build, small smoke directory ~20 visible
+  rows): avg draw 0.66–0.91 ms typical, ~128–142 allocs/frame, decorated
+  rows/frame 0. After-numbers with decorated rows land at the R3b gate;
+  real-library numbers are captured by the user.
 
 ## Observed during R1
 
@@ -71,3 +73,13 @@ must absorb.
   signatures that otherwise did not need painter state. Ambient frame access
   is absent, so decoration adds mechanical parameter plumbing through the UI
   call tree.
+
+## Observed during R3a
+
+- punks-specific design choice: per-row `+` tag buttons removed — the Inspector
+  Tags section owns tag editing; fewer per-row widgets also reduces future
+  per-row decoration cost.
+- Performance evidence: set `PUNKS_UI_PERF=1` in debug builds to log average
+  draw milliseconds, allocations per frame, and decorated rows per frame at a
+  one-second cadence. Baseline (stock rows) and after (decorated rows) numbers
+  will be recorded at the R3 gates.
