@@ -50,3 +50,10 @@ must absorb.
 ## Observed during R1
 
 - Nothing beyond the seeded entries.
+
+## Observed during R2a
+
+- Widget breadth: SmallButton decorates via `decorate_button` (ButtonEx path,
+  zero vertical padding) — pending visual confirmation.
+- API/DX: decorators preserve last-item queries after the bracket — relied on
+  for drag-drop/tooltips, worth documenting in imgui-painter's docs.

@@ -1,7 +1,7 @@
 //! Palette tokens and stock ImGui style colors have no imgui-painter bridge, so they are hand-synced here; this duplication is recorded in the redesign findings.
 
 use imgui::StyleColor;
-use imgui_painter::{recipes::Palette, rgba, Color};
+use imgui_painter::{recipes, recipes::Palette, rgba, Border, Color, Material, StateColors};
 
 pub(crate) fn neon_palette() -> Palette {
     Palette {
@@ -15,6 +15,62 @@ pub(crate) fn neon_palette() -> Palette {
         text: rgba(16, 23, 34, 255),
         text_muted: rgba(58, 72, 92, 255),
     }
+}
+
+fn shade(color: Color, scale: f32) -> Color {
+    let channel = |shift| ((color >> shift) & 0xff_u32) as f32;
+    rgba(
+        (channel(0) * scale).round() as u8,
+        (channel(8) * scale).round() as u8,
+        (channel(16) * scale).round() as u8,
+        ((color >> 24) & 0xff) as u8,
+    )
+}
+
+fn tint(color: Color, amount: f32) -> Color {
+    let channel = |shift| ((color >> shift) & 0xff_u32) as f32;
+    let lift = |value: f32| (value + (u8::MAX as f32 - value) * amount).round() as u8;
+    rgba(
+        lift(channel(0)),
+        lift(channel(8)),
+        lift(channel(16)),
+        ((color >> 24) & 0xff) as u8,
+    )
+}
+
+pub(crate) fn tab_active_material() -> Material {
+    let palette = neon_palette();
+    Material {
+        radius: 2.0,
+        fill: StateColors {
+            base: shade(palette.selection, 0.86),
+            hover: tint(palette.selection, 0.10),
+            active: palette.selection,
+        },
+        border: Border {
+            thickness: 1.0,
+            color: palette.border_dark,
+        },
+        shadow: None,
+    }
+}
+
+pub(crate) fn tab_inactive_material() -> Material {
+    let mut material = recipes::toolbar_button(&neon_palette());
+    material.radius = 2.0;
+    material
+}
+
+pub(crate) fn toolbar_material() -> Material {
+    recipes::toolbar_button(&neon_palette())
+}
+
+pub(crate) fn raised_material() -> Material {
+    recipes::raised_button(&neon_palette())
+}
+
+pub(crate) fn volume_slider_style() -> imgui_painter::SliderStyle {
+    recipes::parameter_slider(&neon_palette())
 }
 
 pub(crate) fn color_f32(color: Color) -> [f32; 4] {

@@ -173,14 +173,6 @@ const KEYBIND_ACTIONS: &[(BrowserAction, &str)] = &[
     (BrowserAction::ToggleInspector, "Toggle inspector"),
 ];
 
-// Tab palette: selection darkened 14%.
-const TAB_ACTIVE_BG: [f32; 4] = [0.19898, 0.40471, 0.70149, 1.0];
-// Selection lightened 10%.
-const TAB_ACTIVE_HOVER: [f32; 4] = [0.30824, 0.52353, 0.83412, 1.0];
-// surface_raised.
-const TAB_INACTIVE_BG: [f32; 4] = [0.86275, 0.90588, 0.94902, 1.0];
-// surface_raised lightened 10%.
-const TAB_INACTIVE_HOVER: [f32; 4] = [0.87647, 0.91529, 0.95412, 1.0];
 // text_muted.
 const TAB_CLOSE_TEXT: [f32; 4] = [0.22745, 0.28235, 0.36078, 1.0];
 
@@ -433,6 +425,12 @@ impl BrowserPanel {
         on_drag_file: Option<&mut dyn FnMut(&Path)>,
     ) {
         browser.poll();
+        let palette = theme::neon_palette();
+        let tab_active_material = theme::tab_active_material();
+        let tab_inactive_material = theme::tab_inactive_material();
+        let toolbar_material = theme::toolbar_material();
+        let raised_material = theme::raised_material();
+        let volume_slider_style = theme::volume_slider_style();
 
         // When the active tab changes, reload the search box from that tab's
         // stored query and resync the debounce trackers so we don't re-issue a
@@ -482,19 +480,29 @@ impl BrowserPanel {
             if i > 0 {
                 ui.same_line();
             }
-            let (bg, bg_hover) = if i == active_tab {
-                (TAB_ACTIVE_BG, TAB_ACTIVE_HOVER)
+            let tab_material = if i == active_tab {
+                tab_active_material
             } else {
-                (TAB_INACTIVE_BG, TAB_INACTIVE_HOVER)
+                tab_inactive_material
             };
-            // The label and close glyph share one pushed background so they read
-            // as a single tab rather than two detached buttons.
-            let cbg = ui.push_style_color(imgui::StyleColor::Button, bg);
-            let chov = ui.push_style_color(imgui::StyleColor::ButtonHovered, bg_hover);
-            let cact = ui.push_style_color(imgui::StyleColor::ButtonActive, bg_hover);
 
             let title = browser.tab_title(i);
-            if ui.button(format!("{title}##tab{i}")) {
+            let active_text = (i == active_tab).then(|| {
+                ui.push_style_color(
+                    imgui::StyleColor::Text,
+                    theme::color_f32(palette.border_light),
+                )
+            });
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            let clicked = unsafe {
+                imgui_painter::decorate_button(frame, &tab_material, || {
+                    ui.button(format!("{title}##tab{i}"))
+                })
+            };
+            if let Some(color) = active_text {
+                color.pop();
+            }
+            if clicked {
                 switch_to = Some(i);
             }
 
@@ -521,18 +529,23 @@ impl BrowserPanel {
             if tab_count > 1 {
                 ui.same_line_with_spacing(0.0, 0.0);
                 let ctext = ui.push_style_color(imgui::StyleColor::Text, TAB_CLOSE_TEXT);
-                if ui.button(format!("\u{00d7}##closetab{i}")) {
+                // SAFETY: the closure submits exactly one stock button in the active window.
+                let clicked = unsafe {
+                    imgui_painter::decorate_button(frame, &tab_material, || {
+                        ui.button(format!("\u{00d7}##closetab{i}"))
+                    })
+                };
+                if clicked {
                     close_idx = Some(i);
                 }
                 ctext.pop();
             }
-
-            cact.pop();
-            chov.pop();
-            cbg.pop();
         }
         ui.same_line();
-        if ui.button("+##newtab") {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        if unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("+##newtab"))
+        } {
             open_new_tab = true;
         }
         ui.separator();
@@ -552,7 +565,10 @@ impl BrowserPanel {
             browser.switch_tab(i);
         }
 
-        if ui.button("Browse...") {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        if unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Browse..."))
+        } {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
                 if let Err(e) = browser.open_directory(&path) {
                     log::error!("failed to open directory: {e}");
@@ -567,7 +583,10 @@ impl BrowserPanel {
 
         if browser.can_navigate_up() {
             ui.same_line();
-            if ui.button("^  Up") {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("^  Up"))
+            } {
                 if let Err(e) = browser.navigate_up() {
                     log::error!("navigate_up failed: {e}");
                 }
@@ -575,18 +594,27 @@ impl BrowserPanel {
         }
 
         ui.same_line();
-        if ui.button("Settings") {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        if unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Settings"))
+        } {
             ui.open_popup("Settings##modal");
         }
 
         // Inspector toggle: hiding the right pane gives Results the full width.
         // The state is persisted (see the tab/volume save path below).
         ui.same_line();
-        if ui.button(if self.prefs.inspector_visible {
-            "Inspector \u{25b8}"
-        } else {
-            "Inspector \u{25c2}"
-        }) {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        let inspector_clicked = unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || {
+                ui.button(if self.prefs.inspector_visible {
+                    "Inspector \u{25b8}"
+                } else {
+                    "Inspector \u{25c2}"
+                })
+            })
+        };
+        if inspector_clicked {
             self.prefs.inspector_visible = !self.prefs.inspector_visible;
             punks_core::config::save(&self.prefs);
         }
@@ -603,7 +631,13 @@ impl BrowserPanel {
                     ui.same_line();
                 }
                 if i < crumbs.len() - 1 {
-                    if ui.small_button(format!("{}##crumb{}", crumb, i)) {
+                    // SAFETY: the closure submits exactly one stock SmallButton in the active window.
+                    let clicked = unsafe {
+                        imgui_painter::decorate_button(frame, &toolbar_material, || {
+                            ui.small_button(format!("{}##crumb{}", crumb, i))
+                        })
+                    };
+                    if clicked {
                         if let Err(e) = browser.navigate_to_breadcrumb(i) {
                             log::error!("breadcrumb nav failed: {e}");
                         }
@@ -834,12 +868,42 @@ impl BrowserPanel {
         // becomes muscle memory — the metadata/facts that used to live here have
         // moved into the Inspector, which is exactly what frees this row to stay
         // put no matter how much a file carries.
+        // Z-order contract: capture the strip rect first, paint its inset-panel
+        // background before any transport widget is submitted, then submit the
+        // widgets on top.
+        let [strip_x, strip_y] = ui.cursor_screen_pos();
+        let strip_width = ui.content_region_avail()[0];
+        const TRANSPORT_PADDING: f32 = 4.0;
+        let strip_rect = imgui_painter::Rect {
+            min: imgui_painter::Vec2 {
+                x: strip_x,
+                y: strip_y - TRANSPORT_PADDING,
+            },
+            max: imgui_painter::Vec2 {
+                x: strip_x + strip_width,
+                y: strip_y + ui.frame_height() + TRANSPORT_PADDING,
+            },
+        };
+        // SAFETY: the window draw list is the active one this frame; the Canvas
+        // submits and releases the raw pointer when it drops at the block's end.
+        unsafe {
+            let dl = imgui::sys::igGetWindowDrawList();
+            let mut canvas = frame.canvas(dl);
+            imgui_painter::recipes::inset_panel(&mut canvas, strip_rect, &palette);
+        }
+
         let playing = !matches!(browser.playback_status(), PlaybackStatus::Idle);
-        if ui.button(if playing {
-            "\u{25a0} Stop"
-        } else {
-            "\u{25b6} Play"
-        }) {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        let play_clicked = unsafe {
+            imgui_painter::decorate_button(frame, &raised_material, || {
+                ui.button(if playing {
+                    "\u{25a0} Stop"
+                } else {
+                    "\u{25b6} Play"
+                })
+            })
+        };
+        if play_clicked {
             if playing {
                 browser.stop();
             } else if in_search {
@@ -868,10 +932,21 @@ impl BrowserPanel {
         ]);
         ui.set_next_item_width(VOLUME_SLIDER_WIDTH);
         let mut vol = self.volume;
-        let changed = ui
-            .slider_config("##volume", 0.0_f32, 1.0_f32)
-            .display_format("")
-            .build(&mut vol);
+        // SAFETY: the closure submits exactly one stock f32 slider with the matching range/value.
+        let changed = unsafe {
+            imgui_painter::decorate_slider_f32(
+                frame,
+                &volume_slider_style,
+                0.0,
+                1.0,
+                &mut vol,
+                |v| {
+                    ui.slider_config("##volume", 0.0_f32, 1.0_f32)
+                        .display_format("")
+                        .build(v)
+                },
+            )
+        };
         let hovered = ui.is_item_hovered();
         let committed = ui.is_item_deactivated_after_edit();
         if changed {
