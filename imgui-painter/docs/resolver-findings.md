@@ -1,4 +1,4 @@
-# Resolver findings from Phase 5
+# Resolver findings from Phases 5 and 8
 
 Phase 5 reused one `Material` across four stock Dear ImGui widgets. Its purpose
 was to collect evidence for Phase 6, not to design a Resolver in advance.
@@ -65,9 +65,76 @@ Using one `StateColors::active` value for all four is useful evidence, not a
 finished semantic model. In particular, a pressed-button color may be unsuitable
 as a persistent InputText focus treatment.
 
-## Phase 6 requirements
+## Phase 8 breadth evidence
 
-Phase 6 must solve only requirements demonstrated here:
+Phase 8 added three anatomy classes while leaving `Material` unchanged:
+
+| Widget | Private anatomy | Stock foreground/behavior retained | Suppressed colors | New pressure |
+|---|---|---|---|---|
+| Slider (`f32`, horizontal, linear) | Frame, thin track, completed fill, reconstructed grab | Grab, formatted value, label, navigation, drag/keyboard/temp-input behavior | `FrameBg*` | Track/fill/grab need separate appearance. Active conflates drag, keyboard adjustment, and temporary input. |
+| Combo (standard preview + arrow) | Frame, preview region, arrow region | Preview text, arrow glyph, label, navigation, popup and selection | `FrameBg*`, `Button*` | Popup-open is persistent state distinct from pressed/focused; arrow region wants its own appearance. |
+| TreeNode (unframed span row) | Row and optional disclosure slot | Arrow, label, indentation, navigation, children and open state | `Header*` | Selected/open/pressed are distinct; leaf rows remove disclosure but may preserve label spacing; icons need a content contract. |
+
+### Slider configuration is duplicated
+
+`decorate_slider_f32` and its stock-widget closure both describe the value,
+range, and slider mode. Dear ImGui exposes no stable post-item metadata carrying
+the submitted range, orientation, or flags. A closure can therefore submit a
+different slider while the decorator reconstructs geometry from its declared
+arguments; the resulting fill may look plausible while being wrong. Matching
+the same value/range and a horizontal linear `f32` Slider remains an explicit
+caller correctness contract, not a structurally enforced guarantee.
+
+### Parent item and token lifecycle are separate stages
+
+`BeginCombo()` switches the current window to its popup before returning an open
+token. Combo parent state is therefore captured after popup completion, when
+`EndCombo()` restores the parent window's backed-up last-item data. The
+decorator owns two explicit stages: transparent parent-frame colors surround
+only `BeginCombo`, then ordinary style colors are restored before caller popup
+contents run. It drops the token, captures the restored parent state, paints
+through the captured parent draw list, and finally merges the parent channels.
+
+An open TreeNode does not switch windows: it establishes indentation/ID state
+and returns its token while the parent item remains current, so its state is
+captured immediately after the stock call and parent channels merge before
+children run. Private RAII guards pop suppressed colors and merge channels
+during unwinding so a panic cannot strand either stack.
+
+### Logical scale is not framebuffer scale
+
+Widget geometry—font/frame height, `GrabMinSize`, item width, and the Slider's
+upstream-fixed 2.0-unit grab padding—lives in Dear ImGui's logical coordinate
+space. Framebuffer scale only converts logical geometry to physical pixels;
+imgui-painter uses it for hairlines and the custom track's two-physical-pixel
+minimum. Tests vary those inputs independently so a crisp raster result cannot
+hide incorrect logical anatomy.
+
+### Style alpha is integration state, not a Material variant
+
+The item decorator multiplies custom fill, border, and shadow alpha by the
+current ImGui style alpha exactly once. `BeginDisabled` therefore dims painter
+chrome consistently with stock text/foreground without pretending `Material`
+has a dedicated disabled semantic. A future part-style model may still need a
+real disabled appearance rather than alpha alone.
+
+### Executable compatibility boundary
+
+Private constants pin anatomy reconstruction to Dear ImGui 1.89.2, imgui-rs
+0.12, and imgui-sys 0.12.0. Tests compare `igGetVersion()` with that pin, while
+independent-build CI compares the freshly resolved imgui-sys package with
+`VERIFIED_IMGUI_SYS`. Updating either dependency requires rerunning Slider
+formula tests, Combo lifecycle, TreeNode leaf/disclosure alignment, and the
+1×/1.5×/2× visual gate.
+
+## Resolver verdict and future requirements
+
+The repeated bracket, geometry validation, and state capture now justify a
+**private anatomy-resolution boundary**. They do not justify a public Resolver:
+the geometry is upstream-version-coupled, and no application/custom-widget
+consumer currently needs to provide or extend anatomy.
+
+A future public part-style model must solve only requirements demonstrated here:
 
 1. Map each widget's anatomy into named parts rather than treating every item as
    one rectangle.
@@ -75,15 +142,17 @@ Phase 6 must solve only requirements demonstrated here:
    frame/text/hint/caret/selection/focus treatment.
 3. Distinguish pressed, focused/editing, selected, checked, mixed, hovered, and
    disabled semantics where a widget actually exposes them.
-4. Make decorator/widget mismatches structurally harder through typed entry
-   points or an equivalent checked API shape.
-5. Define explicit ImGui-version compatibility coverage for reconstructed widget
-   geometry.
+4. Give Slider track/fill/grab, Combo frame/arrow, and Tree row/disclosure/icon
+   distinct appearance without turning `Material` into one universal bag.
+5. Make duplicated widget configuration (especially Slider range/flags and
+   Tree leaf/selected flags) structurally harder to mismatch where possible.
+6. Keep explicit ImGui-version compatibility coverage for every reconstructed
+   part.
 
-This document intentionally defines no Resolver structs, traits, builders, or
-Material expansion. Resolver, typed entry points, checked-state styling,
-focus-ring styling, multiline InputText, Recipe, themes, `PushMaterial`,
-typography, and scope guards remain deferred.
+This document intentionally defines no public Resolver structs, traits,
+builders, or Material expansion. Public Resolver, part styles, checked/focus
+styling, multiline InputText, Combo variants, generic sliders, icons, Recipe,
+themes, `PushMaterial`, and typography remain deferred.
 
 ## Upstream contracts consulted
 

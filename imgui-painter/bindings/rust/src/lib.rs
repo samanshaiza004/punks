@@ -11,8 +11,8 @@ pub mod adapter;
 mod item_paint;
 
 pub use item_paint::{
-    decorate_button, decorate_checkbox, decorate_input_text, decorate_selectable, Material,
-    StateColors,
+    decorate_button, decorate_checkbox, decorate_combo, decorate_input_text, decorate_selectable,
+    decorate_slider_f32, decorate_tree_node, Material, StateColors,
 };
 
 mod ffi {

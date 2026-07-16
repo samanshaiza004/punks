@@ -1,23 +1,55 @@
 //! ImGui-aware item decoration built on the renderer-agnostic painter core.
 //!
-//! The typed decoration entry points bracket a stock ImGui widget: its normal
-//! frame colors are suppressed, its item state is captured, and a decorator paints the
-//! corresponding [`Material`] behind it through a [`crate::Canvas`].
+//! Typed entry points bracket one stock ImGui widget, suppress only the
+//! chrome imgui-painter replaces, and paint behind the widget while ImGui
+//! keeps ownership of layout, input, navigation, text, and popup/tree state.
 
 use imgui_sys as sys;
 
-use crate::{Border, Canvas, Color, Frame, Rect, Shadow, Vec2};
+use crate::{rgba, Border, Canvas, Color, Frame, Rect, Shadow, Vec2};
 
-/// The complete item geometry and interaction state available to a
-/// [`Decorator`]. For multipart widgets this rectangle includes labels and
-/// other non-chrome parts; the decorator resolves its private paint rectangle
-/// separately.
+const ANATOMY_COMPATIBILITY: &str = "Dear ImGui 1.89.2 / imgui-rs 0.12 / imgui-sys 0.12.0";
+const ANATOMY_IMGUI_VERSION: &str = "1.89.2";
+
+const BUTTON_COLS: [sys::ImGuiCol; 3] = [
+    sys::ImGuiCol_Button as _,
+    sys::ImGuiCol_ButtonHovered as _,
+    sys::ImGuiCol_ButtonActive as _,
+];
+const HEADER_COLS: [sys::ImGuiCol; 3] = [
+    sys::ImGuiCol_Header as _,
+    sys::ImGuiCol_HeaderHovered as _,
+    sys::ImGuiCol_HeaderActive as _,
+];
+const FRAME_COLS: [sys::ImGuiCol; 3] = [
+    sys::ImGuiCol_FrameBg as _,
+    sys::ImGuiCol_FrameBgHovered as _,
+    sys::ImGuiCol_FrameBgActive as _,
+];
+const COMBO_COLS: [sys::ImGuiCol; 6] = [
+    sys::ImGuiCol_FrameBg as _,
+    sys::ImGuiCol_FrameBgHovered as _,
+    sys::ImGuiCol_FrameBgActive as _,
+    sys::ImGuiCol_Button as _,
+    sys::ImGuiCol_ButtonHovered as _,
+    sys::ImGuiCol_ButtonActive as _,
+];
+
+const TRANSPARENT: sys::ImVec4 = sys::ImVec4 {
+    x: 0.0,
+    y: 0.0,
+    z: 0.0,
+    w: 0.0,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ItemState {
     min: [f32; 2],
     max: [f32; 2],
     hovered: bool,
     active: bool,
+    focused: bool,
+    style_alpha: f32,
 }
 
 /// Fill colors for the interaction states shared by the current decorators.
@@ -29,7 +61,6 @@ pub struct StateColors {
 }
 
 impl StateColors {
-    /// Resolve the active color first because an active item is also hovered.
     fn for_state(&self, state: &ItemState) -> Color {
         if state.active {
             self.active
@@ -41,12 +72,9 @@ impl StateColors {
     }
 }
 
-/// The deliberately small visual input shared by today's decorators.
-///
-/// This contains only properties every widget could plausibly consume.
-/// Gradients, gloss, typography, overlays, effects, `Resolver`, `Recipe`,
-/// themes, and material scope guards remain deferred until the Phase 5 widget
-/// breadth findings provide concrete requirements for them.
+/// The deliberately small appearance shared by today's typed decorators.
+/// Multipart part styles and semantic states remain deferred until they have
+/// a real public consumer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     pub radius: f32,
@@ -55,105 +83,161 @@ pub struct Material {
     pub shadow: Option<Shadow>,
 }
 
-/// The closed set of stock ImGui widgets whose frame colors can be decorated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decorator {
     Button,
     Selectable,
     Checkbox,
-    /// A single-line InputText. Multiline input owns a child-window rendering
-    /// path and is deliberately outside this decorator's contract.
     InputText,
+    Slider,
+    Combo,
+    Tree,
 }
 
 impl Decorator {
-    fn suppress_cols(&self) -> [sys::ImGuiCol; 3] {
+    fn suppress_cols(self) -> &'static [sys::ImGuiCol] {
         match self {
-            Decorator::Button => [
-                sys::ImGuiCol_Button as _,
-                sys::ImGuiCol_ButtonHovered as _,
-                sys::ImGuiCol_ButtonActive as _,
-            ],
-            Decorator::Selectable => [
-                sys::ImGuiCol_Header as _,
-                sys::ImGuiCol_HeaderHovered as _,
-                sys::ImGuiCol_HeaderActive as _,
-            ],
-            Decorator::Checkbox | Decorator::InputText => [
-                sys::ImGuiCol_FrameBg as _,
-                sys::ImGuiCol_FrameBgHovered as _,
-                sys::ImGuiCol_FrameBgActive as _,
-            ],
+            Self::Button => &BUTTON_COLS,
+            Self::Selectable | Self::Tree => &HEADER_COLS,
+            Self::Checkbox | Self::InputText | Self::Slider => &FRAME_COLS,
+            Self::Combo => &COMBO_COLS,
         }
     }
 
-    /// Capture chrome geometry before ImGui consumes next-item width and
-    /// advances the cursor. Button/Selectable expose their chrome as the full
-    /// post-item rectangle, so they need no pre-capture.
-    ///
-    /// ponytail: these formulas reproduce imgui-sys 0.12's current Checkbox
-    /// and single-line InputText layout conventions through public functions;
-    /// Dear ImGui does not promise stable widget-part geometry. An ImGui bump
-    /// can silently desynchronize them. Upgrade path: rerun the visual gate on
-    /// every bump, then use stable upstream part geometry if it ever exists.
-    unsafe fn capture_chrome_rect(&self) -> Option<Rect> {
+    /// ponytail: these formulas reproduce Dear ImGui 1.89.2 layout through
+    /// public functions, but widget-part geometry is not an upstream contract.
+    /// Upgrade path: the executable compatibility gate and visual gallery must
+    /// be rerun on every imgui/imgui-sys bump.
+    unsafe fn capture_chrome(self) -> Option<Rect> {
         let width = match self {
-            Decorator::Button | Decorator::Selectable => return None,
-            Decorator::Checkbox => sys::igGetFrameHeight(),
-            Decorator::InputText => sys::igCalcItemWidth(),
+            Self::Button | Self::Selectable | Self::Tree => return None,
+            Self::Checkbox => sys::igGetFrameHeight(),
+            Self::InputText | Self::Slider | Self::Combo => sys::igCalcItemWidth(),
         };
         let height = sys::igGetFrameHeight();
         let mut min = sys::ImVec2 { x: 0.0, y: 0.0 };
         sys::igGetCursorScreenPos(&mut min);
-        Some(Rect {
-            min: Vec2 { x: min.x, y: min.y },
-            max: Vec2 {
-                x: min.x + width,
-                y: min.y + height,
-            },
-        })
+        Some(rect(min.x, min.y, min.x + width, min.y + height))
     }
+}
 
-    fn paint_rect(&self, state: &ItemState, captured: Option<Rect>) -> Rect {
+/// Allocation-free, private evidence of the parts the current widgets expose.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WidgetAnatomy {
+    Single {
+        chrome: Rect,
+    },
+    Slider {
+        frame: Rect,
+        track: Rect,
+        fill: Rect,
+        grab: Rect,
+    },
+    Combo {
+        frame: Rect,
+        preview: Rect,
+        arrow: Rect,
+    },
+    Tree {
+        row: Rect,
+        disclosure: Option<Rect>,
+    },
+}
+
+impl WidgetAnatomy {
+    fn chrome(self) -> Rect {
         match self {
-            Decorator::Button | Decorator::Selectable => item_rect(state),
-            Decorator::Checkbox | Decorator::InputText => {
-                captured.expect("multipart decorators capture chrome before drawing")
-            }
+            Self::Single { chrome } => chrome,
+            Self::Slider { track, .. } => track,
+            Self::Combo { frame, .. } => frame,
+            Self::Tree { row, .. } => row,
+        }
+    }
+}
+
+struct StyleColorGuard {
+    count: i32,
+}
+
+impl StyleColorGuard {
+    unsafe fn push(cols: &[sys::ImGuiCol]) -> Self {
+        for &col in cols {
+            sys::igPushStyleColor_Vec4(col, TRANSPARENT);
+        }
+        Self {
+            count: cols.len() as i32,
+        }
+    }
+}
+
+impl Drop for StyleColorGuard {
+    fn drop(&mut self) {
+        if self.count > 0 {
+            unsafe { sys::igPopStyleColor(self.count) };
+            self.count = 0;
+        }
+    }
+}
+
+struct ChannelSplitGuard {
+    draw_list: *mut sys::ImDrawList,
+    active: bool,
+}
+
+impl ChannelSplitGuard {
+    unsafe fn split(draw_list: *mut sys::ImDrawList) -> Self {
+        sys::ImDrawList_ChannelsSplit(draw_list, 3);
+        sys::ImDrawList_ChannelsSetCurrent(draw_list, 1);
+        Self {
+            draw_list,
+            active: true,
         }
     }
 
-    fn paint(&self, material: &Material, state: &ItemState, rect: Rect, canvas: &mut Canvas<'_>) {
-        debug_assert!(rect_is_valid(rect));
-        debug_assert!(rect_contains(item_rect(state), rect));
-        canvas.session.rounded_rect(rect, material.radius);
-        if let Some(shadow) = material.shadow {
-            canvas.session.add_shadow(&shadow);
+    unsafe fn background(&self) {
+        sys::ImDrawList_ChannelsSetCurrent(self.draw_list, 0);
+    }
+
+    unsafe fn merge(mut self) {
+        sys::ImDrawList_ChannelsMerge(self.draw_list);
+        self.active = false;
+    }
+}
+
+impl Drop for ChannelSplitGuard {
+    fn drop(&mut self) {
+        if self.active {
+            unsafe { sys::ImDrawList_ChannelsMerge(self.draw_list) };
+            self.active = false;
         }
-        canvas.session.fill_color(material.fill.for_state(state));
-        canvas.session.add_border(&material.border);
+    }
+}
+
+fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
+    Rect {
+        min: Vec2 { x: x0, y: y0 },
+        max: Vec2 { x: x1, y: y1 },
     }
 }
 
 fn item_rect(state: &ItemState) -> Rect {
-    Rect {
-        min: Vec2 {
-            x: state.min[0],
-            y: state.min[1],
-        },
-        max: Vec2 {
-            x: state.max[0],
-            y: state.max[1],
-        },
-    }
+    rect(state.min[0], state.min[1], state.max[0], state.max[1])
 }
 
-fn rect_is_valid(rect: Rect) -> bool {
-    [rect.min.x, rect.min.y, rect.max.x, rect.max.y]
+fn rect_width(value: Rect) -> f32 {
+    value.max.x - value.min.x
+}
+
+fn rect_height(value: Rect) -> f32 {
+    value.max.y - value.min.y
+}
+
+fn rect_is_valid(value: Rect) -> bool {
+    [value.min.x, value.min.y, value.max.x, value.max.y]
         .into_iter()
         .all(f32::is_finite)
-        && rect.max.x >= rect.min.x
-        && rect.max.y >= rect.min.y
+        && value.max.x >= value.min.x
+        && value.max.y >= value.min.y
 }
 
 fn rect_contains(outer: Rect, inner: Rect) -> bool {
@@ -164,204 +248,490 @@ fn rect_contains(outer: Rect, inner: Rect) -> bool {
         && inner.max.y <= outer.max.y + EPSILON
 }
 
-const TRANSPARENT: sys::ImVec4 = sys::ImVec4 {
-    x: 0.0,
-    y: 0.0,
-    z: 0.0,
-    w: 0.0,
-};
+fn normalized_linear(value: f32, min: f32, max: f32) -> f32 {
+    debug_assert!(value.is_finite() && min.is_finite() && max.is_finite());
+    if !value.is_finite() || !min.is_finite() || !max.is_finite() || min == max {
+        return 0.0;
+    }
+    ((value - min) / (max - min)).clamp(0.0, 1.0)
+}
 
-/// Decorate one stock ImGui Button while preserving its layout, input handling,
-/// text, and return value.
-///
-/// Active-slot semantics — what the widget maps into `StateColors::active`:
-///
-/// Button.active = pressed/held
-///
-/// Ownership — painted chrome vs ImGui-owned foreground (never styled, no ownership claimed):
-///
-/// Button: paints the complete item rectangle. ImGui owns: label text, navigation highlight.
+fn slider_anatomy(
+    frame: Rect,
+    min: f32,
+    max: f32,
+    value: f32,
+    grab_min_size: f32,
+    framebuffer_scale: f32,
+) -> WidgetAnatomy {
+    const GRAB_PADDING: f32 = 2.0;
+    let frame_width = rect_width(frame).max(0.0);
+    let frame_height = rect_height(frame).max(0.0);
+    let slider_size = (frame_width - GRAB_PADDING * 2.0).max(0.0);
+    let grab_size = grab_min_size.max(0.0).min(slider_size);
+    let usable_size = (slider_size - grab_size).max(0.0);
+    let usable_min = frame.min.x + GRAB_PADDING + grab_size * 0.5;
+    let grab_center = usable_min + usable_size * normalized_linear(value, min, max);
+    let grab = rect(
+        grab_center - grab_size * 0.5,
+        (frame.min.y + GRAB_PADDING).min(frame.max.y),
+        grab_center + grab_size * 0.5,
+        (frame.max.y - GRAB_PADDING).max(frame.min.y),
+    );
+
+    let device_pixel = if framebuffer_scale.is_finite() && framebuffer_scale > 0.0 {
+        1.0 / framebuffer_scale
+    } else {
+        1.0
+    };
+    let track_height = (frame_height * 0.25)
+        .max(device_pixel * 2.0)
+        .min(frame_height);
+    let track_y = (frame.min.y + frame.max.y) * 0.5;
+    let track = rect(
+        (frame.min.x + GRAB_PADDING).min(frame.max.x),
+        track_y - track_height * 0.5,
+        (frame.max.x - GRAB_PADDING).max(frame.min.x),
+        track_y + track_height * 0.5,
+    );
+    let fill = rect(
+        track.min.x,
+        track.min.y,
+        grab_center.clamp(track.min.x, track.max.x),
+        track.max.y,
+    );
+
+    WidgetAnatomy::Slider {
+        frame,
+        track,
+        fill,
+        grab,
+    }
+}
+
+fn combo_anatomy(frame: Rect) -> WidgetAnatomy {
+    let arrow_width = rect_height(frame).max(0.0).min(rect_width(frame).max(0.0));
+    let split = frame.max.x - arrow_width;
+    WidgetAnatomy::Combo {
+        frame,
+        preview: rect(frame.min.x, frame.min.y, split, frame.max.y),
+        arrow: rect(split, frame.min.y, frame.max.x, frame.max.y),
+    }
+}
+
+fn tree_anatomy(row: Rect, leaf: bool, disclosure_width: f32) -> WidgetAnatomy {
+    let disclosure = (!leaf).then(|| {
+        rect(
+            row.min.x,
+            row.min.y,
+            (row.min.x + disclosure_width.max(0.0)).min(row.max.x),
+            row.max.y,
+        )
+    });
+    WidgetAnatomy::Tree { row, disclosure }
+}
+
+fn alpha_u8(color: Color) -> u8 {
+    (color >> 24) as u8
+}
+
+fn with_style_alpha(color: Color, style_alpha: f32) -> Color {
+    let alpha = style_alpha.clamp(0.0, 1.0);
+    let resolved = ((alpha_u8(color) as f32 * alpha).round() as u8) as u32;
+    (color & 0x00ff_ffff) | (resolved << 24)
+}
+
+fn color_from_imgui(value: sys::ImVec4, style_alpha: f32) -> Color {
+    let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+    rgba(
+        byte(value.x),
+        byte(value.y),
+        byte(value.z),
+        byte(value.w * style_alpha.clamp(0.0, 1.0)),
+    )
+}
+
+fn resolved_border(border: Border, alpha: f32) -> Border {
+    Border {
+        color: with_style_alpha(border.color, alpha),
+        ..border
+    }
+}
+
+fn resolved_shadow(shadow: Shadow, alpha: f32) -> Shadow {
+    Shadow {
+        color: with_style_alpha(shadow.color, alpha),
+        ..shadow
+    }
+}
+
+fn paint_material(canvas: &mut Canvas<'_>, rect: Rect, material: &Material, state: &ItemState) {
+    debug_assert!(rect_is_valid(rect));
+    canvas.rounded_rect(rect, material.radius.min(rect_height(rect) * 0.5));
+    if let Some(shadow) = material.shadow {
+        canvas.add_shadow(&resolved_shadow(shadow, state.style_alpha));
+    }
+    canvas.fill_color(with_style_alpha(
+        material.fill.for_state(state),
+        state.style_alpha,
+    ));
+    canvas.add_border(&resolved_border(material.border, state.style_alpha));
+}
+
+fn paint_slider(
+    canvas: &mut Canvas<'_>,
+    anatomy: WidgetAnatomy,
+    material: &Material,
+    state: &ItemState,
+    neutral_track: Color,
+) {
+    let WidgetAnatomy::Slider { track, fill, .. } = anatomy else {
+        unreachable!("slider painter requires slider anatomy")
+    };
+    let radius = material.radius.min(rect_height(track) * 0.5);
+    canvas.rounded_rect(track, radius);
+    if let Some(shadow) = material.shadow {
+        canvas.add_shadow(&resolved_shadow(shadow, state.style_alpha));
+    }
+    canvas.fill_color(neutral_track);
+    if rect_width(fill) > 0.0 {
+        canvas.rounded_rect(fill, radius.min(rect_width(fill) * 0.5));
+        canvas.fill_color(with_style_alpha(
+            material.fill.for_state(state),
+            state.style_alpha,
+        ));
+    }
+    canvas.rounded_rect(track, radius);
+    canvas.add_border(&resolved_border(material.border, state.style_alpha));
+}
+
+unsafe fn capture_item_state() -> ItemState {
+    let mut min = sys::ImVec2 { x: 0.0, y: 0.0 };
+    let mut max = sys::ImVec2 { x: 0.0, y: 0.0 };
+    sys::igGetItemRectMin(&mut min);
+    sys::igGetItemRectMax(&mut max);
+    let style = &*sys::igGetStyle();
+    ItemState {
+        min: [min.x, min.y],
+        max: [max.x, max.y],
+        hovered: sys::igIsItemHovered(0),
+        active: sys::igIsItemActive(),
+        focused: sys::igIsItemFocused(),
+        style_alpha: style.Alpha,
+    }
+}
+
+unsafe fn item_paint<R>(
+    frame: &mut Frame<'_>,
+    decorator: Decorator,
+    widget: impl FnOnce() -> R,
+    paint: impl FnOnce(&R, &ItemState, Option<Rect>, &mut Canvas<'_>),
+) -> R {
+    debug_assert_eq!(
+        std::ffi::CStr::from_ptr(sys::igGetVersion()).to_str().ok(),
+        Some(ANATOMY_IMGUI_VERSION),
+        "{ANATOMY_COMPATIBILITY}"
+    );
+    let draw_list = sys::igGetWindowDrawList();
+    let captured = decorator.capture_chrome();
+    let channels = ChannelSplitGuard::split(draw_list);
+    let colors = StyleColorGuard::push(decorator.suppress_cols());
+
+    let result = widget();
+    let state = capture_item_state();
+    drop(colors);
+
+    channels.background();
+    {
+        let mut canvas = frame.canvas(draw_list);
+        paint(&result, &state, captured, &mut canvas);
+    }
+    channels.merge();
+    result
+}
+
+fn single_anatomy(
+    decorator: Decorator,
+    state: &ItemState,
+    captured: Option<Rect>,
+) -> WidgetAnatomy {
+    let chrome = match decorator {
+        Decorator::Button | Decorator::Selectable => item_rect(state),
+        Decorator::Checkbox | Decorator::InputText => {
+            captured.expect("multipart decorator captured chrome before submission")
+        }
+        _ => unreachable!("new multipart decorators resolve their own anatomy"),
+    };
+    debug_assert!(rect_is_valid(chrome));
+    debug_assert!(rect_contains(item_rect(state), chrome));
+    WidgetAnatomy::Single { chrome }
+}
+
+/// Decorate one stock ImGui Button while preserving its behavior and text.
 ///
 /// # Safety
-///
-/// Must be called inside a live ImGui window on the context-owning thread; the
-/// current window draw list must be valid and not already inside an ImGui channel
-/// split; `frame` must belong to the current ImGui frame.
+/// A live current ImGui context/window/frame and unsplit current draw list are
+/// required on the context-owning thread.
 ///
 /// # Correctness
-///
-/// The closure must emit exactly one stock widget of the matching kind (exactly
-/// one `ui.button(..)` for `decorate_button`). Typed entry points remove explicit
-/// decorator-selection mismatch from normal use and make misuse obvious, while
-/// the closure still has a documented correctness contract requiring exactly one
-/// matching stock widget.
-/// A mismatched closure (e.g. `decorate_checkbox(.., || ui.button("Wrong"))`) still
-/// compiles; it is rendering-incorrect, not memory-unsafe.
+/// The closure must submit exactly one stock Button. A mismatch produces wrong
+/// pixels rather than memory unsafety.
 pub unsafe fn decorate_button(
     frame: &mut Frame<'_>,
     material: &Material,
     widget: impl FnOnce() -> bool,
 ) -> bool {
-    item_paint(frame, Decorator::Button, material, widget)
+    item_paint(
+        frame,
+        Decorator::Button,
+        widget,
+        |_, state, captured, canvas| {
+            let anatomy = single_anatomy(Decorator::Button, state, captured);
+            paint_material(canvas, anatomy.chrome(), material, state);
+        },
+    )
 }
 
-/// Decorate one stock ImGui Selectable while preserving its layout, input
-/// handling, text, and return value.
-///
-/// Active-slot semantics — what the widget maps into `StateColors::active`:
-///
-/// Selectable.active = activation state (interaction-driven, not persistent selection)
-///
-/// Ownership — painted chrome vs ImGui-owned foreground (never styled, no ownership claimed):
-///
-/// Selectable: paints the complete item rectangle (row). ImGui owns: label text, navigation highlight.
+/// Decorate one stock ImGui Selectable while preserving its behavior and text.
 ///
 /// # Safety
-///
-/// Must be called inside a live ImGui window on the context-owning thread; the
-/// current window draw list must be valid and not already inside an ImGui channel
-/// split; `frame` must belong to the current ImGui frame.
+/// A live current ImGui context/window/frame and unsplit current draw list are required.
 ///
 /// # Correctness
-///
-/// The closure must emit exactly one stock widget of the matching kind (exactly
-/// one `ui.selectable(..)` for `decorate_selectable`). Typed entry points remove
-/// explicit decorator-selection mismatch from normal use and make misuse obvious,
-/// while the closure still has a documented correctness contract requiring exactly
-/// one matching stock widget.
-/// A mismatched closure (e.g. `decorate_checkbox(.., || ui.button("Wrong"))`) still
-/// compiles; it is rendering-incorrect, not memory-unsafe.
+/// The closure must submit exactly one stock Selectable.
 pub unsafe fn decorate_selectable(
     frame: &mut Frame<'_>,
     material: &Material,
     widget: impl FnOnce() -> bool,
 ) -> bool {
-    item_paint(frame, Decorator::Selectable, material, widget)
+    item_paint(
+        frame,
+        Decorator::Selectable,
+        widget,
+        |_, state, captured, canvas| {
+            let anatomy = single_anatomy(Decorator::Selectable, state, captured);
+            paint_material(canvas, anatomy.chrome(), material, state);
+        },
+    )
 }
 
-/// Decorate one stock ImGui Checkbox while preserving its layout, input
-/// handling, foreground, and return value.
-///
-/// Active-slot semantics — what the widget maps into `StateColors::active`:
-///
-/// Checkbox.active = pressed/held (checked/mixed are separate states, not styled in Phase 6)
-///
-/// Ownership — painted chrome vs ImGui-owned foreground (never styled, no ownership claimed):
-///
-/// Checkbox: paints the frame-height box only (label excluded). ImGui owns: checkmark, mixed indicator, label text, navigation highlight.
+/// Decorate one stock ImGui Checkbox, painting only its box.
 ///
 /// # Safety
-///
-/// Must be called inside a live ImGui window on the context-owning thread; the
-/// current window draw list must be valid and not already inside an ImGui channel
-/// split; `frame` must belong to the current ImGui frame.
+/// A live current ImGui context/window/frame and unsplit current draw list are required.
 ///
 /// # Correctness
-///
-/// The closure must emit exactly one stock widget of the matching kind (exactly
-/// one `ui.checkbox(..)` for `decorate_checkbox`). Typed entry points remove
-/// explicit decorator-selection mismatch from normal use and make misuse obvious,
-/// while the closure still has a documented correctness contract requiring exactly
-/// one matching stock widget.
-/// A mismatched closure (e.g. `decorate_checkbox(.., || ui.button("Wrong"))`) still
-/// compiles; it is rendering-incorrect, not memory-unsafe.
+/// The closure must submit exactly one stock Checkbox.
 pub unsafe fn decorate_checkbox(
     frame: &mut Frame<'_>,
     material: &Material,
     widget: impl FnOnce() -> bool,
 ) -> bool {
-    item_paint(frame, Decorator::Checkbox, material, widget)
+    item_paint(
+        frame,
+        Decorator::Checkbox,
+        widget,
+        |_, state, captured, canvas| {
+            let anatomy = single_anatomy(Decorator::Checkbox, state, captured);
+            paint_material(canvas, anatomy.chrome(), material, state);
+        },
+    )
 }
 
-/// Decorate one stock single-line ImGui InputText while preserving its layout,
-/// input handling, foreground, and return value.
-///
-/// Active-slot semantics — what the widget maps into `StateColors::active`:
-///
-/// InputText.active = focused/editing and may persist across frames — choose this color knowing it can be long-lived, not a momentary flash
-///
-/// Ownership — painted chrome vs ImGui-owned foreground (never styled, no ownership claimed):
-///
-/// InputText: paints the CalcItemWidth × frame-height frame only (visible label excluded). ImGui owns: text, hint, selection highlight, caret, clipping, navigation highlight.
+/// Decorate one stock single-line ImGui InputText, excluding its visible label.
 ///
 /// # Safety
-///
-/// Must be called inside a live ImGui window on the context-owning thread; the
-/// current window draw list must be valid and not already inside an ImGui channel
-/// split; `frame` must belong to the current ImGui frame.
+/// A live current ImGui context/window/frame and unsplit current draw list are required.
 ///
 /// # Correctness
-///
-/// The closure must emit exactly one stock widget of the matching kind (exactly
-/// one `ui.input_text(..)` for `decorate_input_text`). Typed entry points remove
-/// explicit decorator-selection mismatch from normal use and make misuse obvious,
-/// while the closure still has a documented correctness contract requiring exactly
-/// one matching stock widget.
-/// A mismatched closure (e.g. `decorate_checkbox(.., || ui.button("Wrong"))`) still
-/// compiles; it is rendering-incorrect, not memory-unsafe. Single-line InputText
-/// only; multiline owns a child-window rendering path outside this contract.
+/// The closure must submit exactly one single-line InputText.
 pub unsafe fn decorate_input_text(
     frame: &mut Frame<'_>,
     material: &Material,
     widget: impl FnOnce() -> bool,
 ) -> bool {
-    item_paint(frame, Decorator::InputText, material, widget)
+    item_paint(
+        frame,
+        Decorator::InputText,
+        widget,
+        |_, state, captured, canvas| {
+            let anatomy = single_anatomy(Decorator::InputText, state, captured);
+            paint_material(canvas, anatomy.chrome(), material, state);
+        },
+    )
 }
 
-unsafe fn item_paint(
+/// Decorate one horizontal, linear stock ImGui `f32` Slider.
+///
+/// # Safety
+/// A live current ImGui context/window/frame and unsplit current draw list are required.
+///
+/// # Correctness
+/// The closure must submit exactly one horizontal linear `f32` Slider using
+/// this same `value`, `min`, and `max`. Dear ImGui exposes no stable post-item
+/// metadata for checking the submitted range or flags, so a mismatch can
+/// produce plausible but incorrect fill geometry.
+pub unsafe fn decorate_slider_f32(
     frame: &mut Frame<'_>,
-    decorator: Decorator,
     material: &Material,
-    widget: impl FnOnce() -> bool,
+    min: f32,
+    max: f32,
+    value: &mut f32,
+    widget: impl FnOnce(&mut f32) -> bool,
 ) -> bool {
+    let (changed, _) = item_paint(
+        frame,
+        Decorator::Slider,
+        || {
+            let changed = widget(value);
+            (changed, *value)
+        },
+        |(_, post_value), state, captured, canvas| {
+            let frame_rect = captured.expect("slider frame captured before submission");
+            let style = &*sys::igGetStyle();
+            let io = &*sys::igGetIO();
+            let anatomy = slider_anatomy(
+                frame_rect,
+                min,
+                max,
+                *post_value,
+                style.GrabMinSize,
+                io.DisplayFramebufferScale.x,
+            );
+            debug_assert!(
+                rect_contains(item_rect(state), frame_rect),
+                "Slider frame {frame_rect:?} must be contained by item {:?}",
+                item_rect(state)
+            );
+            let frame_col = if state.active {
+                sys::ImGuiCol_FrameBgActive as _
+            } else if state.hovered {
+                sys::ImGuiCol_FrameBgHovered as _
+            } else {
+                sys::ImGuiCol_FrameBg as _
+            };
+            let neutral = color_from_imgui(*sys::igGetStyleColorVec4(frame_col), state.style_alpha);
+            paint_slider(canvas, anatomy, material, state, neutral);
+        },
+    );
+    changed
+}
+
+/// Decorate one standard preview-and-arrow Combo and its popup contents.
+///
+/// Suppressed parent-frame colors are restored before `contents` runs. The
+/// Combo token remains alive for that closure, then is dropped internally so
+/// Dear ImGui restores the parent window and last-item state before painting.
+///
+/// # Safety
+/// A live current ImGui context/window/frame and unsplit parent draw list are required.
+///
+/// # Correctness
+/// The closure must submit exactly one standard Combo. No-preview, no-arrow,
+/// and custom-preview variants are outside this prototype.
+pub unsafe fn decorate_combo<R, T>(
+    frame: &mut Frame<'_>,
+    material: &Material,
+    begin: impl FnOnce() -> Option<R>,
+    contents: impl FnOnce(&R) -> T,
+) -> Option<T> {
+    debug_assert_eq!(
+        std::ffi::CStr::from_ptr(sys::igGetVersion()).to_str().ok(),
+        Some(ANATOMY_IMGUI_VERSION),
+        "{ANATOMY_COMPATIBILITY}"
+    );
     let draw_list = sys::igGetWindowDrawList();
-    let captured_rect = decorator.capture_chrome_rect();
-    sys::ImDrawList_ChannelsSplit(draw_list, 3);
-    sys::ImDrawList_ChannelsSetCurrent(draw_list, 1);
+    let frame_rect = Decorator::Combo
+        .capture_chrome()
+        .expect("combo frame captured before submission");
+    let channels = ChannelSplitGuard::split(draw_list);
+    let colors = StyleColorGuard::push(Decorator::Combo.suppress_cols());
 
-    for col in decorator.suppress_cols() {
-        sys::igPushStyleColor_Vec4(col, TRANSPARENT);
-    }
-    let result = widget();
-    sys::igPopStyleColor(3);
+    let token = begin();
+    drop(colors);
+    let popup_open = token.is_some();
+    let result = token.as_ref().map(contents);
+    drop(token);
 
-    let mut min = sys::ImVec2 { x: 0.0, y: 0.0 };
-    let mut max = sys::ImVec2 { x: 0.0, y: 0.0 };
-    sys::igGetItemRectMin(&mut min);
-    sys::igGetItemRectMax(&mut max);
-    let state = ItemState {
-        min: [min.x, min.y],
-        max: [max.x, max.y],
-        hovered: sys::igIsItemHovered(0),
-        active: sys::igIsItemActive(),
-    };
-    let paint_rect = decorator.paint_rect(&state, captured_rect);
+    // EndCombo restores the parent window and its backed-up LastItemData.
+    let state = capture_item_state();
+    debug_assert!(
+        rect_contains(item_rect(&state), frame_rect),
+        "Combo frame {frame_rect:?} must be contained by item {:?}",
+        item_rect(&state)
+    );
+    let anatomy = combo_anatomy(frame_rect);
+    let mut semantic = state;
+    semantic.active |= popup_open;
 
-    sys::ImDrawList_ChannelsSetCurrent(draw_list, 0);
+    channels.background();
     {
         let mut canvas = frame.canvas(draw_list);
-        decorator.paint(material, &state, paint_rect, &mut canvas);
+        paint_material(&mut canvas, anatomy.chrome(), material, &semantic);
     }
-    sys::ImDrawList_ChannelsMerge(draw_list);
-
+    channels.merge();
     result
+}
+
+/// Decorate one unframed, span-available-width stock TreeNode row.
+/// Parent channels are merged before children are drawn through the token.
+///
+/// # Safety
+/// A live current ImGui context/window/frame and unsplit current draw list are required.
+///
+/// # Correctness
+/// The closure must submit exactly one matching TreeNode. `selected` and `leaf`
+/// must match its flags; non-leaves must use `SPAN_AVAIL_WIDTH | OPEN_ON_ARROW`,
+/// while leaves must also use `LEAF | NO_TREE_PUSH_ON_OPEN`.
+pub unsafe fn decorate_tree_node<R>(
+    frame: &mut Frame<'_>,
+    material: &Material,
+    selected: bool,
+    leaf: bool,
+    widget: impl FnOnce() -> Option<R>,
+) -> Option<R> {
+    item_paint(
+        frame,
+        Decorator::Tree,
+        widget,
+        |result, state, _, canvas| {
+            let anatomy = tree_anatomy(item_rect(state), leaf, sys::igGetTreeNodeToLabelSpacing());
+            let mut semantic = *state;
+            semantic.active |= selected;
+            let _open = result.is_some();
+            paint_material(canvas, anatomy.chrome(), material, &semantic);
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CStr;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::Mutex;
 
-    const BASE: Color = 1;
-    const HOVER: Color = 2;
-    const ACTIVE: Color = 3;
+    const BASE: Color = 0x4000_0001;
+    const HOVER: Color = 0x8000_0002;
+    const ACTIVE: Color = 0xff00_0003;
+    static IMGUI_CONTEXT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn state(hovered: bool, active: bool) -> ItemState {
         ItemState {
             min: [0.0, 0.0],
-            max: [10.0, 10.0],
+            max: [100.0, 20.0],
             hovered,
             active,
+            focused: false,
+            style_alpha: 1.0,
         }
+    }
+
+    #[test]
+    fn bundled_imgui_matches_anatomy_compatibility() {
+        let actual = unsafe { CStr::from_ptr(sys::igGetVersion()) };
+        assert_eq!(actual.to_str().unwrap(), ANATOMY_IMGUI_VERSION);
+        assert!(ANATOMY_COMPATIBILITY.contains(ANATOMY_IMGUI_VERSION));
     }
 
     #[test]
@@ -371,107 +741,241 @@ mod tests {
             hover: HOVER,
             active: ACTIVE,
         };
-
         assert_eq!(colors.for_state(&state(false, false)), BASE);
         assert_eq!(colors.for_state(&state(true, false)), HOVER);
         assert_eq!(colors.for_state(&state(true, true)), ACTIVE);
     }
 
     #[test]
-    fn button_and_selectable_paint_the_complete_item() {
-        let state = ItemState {
-            min: [2.0, 3.0],
-            max: [42.0, 23.0],
-            hovered: false,
-            active: false,
+    fn slider_anatomy_handles_min_mid_max_reversed_and_degenerate_ranges() {
+        let frame = rect(0.0, 0.0, 100.0, 20.0);
+        let center = |anatomy| match anatomy {
+            WidgetAnatomy::Slider { grab, .. } => (grab.min.x + grab.max.x) * 0.5,
+            _ => unreachable!(),
         };
-        let expected = item_rect(&state);
-
-        assert_eq!(Decorator::Button.paint_rect(&state, None), expected);
-        assert_eq!(Decorator::Selectable.paint_rect(&state, None), expected);
-    }
-
-    #[test]
-    fn multipart_decorators_paint_only_the_captured_chrome() {
-        let state = ItemState {
-            min: [2.0, 3.0],
-            max: [142.0, 23.0],
-            hovered: false,
-            active: false,
-        };
-        let checkbox = Rect {
-            min: Vec2 { x: 2.0, y: 3.0 },
-            max: Vec2 { x: 22.0, y: 23.0 },
-        };
-        let input = Rect {
-            min: Vec2 { x: 2.0, y: 3.0 },
-            max: Vec2 { x: 102.0, y: 23.0 },
-        };
-
+        assert!(center(slider_anatomy(frame, 0.0, 1.0, 0.0, 10.0, 1.0)) < 10.0);
         assert_eq!(
-            Decorator::Checkbox.paint_rect(&state, Some(checkbox)),
-            checkbox
+            center(slider_anatomy(frame, 0.0, 1.0, 0.5, 10.0, 1.0)),
+            50.0
         );
-        assert_eq!(Decorator::InputText.paint_rect(&state, Some(input)), input);
+        assert!(center(slider_anatomy(frame, 0.0, 1.0, 1.0, 10.0, 1.0)) > 90.0);
+        assert!(center(slider_anatomy(frame, 1.0, 0.0, 1.0, 10.0, 1.0)) < 10.0);
+        assert!(center(slider_anatomy(frame, 1.0, 1.0, 1.0, 10.0, 1.0)).is_finite());
     }
 
     #[test]
-    fn geometry_validation_rejects_invalid_or_outside_rects() {
-        let outer = Rect {
-            min: Vec2 { x: 2.0, y: 3.0 },
-            max: Vec2 { x: 102.0, y: 23.0 },
+    fn slider_anatomy_scales_with_logical_style_metrics() {
+        let base = slider_anatomy(rect(0.0, 0.0, 100.0, 20.0), 0.0, 1.0, 0.5, 10.0, 1.0);
+        let scaled = slider_anatomy(rect(0.0, 0.0, 200.0, 40.0), 0.0, 1.0, 0.5, 20.0, 1.0);
+        let (base_grab, scaled_grab) = match (base, scaled) {
+            (WidgetAnatomy::Slider { grab: a, .. }, WidgetAnatomy::Slider { grab: b, .. }) => {
+                (a, b)
+            }
+            _ => unreachable!(),
         };
-        let inside = Rect {
-            min: Vec2 { x: 2.0, y: 3.0 },
-            max: Vec2 { x: 22.0, y: 23.0 },
-        };
-        let outside = Rect {
-            min: Vec2 { x: 2.0, y: 3.0 },
-            max: Vec2 { x: 122.0, y: 23.0 },
-        };
-        let inverted = Rect {
-            min: Vec2 { x: 5.0, y: 3.0 },
-            max: Vec2 { x: 4.0, y: 23.0 },
-        };
-        let non_finite = Rect {
-            min: Vec2 {
-                x: f32::NAN,
-                y: 3.0,
-            },
-            max: Vec2 { x: 22.0, y: 23.0 },
-        };
+        assert_eq!(rect_width(scaled_grab), rect_width(base_grab) * 2.0);
+        assert_eq!((scaled_grab.min.x + scaled_grab.max.x) * 0.5, 100.0);
+    }
 
-        assert!(rect_is_valid(inside));
-        assert!(rect_contains(outer, inside));
-        assert!(!rect_contains(outer, outside));
-        assert!(!rect_is_valid(inverted));
-        assert!(!rect_is_valid(non_finite));
+    #[test]
+    fn slider_grab_padding_ignores_framebuffer_scale() {
+        let frame = rect(0.0, 0.0, 100.0, 20.0);
+        let grab = |scale| match slider_anatomy(frame, 0.0, 1.0, 0.0, 10.0, scale) {
+            WidgetAnatomy::Slider { grab, .. } => grab,
+            _ => unreachable!(),
+        };
+        assert_eq!(grab(1.0), grab(1.5));
+        assert_eq!(grab(1.0), grab(2.0));
+    }
+
+    #[test]
+    fn slider_track_minimum_uses_framebuffer_scale_only() {
+        let frame = rect(0.0, 0.0, 100.0, 4.0);
+        let height = |scale| match slider_anatomy(frame, 0.0, 1.0, 0.5, 2.0, scale) {
+            WidgetAnatomy::Slider { track, .. } => rect_height(track),
+            _ => unreachable!(),
+        };
+        assert_eq!(height(1.0), 2.0);
+        assert!((height(2.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn combo_and_tree_anatomy_partition_without_escaping_the_item() {
+        let frame = rect(2.0, 3.0, 102.0, 23.0);
+        match combo_anatomy(frame) {
+            WidgetAnatomy::Combo { preview, arrow, .. } => {
+                assert_eq!(preview.max.x, arrow.min.x);
+                assert_eq!(rect_width(arrow), 20.0);
+                assert!(rect_contains(frame, preview));
+                assert!(rect_contains(frame, arrow));
+            }
+            _ => unreachable!(),
+        }
+        match tree_anatomy(frame, false, 18.0) {
+            WidgetAnatomy::Tree {
+                disclosure: Some(disclosure),
+                ..
+            } => assert!(rect_contains(frame, disclosure)),
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            tree_anatomy(frame, true, 18.0),
+            WidgetAnatomy::Tree {
+                disclosure: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn style_alpha_is_applied_once_and_clamped() {
+        let color = rgba(1, 2, 3, 200);
+        assert_eq!(alpha_u8(with_style_alpha(color, 1.0)), 200);
+        assert_eq!(alpha_u8(with_style_alpha(color, 0.5)), 100);
+        assert_eq!(alpha_u8(with_style_alpha(color, 0.25)), 50);
+        assert_eq!(alpha_u8(with_style_alpha(color, 0.0)), 0);
+        assert_eq!(alpha_u8(with_style_alpha(color, 2.0)), 200);
     }
 
     #[test]
     fn decorators_suppress_the_expected_color_families() {
-        assert_eq!(
-            Decorator::Button.suppress_cols(),
-            [
-                sys::ImGuiCol_Button as _,
-                sys::ImGuiCol_ButtonHovered as _,
-                sys::ImGuiCol_ButtonActive as _,
-            ]
+        assert_eq!(Decorator::Button.suppress_cols(), BUTTON_COLS);
+        assert_eq!(Decorator::Selectable.suppress_cols(), HEADER_COLS);
+        assert_eq!(Decorator::Checkbox.suppress_cols(), FRAME_COLS);
+        assert_eq!(Decorator::InputText.suppress_cols(), FRAME_COLS);
+        assert_eq!(Decorator::Slider.suppress_cols(), FRAME_COLS);
+        assert_eq!(Decorator::Combo.suppress_cols(), COMBO_COLS);
+        assert_eq!(Decorator::Tree.suppress_cols(), HEADER_COLS);
+    }
+
+    #[test]
+    fn finite_contained_geometry_guards_still_reject_bad_rects() {
+        let outer = rect(0.0, 0.0, 100.0, 20.0);
+        assert!(rect_is_valid(outer));
+        assert!(rect_contains(outer, rect(2.0, 2.0, 20.0, 18.0)));
+        assert!(!rect_contains(outer, rect(2.0, 2.0, 120.0, 18.0)));
+        assert!(!rect_is_valid(rect(f32::NAN, 0.0, 10.0, 10.0)));
+        assert!(!rect_is_valid(rect(10.0, 0.0, 5.0, 10.0)));
+    }
+
+    #[test]
+    fn panic_restores_style_colors_and_draw_channels() {
+        let _context_lock = IMGUI_CONTEXT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut context = imgui::Context::create();
+        context.set_ini_filename(None);
+        context.io_mut().display_size = [640.0, 480.0];
+        context.io_mut().delta_time = 1.0 / 60.0;
+        context.fonts().build_rgba32_texture();
+
+        let mut painter = crate::Painter::new();
+        let ui = context.frame();
+        let mut frame = painter.begin_frame();
+        let material = Material {
+            radius: 2.0,
+            fill: StateColors {
+                base: rgba(20, 30, 40, 255),
+                hover: rgba(30, 40, 50, 255),
+                active: rgba(40, 50, 60, 255),
+            },
+            border: Border {
+                thickness: 1.0,
+                color: rgba(255, 255, 255, 30),
+            },
+            shadow: None,
+        };
+
+        ui.window("panic cleanup").build(|| {
+            let before = unsafe { *sys::igGetStyleColorVec4(sys::ImGuiCol_Button as _) };
+            let panicked = catch_unwind(AssertUnwindSafe(|| unsafe {
+                decorate_button(&mut frame, &material, || {
+                    ui.button("panic");
+                    panic!("intentional item-paint unwind")
+                })
+            }));
+            assert!(panicked.is_err());
+            let after = unsafe { *sys::igGetStyleColorVec4(sys::ImGuiCol_Button as _) };
+            assert_eq!(before.x, after.x);
+            assert_eq!(before.y, after.y);
+            assert_eq!(before.z, after.z);
+            assert_eq!(before.w, after.w);
+
+            // A second split on the same draw list exercises the channel
+            // guard: Dear ImGui asserts if the prior split was stranded.
+            unsafe {
+                decorate_button(&mut frame, &material, || ui.button("after panic"));
+            }
+        });
+        drop(frame);
+        context.render();
+    }
+
+    #[test]
+    fn combo_restores_parent_colors_before_popup_contents() {
+        let _context_lock = IMGUI_CONTEXT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut context = imgui::Context::create();
+        context.set_ini_filename(None);
+        context.io_mut().display_size = [640.0, 480.0];
+        context.io_mut().delta_time = 1.0 / 60.0;
+        context.fonts().build_rgba32_texture();
+
+        let material = Material {
+            radius: 2.0,
+            fill: StateColors {
+                base: rgba(20, 30, 40, 255),
+                hover: rgba(30, 40, 50, 255),
+                active: rgba(40, 50, 60, 255),
+            },
+            border: Border {
+                thickness: 1.0,
+                color: rgba(255, 255, 255, 30),
+            },
+            shadow: None,
+        };
+        let button_color = unsafe { *sys::igGetStyleColorVec4(sys::ImGuiCol_Button as _) };
+        let mut painter = crate::Painter::new();
+        let mut popup_contents_ran = false;
+
+        // Default ButtonBehavior opens on release. Three frames establish an
+        // up -> down -> up transition over the fixed Combo frame.
+        for mouse_down in [false, true, false] {
+            context.io_mut().mouse_pos = [40.0, 18.0];
+            context.io_mut().mouse_down[0] = mouse_down;
+            let ui = context.frame();
+            let mut frame = painter.begin_frame();
+            ui.window("combo lifecycle")
+                .position([0.0, 0.0], imgui::Condition::Always)
+                .size([400.0, 200.0], imgui::Condition::Always)
+                .title_bar(false)
+                .movable(false)
+                .build(|| unsafe {
+                    decorate_combo(
+                        &mut frame,
+                        &material,
+                        || ui.begin_combo("Mode", "Classic"),
+                        |_token| {
+                            popup_contents_ran = true;
+                            let current = *sys::igGetStyleColorVec4(sys::ImGuiCol_Button as _);
+                            assert_eq!(current.x, button_color.x);
+                            assert_eq!(current.y, button_color.y);
+                            assert_eq!(current.z, button_color.z);
+                            assert_eq!(current.w, button_color.w);
+                            ui.button("Popup button");
+                            let mut input = String::new();
+                            ui.input_text("Popup input", &mut input).build();
+                        },
+                    );
+                });
+            drop(frame);
+            context.render();
+        }
+
+        assert!(
+            popup_contents_ran,
+            "the simulated click must open the Combo"
         );
-        assert_eq!(
-            Decorator::Selectable.suppress_cols(),
-            [
-                sys::ImGuiCol_Header as _,
-                sys::ImGuiCol_HeaderHovered as _,
-                sys::ImGuiCol_HeaderActive as _,
-            ]
-        );
-        let frame = [
-            sys::ImGuiCol_FrameBg as _,
-            sys::ImGuiCol_FrameBgHovered as _,
-            sys::ImGuiCol_FrameBgActive as _,
-        ];
-        assert_eq!(Decorator::Checkbox.suppress_cols(), frame);
-        assert_eq!(Decorator::InputText.suppress_cols(), frame);
     }
 }

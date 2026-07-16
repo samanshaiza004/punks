@@ -8,7 +8,49 @@ layout, or input systems.
 Closer to a 2D rendering framework specialized for Dear ImGui than to "a
 styling helper."
 
-## Status: Phase 6 — Typed decoration entry points
+## Status: Phase 8 — Widget anatomy from real breadth
+
+Phase 8 adds typed horizontal `f32` Slider, standard Combo, and unframed
+TreeNode decorators. They cover three different anatomy classes—value parts,
+parent/popup lifecycle, and hierarchical rows—without changing `Material` or
+moving stock layout/input/navigation into imgui-painter. Unwind-safe
+color/channel guards protect the shared bracket. Combo uses a dedicated
+two-stage lifecycle: imgui-painter restores parent-frame colors before popup
+contents, owns the token through `EndCombo`, then captures restored parent state
+and merges the parent draw list. TreeNode tokens still return to callers after
+the parent draw list has merged.
+
+Slider, Combo, and TreeNode anatomy is centralized in a private allocation-free
+enum. That earns private anatomy resolution, but not a public Resolver: the
+geometry is explicitly compatible with Dear ImGui 1.89.2/imgui-rs 0.12 and no
+external custom-widget consumer needs to extend it yet. The evidence and future
+part-style requirements live in [Resolver findings](docs/resolver-findings.md).
+
+Phase 7 closes the main rendering-depth gap: inset shadows, band-clipped
+solid/gradient overlays, genuinely stacked inset borders, and device-scale
+hairlines now compose in painter order. The ImGui-aware `Frame` path samples
+`DisplayFramebufferScale` automatically; direct C/C++/`Session` consumers set
+their host scale explicitly.
+
+The `painter_demo` now includes an Ableton-inspired chrome recipe reused across
+normal, hover, pressed, and focus states. It combines an outer shadow, multi-stop
+base gradient, translucent gloss gradient, top bevel hairline, lower shade,
+inset shadow, and two or three distinct border outlines without hand-written
+draw-list geometry.
+
+The composition remains explicit and ordered rather than introducing a styling
+language:
+
+```rust
+canvas.rounded_rect(rect, radius);
+canvas.add_shadow(&outer_shadow);
+canvas.fill_gradient(&surface);
+canvas.fill_band_gradient(top, gloss_end, &gloss);
+canvas.fill_band_color(top, top + canvas.device_pixel(), highlight);
+canvas.add_shadow(&inset_shadow);
+canvas.add_border(&outer_border);
+canvas.add_border_inset(canvas.device_pixel(), &inner_border);
+```
 
 Phase 6 replaces the public item_paint/Decorator pair with
 decorate_button/decorate_selectable/decorate_checkbox/decorate_input_text, removing
@@ -53,11 +95,11 @@ Checkbox paint excludes its label and InputText paint excludes its visible
 label. The resulting anatomy, state, type-safety, and ImGui-version coupling
 evidence is recorded in [Resolver findings](docs/resolver-findings.md).
 
-Still deferred to Phase 6 or later: Resolver implementation, Material changes,
-checkmark and focus-ring styling, disabled and checked state variants, multiline
-InputText, `Recipe`, themes, `PushMaterial`, typography, overlays, scope guards,
-and the Paint Debugger. A polished gallery is a later design milestone; the
-current `painter_demo` remains a development sandbox.
+Still deferred after Phase 8: a public Resolver, Material part styles,
+logarithmic/integer/vertical sliders, Combo flag variants, framed TreeNodes,
+icons, tabs, segmented controls, knobs, checked/focus-specific styling,
+multiline InputText, `Recipe`, themes, `PushMaterial`, typography, and the Paint
+Debugger.
 
 Run the visual gate:
 
@@ -66,22 +108,39 @@ cargo run -p imgui-painter --example painter_demo
 ```
 
 It renders three hand-built looks (a macOS-style panel, a Fluent-style button,
-a GitHub-style button), each next to a plain-`ImDrawList` attempt at the same
-look. It also renders stock Button, Selectable, Checkbox, and InputText widgets
-through one shared `Material`. A human must verify the multipart widget chrome,
-checkmark, hint, text editing, caret, selection, clipboard, hover, and focus
-behavior; automated tests cover geometry and mesh correctness, not visual
-alignment with Dear ImGui internals.
+a GitHub-style button), stock Button/Selectable/Checkbox/InputText widgets, and
+the Phase 7 layered-chrome state row plus the Phase 8 Slider/Combo/TreeNode
+gallery. A human must verify the multipart widgets and confirm that inner shadows stay clipped,
+bevel/gloss bands follow rounded corners, stacked borders remain distinct,
+pressed chrome reads inset, focus reads as focus rather than hover, and
+hairlines stay crisp at the current display scale. Slider dragging/keyboard
+editing, Combo popup selection and stock Button/InputText chrome inside the
+popup, and TreeNode disclosure/navigation must remain stock behavior. Automated
+tests cover mesh geometry, lifecycle cleanup, and composition invariants, not
+final rasterized appearance.
+
+The example accepts a demo-only logical UI scale for compatibility screenshots.
+Framebuffer scale remains the real host value so renderer/scissor coordinates
+stay valid and physical-pixel behavior is tested independently:
+
+![Phase 8 widget anatomy gallery](docs/screenshots/phase8-default.png)
+
+```text
+IMGUI_PAINTER_DEMO_UI_SCALE=1.0 cargo run -p imgui-painter --example painter_demo
+IMGUI_PAINTER_DEMO_UI_SCALE=1.5 cargo run -p imgui-painter --example painter_demo
+IMGUI_PAINTER_DEMO_UI_SCALE=2.0 cargo run -p imgui-painter --example painter_demo
+```
 
 ## Dependency bump checklist
 
-On any imgui/imgui-sys version bump, rerun
-`cargo run -p imgui-painter --example painter_demo` and visually re-verify: all
-four widgets show decorated chrome reacting to hover/press; Checkbox paint stays
-confined to the box and excludes its label; InputText paint stops before the
-visible label and its text, hint, caret, selection, and focus behavior are intact.
-Reconstructed chrome geometry (Checkbox box, InputText frame) is not a stable
-upstream contract and can silently desynchronize on a bump.
+On any imgui/imgui-sys version bump, rerun the visual gate at 1×, 1.5×, and 2×.
+Re-verify the original four widgets, Slider frame/fill/grab alignment and
+temporary input, visible/hidden-label Combo popup lifecycle, non-leaf/leaf
+TreeNode disclosure alignment, disabled alpha, and physical-pixel hairlines.
+Refresh the Slider formula tests, screenshots, `ANATOMY_COMPATIBILITY`, and
+[`VERIFIED_IMGUI_SYS`](VERIFIED_IMGUI_SYS). Reconstructed part geometry is not
+a stable upstream contract and can silently desynchronize on a source-compatible
+bump.
 
 This checklist is CI-enforced, not advisory: the independent-build job resolves
 imgui-sys fresh (no lockfile) and fails whenever the resolved version differs
