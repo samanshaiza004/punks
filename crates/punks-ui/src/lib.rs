@@ -9,6 +9,10 @@ use punks_browser::{
 };
 use punks_core::config::{Keybinds, PunksConfig};
 
+mod theme;
+
+pub use theme::apply_theme;
+
 /// One editable metadata field's panel state, seeded from the file once per
 /// selection (see `seed_metadata_editor`).
 #[derive(Default, Clone)]
@@ -169,14 +173,19 @@ const KEYBIND_ACTIONS: &[(BrowserAction, &str)] = &[
     (BrowserAction::ToggleInspector, "Toggle inspector"),
 ];
 
-// Tab palette: active tab carries a muted blue accent, inactive tabs are grey.
-const TAB_ACTIVE_BG: [f32; 4] = [0.24, 0.36, 0.52, 1.0];
-const TAB_ACTIVE_HOVER: [f32; 4] = [0.28, 0.41, 0.59, 1.0];
-const TAB_INACTIVE_BG: [f32; 4] = [0.16, 0.17, 0.20, 1.0];
-const TAB_INACTIVE_HOVER: [f32; 4] = [0.22, 0.23, 0.27, 1.0];
-const TAB_CLOSE_TEXT: [f32; 4] = [0.70, 0.72, 0.76, 1.0];
+// Tab palette: selection darkened 14%.
+const TAB_ACTIVE_BG: [f32; 4] = [0.19898, 0.40471, 0.70149, 1.0];
+// Selection lightened 10%.
+const TAB_ACTIVE_HOVER: [f32; 4] = [0.30824, 0.52353, 0.83412, 1.0];
+// surface_raised.
+const TAB_INACTIVE_BG: [f32; 4] = [0.86275, 0.90588, 0.94902, 1.0];
+// surface_raised lightened 10%.
+const TAB_INACTIVE_HOVER: [f32; 4] = [0.87647, 0.91529, 0.95412, 1.0];
+// text_muted.
+const TAB_CLOSE_TEXT: [f32; 4] = [0.31765, 0.38039, 0.47843, 1.0];
 
-const DIR_TEXT_COLOR: [f32; 4] = [0.55, 0.85, 1.0, 1.0];
+// selection darkened 20%.
+const DIR_TEXT_COLOR: [f32; 4] = [0.18510, 0.37647, 0.65255, 1.0];
 
 // Left rail: library status + tag filters live here; tags on rows are pills.
 const SIDEBAR_WIDTH: f32 = 180.0;
@@ -185,9 +194,12 @@ const SPLITTER_WIDTH: f32 = 6.0;
 /// Height of the waveform strip. Shared so the panel can reserve exactly the
 /// right room below the file list for it + the metadata lines + transport row.
 const WAVEFORM_HEIGHT: f32 = 64.0;
-const SIDEBAR_BG: [f32; 4] = [0.09, 0.10, 0.11, 1.0];
-const PILL_BG: [f32; 4] = [0.25, 0.28, 0.34, 1.0];
-const PILL_TEXT: [f32; 4] = [0.80, 0.84, 0.90, 1.0];
+// surface.
+const SIDEBAR_BG: [f32; 4] = [0.77255, 0.82745, 0.88627, 1.0];
+// surface_inset.
+const PILL_BG: [f32; 4] = [0.68235, 0.74902, 0.82353, 1.0];
+// text.
+const PILL_TEXT: [f32; 4] = [0.10196, 0.14118, 0.20000, 1.0];
 
 // File list lays out entries in width-adaptive columns; each column is at least
 // this wide, so wide windows show 2+ columns and narrow ones collapse to 1.
@@ -1948,12 +1960,16 @@ impl Default for BrowserPanel {
     }
 }
 
-const WAVEFORM_BG: [f32; 4] = [0.12, 0.12, 0.14, 1.0];
-const WAVEFORM_BAR: [f32; 4] = [0.30, 0.75, 0.45, 1.0];
-const WAVEFORM_PLAYHEAD: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
-const WAVEFORM_TEXT: [f32; 4] = [1.0, 1.0, 1.0, 0.85];
-// Subtle hover/scrub crosshair — dimmer than the opaque playhead.
-const WAVEFORM_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.35];
+// surface_inset.
+const WAVEFORM_BG: [f32; 4] = [0.68235, 0.74902, 0.82353, 1.0];
+// accent.
+const WAVEFORM_BAR: [f32; 4] = [0.94118, 0.56863, 0.22745, 1.0];
+// text at 0.9 alpha.
+const WAVEFORM_PLAYHEAD: [f32; 4] = [0.10196, 0.14118, 0.20000, 0.9];
+// text at 0.85 alpha.
+const WAVEFORM_TEXT: [f32; 4] = [0.10196, 0.14118, 0.20000, 0.85];
+// text at 0.35 alpha for the hover/scrub crosshair.
+const WAVEFORM_HOVER: [f32; 4] = [0.10196, 0.14118, 0.20000, 0.35];
 
 fn color_u32(c: [f32; 4]) -> u32 {
     let r = (c[0] * 255.0) as u32;

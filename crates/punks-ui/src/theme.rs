@@ -1,0 +1,119 @@
+//! Palette tokens and stock ImGui style colors have no imgui-painter bridge, so they are hand-synced here; this duplication is recorded in the redesign findings.
+
+use imgui::StyleColor;
+use imgui_painter::{recipes::Palette, rgba, Color};
+
+pub(crate) fn neon_palette() -> Palette {
+    Palette {
+        surface: rgba(197, 211, 226, 255),
+        surface_raised: rgba(220, 231, 242, 255),
+        surface_inset: rgba(174, 191, 210, 255),
+        border_light: rgba(240, 246, 252, 255),
+        border_dark: rgba(90, 107, 128, 255),
+        accent: rgba(240, 145, 58, 255),
+        selection: rgba(59, 120, 208, 255),
+        text: rgba(26, 36, 51, 255),
+        text_muted: rgba(81, 97, 122, 255),
+    }
+}
+
+pub(crate) fn color_f32(color: Color) -> [f32; 4] {
+    const BYTE: f32 = u8::MAX as f32;
+    [
+        (color & 0xff) as f32 / BYTE,
+        ((color >> 8) & 0xff) as f32 / BYTE,
+        ((color >> 16) & 0xff) as f32 / BYTE,
+        ((color >> 24) & 0xff) as f32 / BYTE,
+    ]
+}
+
+fn lighter(color: [f32; 4]) -> [f32; 4] {
+    const AMOUNT: f32 = 0.10;
+    [
+        color[0] + (1.0 - color[0]) * AMOUNT,
+        color[1] + (1.0 - color[1]) * AMOUNT,
+        color[2] + (1.0 - color[2]) * AMOUNT,
+        color[3],
+    ]
+}
+
+fn darker(color: [f32; 4]) -> [f32; 4] {
+    const SCALE: f32 = 0.86;
+    [
+        color[0] * SCALE,
+        color[1] * SCALE,
+        color[2] * SCALE,
+        color[3],
+    ]
+}
+
+fn with_alpha(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
+    color[3] = alpha;
+    color
+}
+
+/// Applies the punks Neon Live theme; punks-standalone calls this at startup.
+pub fn apply_theme(style: &mut imgui::Style) {
+    let palette = neon_palette();
+    let surface = color_f32(palette.surface);
+    let surface_raised = color_f32(palette.surface_raised);
+    let surface_inset = color_f32(palette.surface_inset);
+    let border_dark = color_f32(palette.border_dark);
+    let selection = color_f32(palette.selection);
+    let text = color_f32(palette.text);
+    let text_muted = color_f32(palette.text_muted);
+
+    style.window_rounding = 0.0;
+    style.child_rounding = 2.0;
+    style.popup_rounding = 3.0;
+    style.frame_rounding = 2.0;
+    style.grab_rounding = 2.0;
+    style.scrollbar_rounding = 2.0;
+    style.frame_border_size = 0.0;
+    style.window_border_size = 0.0;
+    style.frame_padding = [8.0, 4.0];
+    style.item_spacing = [8.0, 6.0];
+    style.scrollbar_size = 12.0;
+
+    style[StyleColor::WindowBg] = surface;
+    style[StyleColor::ChildBg] = surface;
+    style[StyleColor::PopupBg] = surface_raised;
+    style[StyleColor::Text] = text;
+    style[StyleColor::TextDisabled] = text_muted;
+    style[StyleColor::Button] = surface_raised;
+    style[StyleColor::ButtonHovered] = lighter(surface_raised);
+    style[StyleColor::ButtonActive] = darker(surface_raised);
+    style[StyleColor::FrameBg] = surface_inset;
+    style[StyleColor::FrameBgHovered] = lighter(surface_inset);
+    style[StyleColor::FrameBgActive] = darker(surface_inset);
+    style[StyleColor::Header] = with_alpha(selection, 0.85);
+    style[StyleColor::HeaderHovered] = with_alpha(selection, 0.95);
+    style[StyleColor::HeaderActive] = selection;
+    style[StyleColor::SliderGrab] = border_dark;
+    style[StyleColor::SliderGrabActive] = selection;
+    style[StyleColor::CheckMark] = selection;
+    style[StyleColor::Border] = border_dark;
+    style[StyleColor::Separator] = with_alpha(border_dark, 0.6);
+    style[StyleColor::ScrollbarBg] = with_alpha(surface_inset, 0.6);
+    style[StyleColor::ScrollbarGrab] = with_alpha(border_dark, 0.55);
+    style[StyleColor::ScrollbarGrabHovered] = with_alpha(border_dark, 0.75);
+    style[StyleColor::ScrollbarGrabActive] = border_dark;
+    style[StyleColor::PlotHistogram] = selection;
+    style[StyleColor::NavHighlight] = selection;
+    style[StyleColor::TitleBg] = surface;
+    style[StyleColor::TitleBgActive] = surface;
+    style[StyleColor::TitleBgCollapsed] = surface;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_color_converts_in_imgui_channel_order() {
+        assert_eq!(
+            color_f32(rgba(255, 128, 0, 64)),
+            [1.0, 128.0 / 255.0, 0.0, 64.0 / 255.0]
+        );
+    }
+}

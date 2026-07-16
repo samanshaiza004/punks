@@ -67,34 +67,6 @@ fn start_file_drag(window: &Window, path: &std::path::Path) {
     }
 }
 
-/// Slight dark-theme polish: rounded frames, a touch more breathing room, and
-/// muted greys so the only saturated colour is the active tab / selection.
-fn apply_style(style: &mut imgui::Style) {
-    use imgui::StyleColor;
-
-    style.frame_rounding = 4.0;
-    style.grab_rounding = 4.0;
-    style.scrollbar_rounding = 4.0;
-    style.frame_border_size = 0.0;
-    style.window_border_size = 0.0;
-    style.frame_padding = [8.0, 4.0];
-    style.item_spacing = [8.0, 6.0];
-    style.scrollbar_size = 12.0;
-
-    style[StyleColor::WindowBg] = [0.11, 0.12, 0.13, 1.0];
-    style[StyleColor::Button] = [0.22, 0.24, 0.28, 1.0];
-    style[StyleColor::ButtonHovered] = [0.28, 0.30, 0.35, 1.0];
-    style[StyleColor::ButtonActive] = [0.32, 0.34, 0.40, 1.0];
-    style[StyleColor::FrameBg] = [0.14, 0.15, 0.17, 1.0];
-    style[StyleColor::FrameBgHovered] = [0.18, 0.19, 0.22, 1.0];
-    style[StyleColor::FrameBgActive] = [0.20, 0.21, 0.25, 1.0];
-    style[StyleColor::Header] = [0.24, 0.36, 0.52, 0.9];
-    style[StyleColor::HeaderHovered] = [0.28, 0.41, 0.59, 0.9];
-    style[StyleColor::HeaderActive] = [0.28, 0.41, 0.59, 1.0];
-    style[StyleColor::SliderGrab] = [0.36, 0.52, 0.72, 1.0];
-    style[StyleColor::SliderGrabActive] = [0.44, 0.62, 0.84, 1.0];
-}
-
 struct GpuState {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -189,7 +161,7 @@ impl AppWindow {
     fn init_imgui(gpu: &GpuState) -> ImguiState {
         let mut context = imgui::Context::create();
         context.set_ini_filename(None);
-        apply_style(context.style_mut());
+        punks_ui::apply_theme(context.style_mut());
 
         // winit deliberately has no clipboard API; without a backend here,
         // imgui's internal Ctrl+C/Ctrl+V in text fields (e.g. the selectable
