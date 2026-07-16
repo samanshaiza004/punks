@@ -54,6 +54,12 @@ must absorb.
 ## Observed during R2a
 
 - Widget breadth: SmallButton decorates via `decorate_button` (ButtonEx path,
-  zero vertical padding) — pending visual confirmation.
+  zero vertical padding) — confirmed at the R2a visual gate: breadcrumb
+  geometry and chrome align.
 - API/DX: decorators preserve last-item queries after the bracket — relied on
   for drag-drop/tooltips, worth documenting in imgui-painter's docs.
+- API/DX: recipe hover derivation (a ~10% tint toward white / one surface
+  step) is imperceptible on light palettes — the recipes were visually
+  validated on a dark rack. punks overrides `fill.hover` toward its selection
+  token in theme.rs. Recipes could accept a hover intent or derive hover
+  perceptually (contrast-aware) instead of by fixed tint.

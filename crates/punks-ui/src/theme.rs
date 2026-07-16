@@ -55,18 +55,40 @@ pub(crate) fn tab_active_material() -> Material {
     }
 }
 
+/// Per-channel lerp between two packed colors (alpha kept from `a`).
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    let channel = |color: Color, shift| ((color >> shift) & 0xff_u32) as f32;
+    let lerp = |x: f32, y: f32| (x + (y - x) * t).round() as u8;
+    rgba(
+        lerp(channel(a, 0), channel(b, 0)),
+        lerp(channel(a, 8), channel(b, 8)),
+        lerp(channel(a, 16), channel(b, 16)),
+        ((a >> 24) & 0xff) as u8,
+    )
+}
+
 pub(crate) fn tab_inactive_material() -> Material {
-    let mut material = recipes::toolbar_button(&neon_palette());
+    let mut material = toolbar_material();
     material.radius = 2.0;
     material
 }
 
 pub(crate) fn toolbar_material() -> Material {
-    recipes::toolbar_button(&neon_palette())
+    let palette = neon_palette();
+    let mut material = recipes::toolbar_button(&palette);
+    // The recipe's hover (one surface step up) is imperceptible on this light
+    // palette, so hover leans toward the selection blue instead — buttons
+    // visibly react (recorded in the redesign findings).
+    material.fill.hover = mix(palette.surface_raised, palette.selection, 0.18);
+    material
 }
 
 pub(crate) fn raised_material() -> Material {
-    recipes::raised_button(&neon_palette())
+    let palette = neon_palette();
+    let mut material = recipes::raised_button(&palette);
+    // Same hover-visibility override as toolbar_material.
+    material.fill.hover = mix(palette.surface_raised, palette.selection, 0.20);
+    material
 }
 
 pub(crate) fn volume_slider_style() -> imgui_painter::SliderStyle {
