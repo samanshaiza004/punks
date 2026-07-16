@@ -619,7 +619,7 @@ impl BrowserPanel {
             punks_core::config::save(&self.prefs);
         }
 
-        self.draw_settings_modal(ui, browser);
+        self.draw_settings_modal(ui, browser, frame);
 
         let crumbs = browser.breadcrumbs();
         if !crumbs.is_empty() {
@@ -711,7 +711,7 @@ impl BrowserPanel {
         ui.child_window("sidebar")
             .size([SIDEBAR_WIDTH, body_height])
             .build(|| {
-                self.draw_sidebar(ui, browser);
+                self.draw_sidebar(ui, browser, frame);
             });
         sidebar_bg.pop();
 
@@ -802,7 +802,7 @@ impl BrowserPanel {
             ui.child_window("inspector")
                 .size([inspector_w, body_height])
                 .build(|| {
-                    self.draw_inspector(ui, browser);
+                    self.draw_inspector(ui, browser, frame);
                 });
             inspector_bg.pop();
         }
@@ -1006,7 +1006,7 @@ impl BrowserPanel {
             ui.open_popup("Edit Metadata##metadata_editor");
         }
 
-        self.draw_override_popup(ui, browser);
+        self.draw_override_popup(ui, browser, frame);
 
         // Give the editor modal a comfortable fixed width the first time it
         // appears (its fields size to the modal, not the other way round). No
@@ -1018,7 +1018,7 @@ impl BrowserPanel {
                 imgui::Condition::Appearing as i32,
             );
         }
-        draw_metadata_editor_modal(ui, browser, &mut self.editor);
+        draw_metadata_editor_modal(ui, browser, &mut self.editor, frame);
 
         ui.popup("##tag_editor", || {
             if let Some(path) = self.tag_popup_path.clone() {
@@ -1083,7 +1083,12 @@ impl BrowserPanel {
                     .enter_returns_true(true)
                     .build();
                 ui.same_line();
-                let add = ui.small_button("Add##popup_add_tag");
+                // SAFETY: the closure submits exactly one stock button in the active window.
+                let add = unsafe {
+                    imgui_painter::decorate_button(frame, &toolbar_material, || {
+                        ui.small_button("Add##popup_add_tag")
+                    })
+                };
                 if (entered || add) && !self.popup_tag_buf.trim().is_empty() {
                     let name = self.popup_tag_buf.trim().to_string();
                     if batch {
@@ -1109,7 +1114,14 @@ impl BrowserPanel {
         });
     }
 
-    fn draw_sidebar(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+    fn draw_sidebar(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::Frame<'_>,
+    ) {
+        let toolbar_material = theme::toolbar_material();
+        let raised_material = theme::raised_material();
         ui.spacing();
         ui.text_disabled("LIBRARY");
         ui.separator();
@@ -1119,7 +1131,12 @@ impl BrowserPanel {
                 if browser.current_directory().is_some() {
                     ui.text_wrapped("Not a library. Create one to tag and filter samples.");
                     ui.spacing();
-                    if ui.button("Create library") {
+                    // SAFETY: the closure submits exactly one stock button in the active window.
+                    if unsafe {
+                        imgui_painter::decorate_button(frame, &raised_material, || {
+                            ui.button("Create library")
+                        })
+                    } {
                         browser.init_library();
                     }
                     if ui.is_item_hovered() {
@@ -1151,12 +1168,17 @@ impl BrowserPanel {
                             .build(ui);
                     }
                 }
-                self.draw_delete_library(ui, browser);
+                self.draw_delete_library(ui, browser, frame);
             }
             LibraryState::Ready => {
                 ui.spacing();
                 if let Some(desc) = browser.undo_description() {
-                    if ui.button(format!("Undo: {desc}##undo_btn")) {
+                    // SAFETY: the closure submits exactly one stock button in the active window.
+                    if unsafe {
+                        imgui_painter::decorate_button(frame, &toolbar_material, || {
+                            ui.button(format!("Undo: {desc}##undo_btn"))
+                        })
+                    } {
                         browser.undo();
                     }
                     if ui.is_item_hovered() {
@@ -1166,7 +1188,12 @@ impl BrowserPanel {
                     ui.text_disabled("Nothing to undo");
                 }
                 if let Some(desc) = browser.redo_description() {
-                    if ui.button(format!("Redo: {desc}##redo_btn")) {
+                    // SAFETY: the closure submits exactly one stock button in the active window.
+                    if unsafe {
+                        imgui_painter::decorate_button(frame, &toolbar_material, || {
+                            ui.button(format!("Redo: {desc}##redo_btn"))
+                        })
+                    } {
                         browser.redo();
                     }
                     if ui.is_item_hovered() {
@@ -1207,13 +1234,19 @@ impl BrowserPanel {
                 }
                 if !filter.is_empty() {
                     ui.spacing();
-                    if ui.small_button("Clear filter") {
+                    // SAFETY: the closure submits exactly one stock button in the active window.
+                    let clear_clicked = unsafe {
+                        imgui_painter::decorate_button(frame, &toolbar_material, || {
+                            ui.small_button("Clear filter")
+                        })
+                    };
+                    if clear_clicked {
                         browser.clear_tag_filter();
                     }
                 }
-                self.draw_fact_filters(ui, browser);
-                self.draw_health_panel(ui, browser);
-                self.draw_delete_library(ui, browser);
+                self.draw_fact_filters(ui, browser, frame);
+                self.draw_health_panel(ui, browser, frame);
+                self.draw_delete_library(ui, browser, frame);
             }
         }
     }
@@ -1222,7 +1255,13 @@ impl BrowserPanel {
     /// asset's embedded metadata against the library's cached copy and any
     /// user override, surfacing missing/drifted fields. Read-only — this
     /// never writes anything; it's a diagnostic, not a fix.
-    fn draw_health_panel(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+    fn draw_health_panel(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::Frame<'_>,
+    ) {
+        let toolbar_material = theme::toolbar_material();
         ui.spacing();
         ui.separator();
         ui.text_disabled("METADATA HEALTH");
@@ -1231,8 +1270,16 @@ impl BrowserPanel {
         let running = browser.health_check_running();
         if running {
             ui.text_disabled("Checking…");
-        } else if ui.button("Check library health") {
-            browser.check_library_health();
+        } else {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            let check_clicked = unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || {
+                    ui.button("Check library health")
+                })
+            };
+            if check_clicked {
+                browser.check_library_health();
+            }
         }
 
         match browser.health_issues() {
@@ -1270,7 +1317,13 @@ impl BrowserPanel {
     /// tag filter above it, ANDed with it. Values come from `FactFacets`,
     /// recomputed from the in-memory analysis caches (no SQL), so this is
     /// zero-cost per frame beyond reading an already-built `Vec`.
-    fn draw_fact_filters(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+    fn draw_fact_filters(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::Frame<'_>,
+    ) {
+        let toolbar_material = theme::toolbar_material();
         let Some(facets) = browser.library_fact_facets().cloned() else {
             return;
         };
@@ -1334,7 +1387,12 @@ impl BrowserPanel {
 
         if !filter.is_empty() {
             ui.spacing();
-            if ui.small_button("Clear fact filter") {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || {
+                    ui.small_button("Clear fact filter")
+                })
+            } {
                 browser.clear_fact_filter();
             }
         }
@@ -1347,7 +1405,13 @@ impl BrowserPanel {
     /// state is deliberately *not* persisted (see `PunksConfig`). Future
     /// sections (Embedded metadata, Health, Preview FX) slot in here once they
     /// have real content to show.
-    fn draw_inspector(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+    fn draw_inspector(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::Frame<'_>,
+    ) {
+        let toolbar_material = theme::toolbar_material();
         ui.spacing();
         let Some(path) = browser.current_file().map(Path::to_path_buf) else {
             ui.text_disabled("No file selected");
@@ -1366,7 +1430,12 @@ impl BrowserPanel {
         // Edit Metadata open their modals via request flags (consumed at panel
         // scope with the other popups); the rest act immediately.
         let playing = !matches!(browser.playback_status(), PlaybackStatus::Idle);
-        if ui.button(if playing { "Stop" } else { "Play" }) {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        if unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || {
+                ui.button(if playing { "Stop" } else { "Play" })
+            })
+        } {
             if playing {
                 browser.stop();
             } else {
@@ -1374,19 +1443,31 @@ impl BrowserPanel {
             }
         }
         ui.same_line();
-        if ui.button("Reveal") {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        if unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Reveal"))
+        } {
             reveal_in_file_manager(&path);
         }
         ui.same_line();
-        if ui.button("Copy Path") {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        if unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Copy Path"))
+        } {
             ui.set_clipboard_text(path.to_string_lossy());
         }
-        if ui.button("Override") {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        if unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Override"))
+        } {
             self.override_popup_path = Some(path.clone());
             self.open_override_editor = true;
         }
         ui.same_line();
-        if ui.button("Edit Metadata") {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        if unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Edit Metadata"))
+        } {
             self.open_metadata_editor = true;
         }
         ui.separator();
@@ -1454,7 +1535,10 @@ impl BrowserPanel {
                     .collect();
                 ui.text_wrapped(names.join(", "));
             }
-            if ui.button("Edit Tags") {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Edit Tags"))
+            } {
                 self.tag_popup_path = Some(path.clone());
                 self.open_tag_editor = true;
             }
@@ -1464,7 +1548,12 @@ impl BrowserPanel {
         // editor opens as a modal, so it never sits as always-live edit fields.
         if ui.collapsing_header("Metadata", imgui::TreeNodeFlags::empty()) {
             metadata_summary(ui, &self.editor);
-            if ui.button("Edit Metadata...") {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || {
+                    ui.button("Edit Metadata...")
+                })
+            } {
                 self.open_metadata_editor = true;
             }
         }
@@ -1472,11 +1561,22 @@ impl BrowserPanel {
 
     /// Testing convenience pinned to the bottom of the library sidebar: wipe
     /// the current `.punks` store, behind a confirmation popup.
-    fn draw_delete_library(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+    fn draw_delete_library(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::Frame<'_>,
+    ) {
+        let toolbar_material = theme::toolbar_material();
         ui.spacing();
         ui.separator();
         let danger = ui.push_style_color(imgui::StyleColor::Text, [0.90, 0.45, 0.45, 1.0]);
-        let clicked = ui.small_button("Delete library");
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        let clicked = unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || {
+                ui.small_button("Delete library")
+            })
+        };
         danger.pop();
         if ui.is_item_hovered() {
             ui.tooltip_text("Deletes the .punks folder for this root (testing).");
@@ -1492,12 +1592,18 @@ impl BrowserPanel {
             ui.text("Delete this library's .punks store?");
             ui.text_disabled("Tags and cached waveforms are lost. Irreversible.");
             ui.spacing();
-            if ui.button("Delete") {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Delete"))
+            } {
                 browser.delete_active_library();
                 ui.close_current_popup();
             }
             ui.same_line();
-            if ui.button("Cancel") {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Cancel"))
+            } {
                 ui.close_current_popup();
             }
         });
@@ -1877,7 +1983,14 @@ impl BrowserPanel {
     /// detected value (read-only) beside an editable override with Set / Clear.
     /// Setting writes a user override that patches — never replaces — the detected
     /// fact; Clear reverts to detected.
-    fn draw_override_popup(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+    fn draw_override_popup(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::Frame<'_>,
+    ) {
+        let toolbar_material = theme::toolbar_material();
+        let raised_material = theme::raised_material();
         ui.popup("##override_editor", || {
             let Some(path) = self.override_popup_path.clone() else {
                 return;
@@ -1914,7 +2027,13 @@ impl BrowserPanel {
                     buf.trim().to_string()
                 };
                 ui.same_line();
-                if ui.small_button(format!("Set##set_{metric}")) && !entered.is_empty() {
+                // SAFETY: the closure submits exactly one stock button in the active window.
+                let set = unsafe {
+                    imgui_painter::decorate_button(frame, &raised_material, || {
+                        ui.small_button(format!("Set##set_{metric}"))
+                    })
+                };
+                if set && !entered.is_empty() {
                     if numeric {
                         if let Ok(n) = entered.parse::<f64>() {
                             browser.set_override(&path, metric, Fact::Real(n));
@@ -1924,14 +2043,24 @@ impl BrowserPanel {
                     }
                 }
                 ui.same_line();
-                if ui.small_button(format!("N/A##na_{metric}")) {
+                // SAFETY: the closure submits exactly one stock button in the active window.
+                if unsafe {
+                    imgui_painter::decorate_button(frame, &toolbar_material, || {
+                        ui.small_button(format!("N/A##na_{metric}"))
+                    })
+                } {
                     // Explicitly "this metric doesn't apply" — different from
                     // Clear, which instead reveals the detected guess again.
                     browser.mark_absent(&path, metric);
                     self.override_bufs.insert(metric, String::new());
                 }
                 ui.same_line();
-                if ui.small_button(format!("Clear##clr_{metric}")) {
+                // SAFETY: the closure submits exactly one stock button in the active window.
+                if unsafe {
+                    imgui_painter::decorate_button(frame, &toolbar_material, || {
+                        ui.small_button(format!("Clear##clr_{metric}"))
+                    })
+                } {
                     browser.clear_override(&path, metric);
                     self.override_bufs.insert(metric, String::new());
                 }
@@ -1939,7 +2068,13 @@ impl BrowserPanel {
         });
     }
 
-    fn draw_settings_modal(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+    fn draw_settings_modal(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        frame: &mut imgui_painter::Frame<'_>,
+    ) {
+        let toolbar_material = theme::toolbar_material();
         let modal = ui
             .modal_popup_config("Settings##modal")
             .save_settings(false)
@@ -1955,7 +2090,12 @@ impl BrowserPanel {
                 .unwrap_or_else(|| "(none)".into());
             ui.text_disabled(&dir_label);
             ui.same_line();
-            if ui.button("Browse##settings") {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || {
+                    ui.button("Browse##settings")
+                })
+            } {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     // last_directory is persisted centrally at the top of draw().
                     if let Err(e) = browser.open_directory(&path) {
@@ -1980,7 +2120,13 @@ impl BrowserPanel {
 
                 ui.text(label);
                 ui.same_line_with_pos(180.0);
-                if ui.button(&btn_label) && !is_rebinding {
+                // SAFETY: the closure submits exactly one stock button in the active window.
+                let clicked = unsafe {
+                    imgui_painter::decorate_button(frame, &toolbar_material, || {
+                        ui.button(&btn_label)
+                    })
+                };
+                if clicked && !is_rebinding {
                     self.rebinding = Some(action);
                     self.rebind_conflict = None;
                 }
@@ -2015,13 +2161,21 @@ impl BrowserPanel {
             }
 
             ui.separator();
-            if ui.button("Reset to defaults") {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || {
+                    ui.button("Reset to defaults")
+                })
+            } {
                 self.prefs.keybinds = Keybinds::default();
                 self.rebind_conflict = None;
                 punks_core::config::save(&self.prefs);
             }
             ui.same_line();
-            if ui.button("Close") {
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Close"))
+            } {
                 self.rebinding = None;
                 ui.close_current_popup();
             }
@@ -2425,7 +2579,10 @@ fn draw_metadata_editor_modal(
     ui: &imgui::Ui,
     browser: &mut SampleBrowser,
     editor: &mut MetadataEditor,
+    frame: &mut imgui_painter::Frame<'_>,
 ) {
+    let toolbar_material = theme::toolbar_material();
+    let raised_material = theme::raised_material();
     ui.modal_popup("Edit Metadata##metadata_editor", || {
         let Some(path) = editor.path.clone() else {
             ui.close_current_popup();
@@ -2465,7 +2622,11 @@ fn draw_metadata_editor_modal(
             || editor.keywords.dirty()
             || editor.category.dirty()
             || editor.creator.dirty();
-        if ui.button("Save") && dirty {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        let save = unsafe {
+            imgui_painter::decorate_button(frame, &raised_material, || ui.button("Save"))
+        };
+        if save && dirty {
             let m = Metadata {
                 description: editor
                     .description
@@ -2498,7 +2659,10 @@ fn draw_metadata_editor_modal(
             ui.close_current_popup();
         }
         ui.same_line();
-        if ui.button("Cancel") {
+        // SAFETY: the closure submits exactly one stock button in the active window.
+        if unsafe {
+            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Cancel"))
+        } {
             // Discard in-progress edits: reseed from the file next frame.
             editor.path = None;
             ui.close_current_popup();

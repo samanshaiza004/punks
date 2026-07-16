@@ -63,3 +63,11 @@ must absorb.
   validated on a dark rack. punks overrides `fill.hover` toward its selection
   token in theme.rs. Recipes could accept a hover intent or derive hover
   perceptually (contrast-aware) instead of by fixed tint.
+
+## Observed during R2b
+
+- API/DX: decorating buttons in nested sidebar, inspector, and modal draw
+  helpers required threading the mutable `Frame` through seven private
+  signatures that otherwise did not need painter state. Ambient frame access
+  is absent, so decoration adds mechanical parameter plumbing through the UI
+  call tree.
