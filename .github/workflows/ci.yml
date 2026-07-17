@@ -72,16 +72,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The scratch copy has no lockfile, so the build resolves the newest
-      # compatible imgui-sys. The final check turns the README's "Dependency
-      # bump checklist" into an enforced gate: reconstructed widget-chrome
-      # geometry (Checkbox box, InputText frame) is not a stable Dear ImGui
-      # contract, so an imgui-sys bump can compile cleanly while silently
-      # moving the stock widget away from the painted rectangle. CI fails
-      # whenever the fresh resolution differs from the version a human last
-      # verified with painter_demo — upstream point releases trip this too,
-      # by design. To acknowledge a bump: run the checklist, then update
-      # imgui-painter/VERIFIED_IMGUI_SYS.
+      # The final check tracks the pinned imgui-rs fork revision. Reconstructed
+      # widget-chrome geometry (Checkbox box, InputText frame) is not a stable
+      # Dear ImGui contract, so a fork revision change can compile cleanly
+      # while silently moving the stock widget away from the painted rectangle.
+      # To acknowledge a revision change: run the Dependency bump checklist and
+      # painter_demo visual gate, then update imgui-painter/VERIFIED_IMGUI_SYS.
       - name: Build outside the host workspace
         shell: bash
         run: |
@@ -91,12 +87,12 @@ jobs:
           cargo build --examples
           cargo test
           verified="$(tr -d '[:space:]' < ../../VERIFIED_IMGUI_SYS)"
-          resolved="$(cargo pkgid imgui-sys | sed 's/.*[@#]//')"
+          resolved="$(cargo pkgid imgui-sys | grep -oE '[0-9a-f]{40}' | head -n 1)"
           if [ "$resolved" != "$verified" ]; then
-            echo "imgui-sys resolved to $resolved but the painter_demo visual gate"
-            echo "was last verified against $verified."
+            echo "The imgui-rs fork resolved to revision $resolved but the"
+            echo "painter_demo visual gate was last verified against $verified."
             echo "Run the Dependency bump checklist in imgui-painter/README.md,"
             echo "then update imgui-painter/VERIFIED_IMGUI_SYS to $resolved."
             exit 1
           fi
-          echo "imgui-sys $resolved matches the visually verified version."
+          echo "imgui-rs fork revision $resolved matches the visually verified revision."

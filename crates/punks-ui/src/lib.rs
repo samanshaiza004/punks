@@ -276,6 +276,19 @@ fn apply_selection_requests(
     }
 }
 
+/// Files a native drag carries from a row: the whole selection when the
+/// pressed row is itself selected, otherwise just that row. `is_selected`
+/// is the pressed row's state; `selected_paths` are the current selection's
+/// file paths (already directory-filtered by the caller); `row_path` is the
+/// pressed row.
+fn drag_payload(is_selected: bool, selected_paths: &[PathBuf], row_path: &Path) -> Vec<PathBuf> {
+    if is_selected && !selected_paths.is_empty() {
+        selected_paths.to_vec()
+    } else {
+        vec![row_path.to_path_buf()]
+    }
+}
+
 fn selection_if_revision_matches(
     mut candidate: Vec<usize>,
     started_revision: u64,
@@ -1959,16 +1972,13 @@ impl BrowserPanel {
                     && !self.drag_out_sent
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
-                    let paths = if is_selected {
-                        let results = browser.search_results().unwrap();
-                        candidate
-                            .iter()
-                            .filter_map(|&index| results.get(index))
-                            .map(|entry| entry.path.clone())
-                            .collect()
-                    } else {
-                        vec![path]
-                    };
+                    let results = browser.search_results().unwrap();
+                    let selected_paths = candidate
+                        .iter()
+                        .filter_map(|&index| results.get(index))
+                        .map(|entry| entry.path.clone())
+                        .collect::<Vec<_>>();
+                    let paths = drag_payload(is_selected, &selected_paths, &path);
                     *drag_requested = Some(paths);
                     break 'rows;
                 }
@@ -2218,16 +2228,13 @@ impl BrowserPanel {
                     && !self.drag_out_sent
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
-                    let paths = if is_selected {
-                        candidate
-                            .iter()
-                            .filter_map(|&index| browser.entries().get(index))
-                            .filter(|entry| !entry.is_directory)
-                            .map(|entry| entry.path.clone())
-                            .collect()
-                    } else {
-                        vec![path]
-                    };
+                    let selected_paths = candidate
+                        .iter()
+                        .filter_map(|&index| browser.entries().get(index))
+                        .filter(|entry| !entry.is_directory)
+                        .map(|entry| entry.path.clone())
+                        .collect::<Vec<_>>();
+                    let paths = drag_payload(is_selected, &selected_paths, &path);
                     *drag_requested = Some(paths);
                     break 'rows;
                 }
@@ -3005,8 +3012,9 @@ fn draw_metadata_editor_modal(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_selection_requests, selection_if_revision_matches};
+    use super::{apply_selection_requests, drag_payload, selection_if_revision_matches};
     use imgui::{SelectionDirection, SelectionRequest};
+    use std::path::PathBuf;
 
     fn range(first: i64, last: i64, selected: bool) -> SelectionRequest {
         SelectionRequest::SetRange {
@@ -3075,5 +3083,25 @@ mod tests {
             Some(vec![1, 3])
         );
         assert_eq!(selection_if_revision_matches(vec![1, 3], 7, 8), None);
+    }
+
+    #[test]
+    fn unselected_row_drag_carries_only_that_row() {
+        let row = PathBuf::from("row.wav");
+        let selected = vec![PathBuf::from("selected.wav")];
+        assert_eq!(drag_payload(false, &selected, &row), vec![row]);
+    }
+
+    #[test]
+    fn selected_row_drag_carries_all_selected_paths() {
+        let row = PathBuf::from("row.wav");
+        let selected = vec![PathBuf::from("first.wav"), PathBuf::from("second.wav")];
+        assert_eq!(drag_payload(true, &selected, &row), selected);
+    }
+
+    #[test]
+    fn selected_row_drag_never_carries_an_empty_payload() {
+        let row = PathBuf::from("row.wav");
+        assert_eq!(drag_payload(true, &[], &row), vec![row]);
     }
 }
