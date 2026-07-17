@@ -60,14 +60,12 @@ something imgui-painter must absorb.
 
 ## Dear ImGui / upstream limitations
 
-- The official multi-select API (`BeginMultiSelect`/`EndMultiSelect`,
-  `ImGuiMultiSelectFlags_BoxSelect*`) landed in Dear ImGui 1.91.0. punks pins
-  1.89.2 (the anatomy/version gate) and imgui-rs 0.12 does not wrap it, so
-  upstream box-select is unavailable without the full dependency-bump
-  procedure. Multi-select remains ctrl/cmd-click + shift-click; drag-from-row
-  is reserved for native drag-out. A hand-rolled rubber-band select is
-  possible app-side but competes with the drag-out gesture on dense lists —
-  deferred as a product decision.
+- Resolved in the 1.91.9b migration: Punks now uses upstream multi-select for
+  Ctrl/Cmd, Shift, keyboard ranges, select-all, Escape clearing, clipping, and
+  empty-space box selection while retaining application-owned index vectors.
+  Row drags remain native file drag-out; empty list space owns box selection.
+  The binding stays in the maintained imgui-rs fork, not imgui-painter, because
+  selection is application behavior rather than paint.
 
 ## punks-specific design choices (not library defects)
 
