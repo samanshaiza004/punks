@@ -152,16 +152,26 @@ pub fn apply_imgui_colors(
     set(colors, sys::ImGuiCol_ResizeGripActive, palette.selection);
     set(colors, sys::ImGuiCol_Tab, palette.surface);
     set(colors, sys::ImGuiCol_TabHovered, button_hover);
-    set(colors, sys::ImGuiCol_TabActive, palette.selection);
+    set(colors, sys::ImGuiCol_TabSelected, palette.selection);
     set(
         colors,
-        sys::ImGuiCol_TabUnfocused,
+        sys::ImGuiCol_TabSelectedOverline,
+        tint(palette.selection, 0.20),
+    );
+    set(
+        colors,
+        sys::ImGuiCol_TabDimmed,
         shade(palette.surface, 0.04),
     );
     set(
         colors,
-        sys::ImGuiCol_TabUnfocusedActive,
+        sys::ImGuiCol_TabDimmedSelected,
         mix(palette.surface, palette.selection, 0.45),
+    );
+    set(
+        colors,
+        sys::ImGuiCol_TabDimmedSelectedOverline,
+        with_alpha(palette.selection, 150),
     );
 
     // Semantic exceptions: these communicate data/action rather than chrome.
@@ -186,6 +196,7 @@ pub fn apply_imgui_colors(
         sys::ImGuiCol_TableRowBgAlt,
         with_alpha(palette.surface_raised, 96),
     );
+    set(colors, sys::ImGuiCol_TextLink, palette.selection);
     set(
         colors,
         sys::ImGuiCol_TextSelectedBg,
@@ -194,7 +205,7 @@ pub fn apply_imgui_colors(
     set(colors, sys::ImGuiCol_DragDropTarget, palette.accent);
     set(
         colors,
-        sys::ImGuiCol_NavHighlight,
+        sys::ImGuiCol_NavCursor,
         with_alpha(palette.selection, 210),
     );
     set(
@@ -494,7 +505,7 @@ mod tests {
             color_f32(palette.accent)
         );
         assert_eq!(
-            colors[sys::ImGuiCol_NavHighlight as usize],
+            colors[sys::ImGuiCol_NavCursor as usize],
             color_f32(with_alpha(palette.selection, 210))
         );
         assert_eq!(

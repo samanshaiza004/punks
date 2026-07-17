@@ -120,8 +120,12 @@ real disabled appearance rather than alpha alone.
 
 ### Executable compatibility boundary
 
-Private constants pin anatomy reconstruction to Dear ImGui 1.89.2, imgui-rs
-0.12, and imgui-sys 0.12.0. Tests compare `igGetVersion()` with that pin, while
+Private constants pin anatomy reconstruction to Dear ImGui 1.91.9b through
+imgui-rs fork revision `7a89260c79ad1f9d4bfe81d6ca1b76ad38a6b3e3` and
+imgui-sys 0.12.0. The 1.91.9b Checkbox, InputText, Slider, Combo, and TreeNode
+implementations were re-audited before moving this pin; their scoped formulas
+remain equivalent to the existing reconstruction. Tests compare
+`igGetVersion()` with that pin, while
 independent-build CI compares the freshly resolved imgui-sys package with
 `VERIFIED_IMGUI_SYS`. Updating either dependency requires rerunning Slider
 formula tests, Combo lifecycle, TreeNode leaf/disclosure alignment, and the

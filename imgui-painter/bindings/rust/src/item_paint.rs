@@ -8,8 +8,9 @@ use imgui_sys as sys;
 
 use crate::{Border, Canvas, Color, Frame, Rect, Shadow, Vec2};
 
-const ANATOMY_COMPATIBILITY: &str = "Dear ImGui 1.89.2 / imgui-rs 0.12 / imgui-sys 0.12.0";
-const ANATOMY_IMGUI_VERSION: &str = "1.89.2";
+const ANATOMY_COMPATIBILITY: &str =
+    "Dear ImGui 1.91.9b / imgui-rs 0.12 fork 7a89260 / imgui-sys 0.12.0";
+const ANATOMY_IMGUI_VERSION: &str = "1.91.9b";
 
 const BUTTON_COLS: [sys::ImGuiCol; 3] = [
     sys::ImGuiCol_Button as _,
@@ -289,7 +290,7 @@ impl Decorator {
         }
     }
 
-    /// ponytail: these formulas reproduce Dear ImGui 1.89.2 layout through
+    /// ponytail: these formulas reproduce Dear ImGui 1.91.9b layout through
     /// public functions, but widget-part geometry is not an upstream contract.
     /// Upgrade path: the executable compatibility gate and visual gallery must
     /// be rerun on every imgui/imgui-sys bump.
@@ -1329,8 +1330,33 @@ mod tests {
         let mut painter = crate::Painter::new();
 
         // Establish the window and an up state before the active frame.
-        context.io_mut().mouse_pos = [30.0, 18.0];
-        context.io_mut().mouse_down[0] = false;
+        context.io_mut().add_mouse_pos_event([-100.0, -100.0]);
+        context
+            .io_mut()
+            .add_mouse_button_event(imgui::MouseButton::Left, false);
+        let mut button_center = [0.0, 0.0];
+        {
+            let ui = context.frame();
+            ui.window("last-item contract")
+                .position([0.0, 0.0], imgui::Condition::Always)
+                .size([300.0, 120.0], imgui::Condition::Always)
+                .title_bar(false)
+                .movable(false)
+                .build(|| {
+                    ui.button("Contract button");
+                    let min = ui.item_rect_min();
+                    let max = ui.item_rect_max();
+                    button_center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
+                });
+            context.render();
+        }
+
+        // 1.91's input queue may preserve move/down ordering across frames;
+        // establish hover before submitting the press event.
+        context.io_mut().add_mouse_pos_event(button_center);
+        context
+            .io_mut()
+            .add_mouse_button_event(imgui::MouseButton::Left, false);
         {
             let ui = context.frame();
             ui.window("last-item contract")
@@ -1344,8 +1370,10 @@ mod tests {
             context.render();
         }
 
-        context.io_mut().mouse_pos = [30.0, 18.0];
-        context.io_mut().mouse_down[0] = true;
+        context.io_mut().add_mouse_pos_event(button_center);
+        context
+            .io_mut()
+            .add_mouse_button_event(imgui::MouseButton::Left, true);
         let ui = context.frame();
         let mut frame = painter.begin_frame();
         ui.window("last-item contract")
@@ -1471,10 +1499,30 @@ mod tests {
         let mut painter = crate::Painter::new();
         let mut popup_contents_ran = false;
 
+        // Resolve the current-version frame position instead of coupling the
+        // interaction test to a historical window-padding/title-bar offset.
+        context.io_mut().mouse_pos = [-100.0, -100.0];
+        let mut combo_center = [0.0, 0.0];
+        {
+            let ui = context.frame();
+            ui.window("combo lifecycle")
+                .position([0.0, 0.0], imgui::Condition::Always)
+                .size([400.0, 200.0], imgui::Condition::Always)
+                .title_bar(false)
+                .movable(false)
+                .build(|| {
+                    drop(ui.begin_combo("Mode", "Classic"));
+                    let min = ui.item_rect_min();
+                    let max = ui.item_rect_max();
+                    combo_center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
+                });
+            context.render();
+        }
+
         // Default ButtonBehavior opens on release. Three frames establish an
         // up -> down -> up transition over the fixed Combo frame.
         for mouse_down in [false, true, false] {
-            context.io_mut().mouse_pos = [40.0, 18.0];
+            context.io_mut().mouse_pos = combo_center;
             context.io_mut().mouse_down[0] = mouse_down;
             let ui = context.frame();
             let mut frame = painter.begin_frame();

@@ -21,7 +21,8 @@ treatments at 1x/1.5x/2x.
 
 Slider, Combo, and TreeNode anatomy is centralized in a private allocation-free
 enum. That earns private anatomy resolution, but not a public Resolver: the
-geometry is explicitly compatible with Dear ImGui 1.89.2/imgui-rs 0.12 and no
+geometry is explicitly compatible with Dear ImGui 1.91.9b and the pinned
+imgui-rs 0.12 fork revision `7a89260`; no
 external custom-widget consumer needs to extend it yet. The evidence and future
 part-style requirements live in [Resolver findings](docs/resolver-findings.md).
 
@@ -141,7 +142,9 @@ IMGUI_PAINTER_DEMO_UI_SCALE=2.0 cargo run -p imgui-painter --example painter_dem
 
 ## Dependency bump checklist
 
-On any imgui/imgui-sys version bump, rerun the visual gate at 1×, 1.5×, and 2×.
+On any imgui/imgui-sys source or version bump, rerun the visual gate at 1×,
+1.5×, and 2×. The authoritative compatibility target is Dear ImGui 1.91.9b
+through imgui-rs fork revision `7a89260c79ad1f9d4bfe81d6ca1b76ad38a6b3e3`.
 Re-verify the original four widgets, Slider frame/fill/grab alignment and
 temporary input, visible/hidden-label Combo popup lifecycle, non-leaf/leaf
 TreeNode disclosure alignment, disabled alpha, and physical-pixel hairlines.
