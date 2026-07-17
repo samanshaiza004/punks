@@ -13,6 +13,11 @@ mod theme;
 
 pub use theme::apply_theme;
 
+/// Host callback that begins a native OS drag for one or more files — the
+/// canonicalized paths of the drag payload (the whole selection on a selected
+/// row, or the single row otherwise). `punks-standalone` supplies it.
+type DragFilesFn<'a> = &'a mut dyn FnMut(&[PathBuf]);
+
 /// One editable metadata field's panel state, seeded from the file once per
 /// selection (see `seed_metadata_editor`).
 #[derive(Default, Clone)]
@@ -211,6 +216,76 @@ fn paint_popup_background(frame: &mut imgui_painter::Frame<'_>, rect: imgui_pain
 
 fn column_count(avail_width: f32) -> usize {
     ((avail_width / MIN_COLUMN_WIDTH).floor() as usize).max(1)
+}
+
+fn multi_select_flags() -> imgui::MultiSelectFlags {
+    imgui::MultiSelectFlags::BOX_SELECT_2D
+        | imgui::MultiSelectFlags::CLEAR_ON_ESCAPE
+        | imgui::MultiSelectFlags::CLEAR_ON_CLICK_VOID
+        | imgui::MultiSelectFlags::SCOPE_WINDOW
+        | imgui::MultiSelectFlags::SELECT_ON_CLICK_RELEASE
+}
+
+/// Apply Dear ImGui's copied requests to one application-owned candidate.
+/// `selectable` excludes browse directories while search passes every row.
+fn apply_selection_requests(
+    candidate: &mut Vec<usize>,
+    requests: impl IntoIterator<Item = imgui::SelectionRequest>,
+    item_count: usize,
+    selectable: impl Fn(usize) -> bool,
+) {
+    candidate.sort_unstable();
+    candidate.dedup();
+    for request in requests {
+        match request {
+            imgui::SelectionRequest::SetAll { selected: false } => candidate.clear(),
+            imgui::SelectionRequest::SetAll { selected: true } => {
+                candidate.clear();
+                candidate.extend((0..item_count).filter(|&i| selectable(i)));
+            }
+            imgui::SelectionRequest::SetRange {
+                selected,
+                first_item,
+                last_item,
+                ..
+            } => {
+                let (Ok(first), Ok(last)) =
+                    (usize::try_from(first_item), usize::try_from(last_item))
+                else {
+                    continue;
+                };
+                let lo = first.min(last);
+                let hi = first.max(last);
+                if lo >= item_count {
+                    continue;
+                }
+                for index in lo..=hi.min(item_count - 1) {
+                    if !selectable(index) {
+                        continue;
+                    }
+                    match candidate.binary_search(&index) {
+                        Ok(pos) if !selected => {
+                            candidate.remove(pos);
+                        }
+                        Err(pos) if selected => candidate.insert(pos, index),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn selection_if_revision_matches(
+    mut candidate: Vec<usize>,
+    started_revision: u64,
+    current_revision: u64,
+) -> Option<Vec<usize>> {
+    (started_revision == current_revision).then(|| {
+        candidate.sort_unstable();
+        candidate.dedup();
+        candidate
+    })
 }
 
 /// Scroll the child window (must be the current window) so row `row` is
@@ -446,7 +521,7 @@ impl BrowserPanel {
         ui: &imgui::Ui,
         browser: &mut SampleBrowser,
         frame: &mut imgui_painter::Frame<'_>,
-        on_drag_file: Option<&mut dyn FnMut(&Path)>,
+        on_drag_files: Option<DragFilesFn<'_>>,
     ) {
         #[cfg(debug_assertions)]
         self.row_decorations.set(0);
@@ -711,7 +786,7 @@ impl BrowserPanel {
         // so its text is selectable/copyable.
         let reserved = WAVEFORM_HEIGHT + ui.frame_height_with_spacing() + line_h;
         let body_height = (avail[1] - reserved).max(120.0);
-        let mut drag_requested: Option<PathBuf> = None;
+        let mut drag_requested: Option<Vec<PathBuf>> = None;
         let mut search_focused = false;
         let mut in_search = false;
 
@@ -888,14 +963,14 @@ impl BrowserPanel {
             inspector_bg.pop();
         }
 
-        if let Some(path) = drag_requested.as_deref() {
+        if let Some(paths) = drag_requested.as_deref() {
             // Latch before handing off: exactly one native drag session per
             // gesture, and therefore exactly one early-returned frame (the
             // skipped waveform/transport redraw is imperceptible at one frame;
             // un-latched it blanked the lower UI for the whole drag).
             self.drag_out_sent = true;
-            if let Some(on_drag_file) = on_drag_file {
-                on_drag_file(path);
+            if let Some(on_drag_files) = on_drag_files {
+                on_drag_files(paths);
             }
             return;
         }
@@ -1397,7 +1472,7 @@ impl BrowserPanel {
                 ui.text(format!("{} issue(s) found:", issues.len()));
                 ui.child_window("health_issues")
                     .size([-1.0, 150.0])
-                    .border(true)
+                    .child_flags(imgui::ChildFlags::BORDERS)
                     .build(|| {
                         for issue in issues {
                             let name = issue
@@ -1735,7 +1810,7 @@ impl BrowserPanel {
         ui: &imgui::Ui,
         browser: &mut SampleBrowser,
         frame: &mut imgui_painter::Frame<'_>,
-        drag_requested: &mut Option<PathBuf>,
+        drag_requested: &mut Option<Vec<PathBuf>>,
         search_focused: bool,
         up_key: Key,
         down_key: Key,
@@ -1797,7 +1872,9 @@ impl BrowserPanel {
             }
         }
 
+        let revision = browser.search_revision();
         let selected = browser.search_selected();
+        let mut candidate = browser.search_selection().to_vec();
         let mut click_action: Option<(usize, PathBuf)> = None;
         let row_material = theme::row_material();
 
@@ -1815,9 +1892,20 @@ impl BrowserPanel {
             }
         }
 
-        let clip = imgui::ListClipper::new(num_rows as i32)
+        let _view_id = ui.push_id("search-multi-select");
+        let _tab_id = ui.push_id_usize(browser.active_tab());
+        let _revision_lo = ui.push_id_int(revision as u32 as i32);
+        let _revision_hi = ui.push_id_int((revision >> 32) as u32 as i32);
+        let scope = ui.begin_multi_select(multi_select_flags(), candidate.len(), count);
+        apply_selection_requests(&mut candidate, scope.requests(), count, |_| true);
+        let range_src = usize::try_from(scope.range_src_item()).ok();
+
+        let mut clip = imgui::ListClipper::new(num_rows as i32)
             .items_height(row_stride)
             .begin(ui);
+        if let Some(source) = range_src.filter(|&source| source < count) {
+            clip.include_item_by_index((source / cols) as i32);
+        }
         'rows: for row in clip.iter() {
             for c in 0..cols {
                 let i = row as usize * cols + c;
@@ -1827,18 +1915,18 @@ impl BrowserPanel {
                 if c > 0 {
                     ui.same_line_with_pos(c as f32 * col_w);
                 }
-                // Extract owned data in a short block so the borrow on browser
-                // ends before we call any mutable method.
                 let (label, path) = {
                     let results = browser.search_results().unwrap();
                     let e = &results[i];
                     let parent_hint = relative_parent(root.as_deref(), &e.path);
-                    let label = format!("{}  ({})##sresult{}", e.name, parent_hint, i);
+                    let label = format!("{}  ({})", e.name, parent_hint);
                     (label, e.path.clone())
                 };
 
                 let sel_w = col_w - COLUMN_GUTTER;
-                let is_selected = selected == Some(i);
+                let is_selected = candidate.binary_search(&i).is_ok();
+                ui.set_next_item_selection_user_data(i);
+                let _row_id = ui.push_id_usize(i);
                 // SAFETY: the closure submits exactly one stock Selectable in the active window.
                 let clicked = unsafe {
                     imgui_painter::decorate_selectable(frame, &row_material, is_selected, || {
@@ -1871,7 +1959,17 @@ impl BrowserPanel {
                     && !self.drag_out_sent
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
-                    *drag_requested = Some(path);
+                    let paths = if is_selected {
+                        let results = browser.search_results().unwrap();
+                        candidate
+                            .iter()
+                            .filter_map(|&index| results.get(index))
+                            .map(|entry| entry.path.clone())
+                            .collect()
+                    } else {
+                        vec![path]
+                    };
+                    *drag_requested = Some(paths);
                     break 'rows;
                 }
                 if clicked {
@@ -1880,9 +1978,26 @@ impl BrowserPanel {
             }
         }
 
-        if let Some((i, path)) = click_action {
-            browser.select_search_result(i);
-            browser.play_file(&path);
+        let ended = scope.end();
+        apply_selection_requests(&mut candidate, ended.requests(), count, |_| true);
+        let nav_cursor = usize::try_from(ended.nav_id_item())
+            .ok()
+            .filter(|&index| index < count);
+        drop(ended);
+
+        let Some(candidate) =
+            selection_if_revision_matches(candidate, revision, browser.search_revision())
+        else {
+            browser.set_search_selection(Vec::new(), None);
+            return;
+        };
+
+        let clicked_cursor = click_action.as_ref().map(|(index, _)| *index);
+        browser.set_search_selection(candidate, clicked_cursor.or(nav_cursor).or(selected));
+        if let Some((_, path)) = click_action {
+            if !ui.io().key_shift && !ui.io().key_ctrl && !ui.io().key_super {
+                browser.play_file(&path);
+            }
         }
     }
 
@@ -1892,7 +2007,7 @@ impl BrowserPanel {
         ui: &imgui::Ui,
         browser: &mut SampleBrowser,
         frame: &mut imgui_painter::Frame<'_>,
-        drag_requested: &mut Option<PathBuf>,
+        drag_requested: &mut Option<Vec<PathBuf>>,
         search_focused: bool,
         up_key: Key,
         down_key: Key,
@@ -1957,7 +2072,9 @@ impl BrowserPanel {
         // mid-frame. Indexing browser.entries() below with the stale count
         // caused an out-of-bounds panic when the new directory had fewer
         // entries than the one just left.
+        let revision = browser.browse_revision();
         let selected = browser.selected();
+        let mut candidate = browser.selection().to_vec();
         let entry_count = browser.entries().len();
         let mut click_action: Option<(usize, bool, PathBuf)> = None;
         let row_material = theme::row_material();
@@ -1990,9 +2107,25 @@ impl BrowserPanel {
             }
         }
 
-        let clip = imgui::ListClipper::new(num_rows as i32)
+        let _view_id = ui.push_id("browse-multi-select");
+        let _tab_id = ui.push_id_usize(browser.active_tab());
+        let _revision_lo = ui.push_id_int(revision as u32 as i32);
+        let _revision_hi = ui.push_id_int((revision >> 32) as u32 as i32);
+        let scope = ui.begin_multi_select(multi_select_flags(), candidate.len(), entry_count);
+        apply_selection_requests(&mut candidate, scope.requests(), entry_count, |index| {
+            browser
+                .entries()
+                .get(index)
+                .is_some_and(|entry| !entry.is_directory)
+        });
+        let range_src = usize::try_from(scope.range_src_item()).ok();
+
+        let mut clip = imgui::ListClipper::new(num_rows as i32)
             .items_height(row_stride)
             .begin(ui);
+        if let Some(source) = range_src.filter(|&source| source < entry_count) {
+            clip.include_item_by_index((source / cols) as i32);
+        }
         'rows: for row in clip.iter() {
             for c in 0..cols {
                 let i = row as usize * cols + c;
@@ -2003,19 +2136,19 @@ impl BrowserPanel {
                     ui.same_line_with_pos(c as f32 * col_w);
                 }
 
-                // Extract owned data in a short block so the immutable borrow on
-                // browser ends before we call any mutable method.
                 let (label, is_dir, path) = {
                     let e = &browser.entries()[i];
                     let label = if e.is_directory {
-                        format!("> {}##entry{}", e.name, i)
+                        format!("> {}", e.name)
                     } else {
-                        format!("{}##entry{}", e.name, i)
+                        e.name.clone()
                     };
                     (label, e.is_directory, e.path.clone())
                 };
 
-                let is_selected = selected == Some(i) || browser.selection().contains(&i);
+                let is_selected = candidate.binary_search(&i).is_ok();
+                ui.set_next_item_selection_user_data(i);
+                let _row_id = ui.push_id_usize(i);
                 let sel_w = col_w - COLUMN_GUTTER;
                 let size = [sel_w.max(40.0), 0.0];
                 let clicked = if is_dir {
@@ -2085,7 +2218,17 @@ impl BrowserPanel {
                     && !self.drag_out_sent
                     && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
                 {
-                    *drag_requested = Some(path);
+                    let paths = if is_selected {
+                        candidate
+                            .iter()
+                            .filter_map(|&index| browser.entries().get(index))
+                            .filter(|entry| !entry.is_directory)
+                            .map(|entry| entry.path.clone())
+                            .collect()
+                    } else {
+                        vec![path]
+                    };
+                    *drag_requested = Some(paths);
                     break 'rows;
                 }
                 if clicked {
@@ -2094,24 +2237,34 @@ impl BrowserPanel {
             }
         }
 
-        // Apply click after the loop — avoids holding an immutable borrow
-        // on browser.entries() while calling mutable browser methods.
-        // Shift/Ctrl(Cmd)-click adjust the marked set for batch operations
-        // (see `selection`/`selection_paths`) without opening/playing anything
-        // — multi-selecting isn't "open this file". A directory always ignores
-        // modifiers: navigating into it is the only sensible click behavior.
+        let ended = scope.end();
+        apply_selection_requests(&mut candidate, ended.requests(), entry_count, |index| {
+            browser
+                .entries()
+                .get(index)
+                .is_some_and(|entry| !entry.is_directory)
+        });
+        let nav_cursor = usize::try_from(ended.nav_id_item())
+            .ok()
+            .filter(|&index| index < entry_count);
+        drop(ended);
+
+        let Some(candidate) =
+            selection_if_revision_matches(candidate, revision, browser.browse_revision())
+        else {
+            browser.set_browse_selection(Vec::new(), None);
+            return;
+        };
+
+        let clicked_cursor = click_action.as_ref().map(|(index, _, _)| *index);
+        browser.set_browse_selection(candidate, clicked_cursor.or(nav_cursor).or(selected));
+
         if let Some((i, is_dir, _)) = click_action {
             if is_dir {
-                browser.select(i);
                 if let Err(e) = browser.navigate_into(i) {
                     log::error!("navigate_into failed: {e}");
                 }
-            } else if ui.io().key_shift {
-                browser.range_select(i);
-            } else if ui.io().key_ctrl || ui.io().key_super {
-                browser.toggle_select(i);
-            } else {
-                browser.select(i);
+            } else if !ui.io().key_shift && !ui.io().key_ctrl && !ui.io().key_super {
                 browser.play_selected();
             }
         }
@@ -2848,4 +3001,79 @@ fn draw_metadata_editor_modal(
             ui.close_current_popup();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_selection_requests, selection_if_revision_matches};
+    use imgui::{SelectionDirection, SelectionRequest};
+
+    fn range(first: i64, last: i64, selected: bool) -> SelectionRequest {
+        SelectionRequest::SetRange {
+            selected,
+            direction: if first <= last {
+                SelectionDirection::Forward
+            } else {
+                SelectionDirection::Backward
+            },
+            first_item: first,
+            last_item: last,
+        }
+    }
+
+    #[test]
+    fn begin_and_end_requests_compose_on_one_candidate() {
+        let mut candidate = vec![0];
+        apply_selection_requests(&mut candidate, [range(1, 3, true)], 5, |_| true);
+        apply_selection_requests(&mut candidate, [range(2, 2, false)], 5, |_| true);
+        assert_eq!(candidate, vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn select_all_clear_all_and_ranges_are_bounded() {
+        let mut candidate = vec![4];
+        apply_selection_requests(
+            &mut candidate,
+            [SelectionRequest::SetAll { selected: true }],
+            4,
+            |_| true,
+        );
+        assert_eq!(candidate, vec![0, 1, 2, 3]);
+
+        apply_selection_requests(&mut candidate, [range(3, 1, false)], 4, |_| true);
+        assert_eq!(candidate, vec![0]);
+
+        apply_selection_requests(
+            &mut candidate,
+            [SelectionRequest::SetAll { selected: false }],
+            4,
+            |_| true,
+        );
+        assert!(candidate.is_empty());
+
+        apply_selection_requests(&mut candidate, [range(0, 8, true)], 0, |_| true);
+        assert!(candidate.is_empty());
+    }
+
+    #[test]
+    fn browse_request_application_excludes_directories() {
+        let directories = [false, true, false, true, false];
+        let mut candidate = Vec::new();
+        apply_selection_requests(
+            &mut candidate,
+            [SelectionRequest::SetAll { selected: true }],
+            directories.len(),
+            |index| !directories[index],
+        );
+        assert_eq!(candidate, vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn changed_dataset_revision_discards_stale_index_requests() {
+        assert_eq!(
+            selection_if_revision_matches(vec![3, 1, 3], 7, 7),
+            Some(vec![1, 3])
+        );
+        assert_eq!(selection_if_revision_matches(vec![1, 3], 7, 8), None);
+    }
 }
