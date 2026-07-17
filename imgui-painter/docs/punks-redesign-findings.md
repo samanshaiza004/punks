@@ -1,6 +1,7 @@
 # punks redesign findings (imgui-painter as a real application dependency)
 
-The punks2 "Neon Live" redesign (slices R1–R3b, plus the drag-gesture fix)
+The punks2 "Neon Live" redesign (slices R1–R3b, the drag-gesture fix, and the
+final typography/depth completion pass)
 rebuilt the app's chrome on imgui-painter: theme foundation, ~40 decorated
 button/row/field/checkbox sites, recipe-driven materials, and a measured
 per-row decoration cost. This document answers two questions: (1) can punks
@@ -9,29 +10,32 @@ pleasant enough that a developer could achieve it without understanding the
 library's internals. Entries are classified; not every inconvenience is
 something imgui-painter must absorb.
 
-## imgui-painter API/DX gaps
+## imgui-painter API/DX findings
 
-- No bridge between `recipes::Palette` tokens and stock ImGui style colors:
-  every non-decorated widget (collapsing headers, progress bar, scrollbars,
-  popup chrome, check marks, text) is hand-synced in punks-ui's
-  `theme::apply_theme`. The duplication is the single largest DX cost.
+- Resolved: `recipes::apply_imgui_colors` now maps the compact `Palette` onto
+  every stock ImGui color role through a statically-sized `imgui-sys` array.
+  Punks keeps only application metrics and semantic destructive red locally;
+  collapsing headers, tables, scrollbars, navigation, popup chrome, plots, and
+  text no longer require a second hand-maintained palette.
 - Ambient frame access is absent: decorating buttons in nested sidebar,
   inspector, and modal draw helpers required threading the mutable `Frame`
   through seven private signatures that otherwise did not need painter state —
   mechanical parameter plumbing through the UI call tree.
-- Decorators preserve last-item queries after the bracket (`is_item_hovered`,
+- Resolved/documented: decorators preserve last-item queries after the bracket (`is_item_hovered`,
   `is_item_active`, `item_rect_*`, drag-drop attachment). punks relies on this
   for tooltips, drag-drop, right-click handling, and the drag-out fix — it is
-  an undocumented guarantee that deserves a documented contract.
+  now a public compatibility contract with an executable ID/rect/hover/active
+  regression test. Drag/drop attachment remains in the human gate.
 - Recipe hover derivation (a ~10% tint toward white / one surface step) is
   imperceptible on light palettes — the recipes were visually validated on a
   dark rack. punks overrides `fill.hover` toward its selection token in
   theme.rs. Recipes could accept a hover intent or derive hover perceptually
   (contrast-aware) instead of by fixed tint.
-- Parity gap: `decorate_selectable` lacks a persistent-selection parameter —
-  `Selectable.active` means activation interaction, not selection — unlike
-  `decorate_tree_node`'s selected flag. punks swaps materials per row (the
-  tab-bar pattern). Recommend a `selected: bool` parameter for parity.
+- Resolved: `decorate_selectable` accepts persistent selection explicitly.
+  Priority is pressed interaction, selected, hovered, base. Idle selection
+  reuses the Material active token; a selected press derives a darker active
+  fill so rows do not lose click feedback. Punks deleted its parallel
+  selected-row Material and uses one row recipe.
 - No helper to paint a background strip/row behind a run of widgets in window
   flow; the manual rect-capture idiom (cursor pos + known height, paint via
   Canvas before submitting widgets) is required each time (transport strip).
@@ -67,8 +71,10 @@ something imgui-painter must absorb.
 
 ## punks-specific design choices (not library defects)
 
-- Light popup/window chrome via stock ImGui styling in `apply_theme` —
-  ownership of popup chrome deliberately remains with ImGui.
+- Popup sizing/lifecycle remains with ImGui. Punks paints the explicit current
+  popup rectangle as the first user draw operation, then submits stock popup
+  contents. An inset edge works inside the popup clip; an external painter
+  shadow would be clipped, so none is faked or pushed into the library.
 - The custom tab bar remains button-based (decorated) rather than asking
   imgui-painter for a tab widget.
 - Per-row `+` tag buttons removed — the Inspector Tags section owns tag
@@ -81,6 +87,31 @@ something imgui-painter must absorb.
   while repeated early returns blanked the lower UI. Fixed with press-origin
   detection (`is_item_active`) plus a one-per-gesture latch — which the
   preserved-last-item guarantee above makes possible on decorated rows.
+
+## Completion-pass evidence
+
+- The broad workspace, sidebar, results well, Inspector, waveform, transport,
+  and popup bodies all use Canvas or existing `panel`/`inset_panel` recipes.
+  No Punks-side vertex/index mutation or hand-written tessellation was needed.
+- Surface hierarchy composes cleanly but still requires the host to know flow
+  geometry: paint parent rectangles first, then submit transparent child
+  windows. That repeated ordering is real DX pressure, but a public flow-strip
+  or pane abstraction remains unearned without a second application consumer.
+- Inter Regular 4.1 replaces ProggyClean at 13 logical pixels. Explicit Latin,
+  Greek/Cyrillic, punctuation, arrow, and geometric-symbol ranges fix the
+  missing transport/Inspector glyphs while tightening vertical rhythm. The OFL
+  license ships beside the font.
+- The waveform is the deliberate identity risk: an orange multi-stop clip
+  surface with a semi-opaque dark min/max envelope, inset edge, dark outline,
+  blue playhead, and small inter-bucket gaps. Keeping those layers in one
+  Canvas preserves batching without collapsing dense files into an opaque
+  analyzer block.
+- The palette bridge makes stock CollapsingHeader chrome sufficient for the
+  Inspector: pale raised idle headers, restrained hover, blue active state.
+  A dedicated CollapsingHeader decorator is still not justified.
+- Mutable `Frame` plumbing and weak generic light-theme hover derivation remain
+  the two repeated library-level frictions. Both stay documented rather than
+  acquiring speculative APIs in this pass.
 
 ## Performance evidence
 
@@ -96,8 +127,16 @@ rows/frame at a one-second cadence.
   more allocations than decoration added, and the decorators ride the
   zero-alloc Canvas path. Per-row decoration cost at this scale is within
   noise.
-- Open: real-library / large-search-result numbers on the user's machine
-  (run the app with `PUNKS_UI_PERF=1` on a big folder and scroll).
+- Completion pass (real library, constrained 800x632 window, 10 decorated
+  rows/frame): idle browsing settled around 1.84-2.05 ms and 95-116
+  allocations/frame. Auditioning files with the layered waveform visible
+  generally measured 1.84-2.81 ms and 115-125 allocations/frame, with
+  occasional 3.44 ms / 138-allocation samples while selection, decoding, or
+  window activity changed. These are debug-build observations without a hard
+  machine-dependent threshold; they are not directly comparable to the
+  earlier small smoke-directory baseline. The completion pass remained
+  responsive while exercising long filenames, a narrow Inspector, pane
+  scrollbars, and the new broad layered surfaces.
 
 ## Verdicts
 
@@ -106,11 +145,12 @@ rows/frame at a one-second cadence.
    waveform — carries the reference's light glossy chrome with zero raw
    draw-list geometry in application code (CI-enforced), across four
    screenshot gates.
-2. **DX is workable but has a clear top-four.** The decorator transforms were
+2. **DX is workable and two top gaps are closed.** The decorator transforms were
    mechanical enough to delegate site-by-site; the recurring friction was
-   (a) the Palette↔ImGui-style hand-sync, (b) mutable-Frame plumbing,
-   (c) light-palette hover derivation, and (d) the `decorate_selectable`
-   selection-parity gap. None forced a bypass.
+   Palette↔ImGui-style hand-sync, mutable-Frame plumbing, light-palette hover
+   derivation, and Selectable selection parity. The palette and selection APIs
+   are now proven by Punks; Frame plumbing and generalized hover policy remain
+   open. None forced a bypass.
 3. **Acceptance criterion met:** no visual treatment required bypassing
    imgui-painter, and stock ImGui styling remains only where ownership
    deliberately stays with ImGui (popup chrome, scrollbars, headers, glyphs,

@@ -508,7 +508,7 @@ fn draw_decorated_widgets(
     ui.spacing();
     ui.set_next_item_width(260.0);
     unsafe {
-        decorate_selectable(&mut frame, &primary, || {
+        decorate_selectable(&mut frame, &primary, false, || {
             ui.selectable("A selectable row##dec")
         });
     }
@@ -1007,7 +1007,7 @@ fn draw_recipe_rack(ui: &imgui::Ui, painter: &mut Painter, state: &mut RackState
     let row = selected_row(&palette);
     for (index, label) in ["Transient layer", "Texture layer"].into_iter().enumerate() {
         if unsafe {
-            decorate_selectable(&mut frame, &row, || {
+            decorate_selectable(&mut frame, &row, state.row_selection == index, || {
                 ui.selectable_config(label)
                     .selected(state.row_selection == index)
                     .build()

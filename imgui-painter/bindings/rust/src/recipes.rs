@@ -1,5 +1,7 @@
 //! Small chrome recipes derived from host-owned palette tokens.
 
+use imgui_sys as sys;
+
 use crate::{
     Border, Canvas, Color, ColorStop, ComboStyle, Gradient, GradientMode, Material, Rect, Shadow,
     SliderStyle, StateColors, TreeStyle, Vec2,
@@ -43,8 +45,173 @@ fn tint(color: Color, amount: f32) -> Color {
     )
 }
 
+fn mix(a: Color, b: Color, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    let blend = |shift| {
+        let a = channel(a, shift) as f32;
+        let b = channel(b, shift) as f32;
+        (a + (b - a) * amount).round() as u8
+    };
+    crate::rgba(blend(0), blend(8), blend(16), blend(24))
+}
+
 fn with_alpha(color: Color, alpha: u8) -> Color {
     (color & 0x00ff_ffff) | ((alpha as Color) << 24)
+}
+
+fn color_f32(color: Color) -> [f32; 4] {
+    const SCALE: f32 = 1.0 / 255.0;
+    [
+        channel(color, 0) as f32 * SCALE,
+        channel(color, 8) as f32 * SCALE,
+        channel(color, 16) as f32 * SCALE,
+        channel(color, 24) as f32 * SCALE,
+    ]
+}
+
+/// Apply a [`Palette`] to every stock Dear ImGui color role.
+///
+/// This is the bridge for chrome imgui-painter deliberately leaves to ImGui:
+/// text, window/popup backgrounds, headers, tables, scrollbars, navigation,
+/// plots, and drag/drop feedback. The statically-sized array keeps this API
+/// independent of `imgui-rs` while making a version/count mismatch a compile
+/// error for the pinned `imgui-sys` ABI.
+pub fn apply_imgui_colors(
+    colors: &mut [[f32; 4]; sys::ImGuiCol_COUNT as usize],
+    palette: &Palette,
+) {
+    let transparent = crate::rgba(0, 0, 0, 0);
+    let frame_hover = mix(palette.surface_inset, palette.selection, 0.14);
+    let button_hover = mix(palette.surface_raised, palette.selection, 0.16);
+    let header_hover = mix(palette.surface_raised, palette.selection, 0.18);
+    let separator = with_alpha(palette.border_dark, 128);
+    let set = |colors: &mut [[f32; 4]; sys::ImGuiCol_COUNT as usize], slot, color| {
+        colors[slot as usize] = color_f32(color);
+    };
+
+    set(colors, sys::ImGuiCol_Text, palette.text);
+    set(colors, sys::ImGuiCol_TextDisabled, palette.text_muted);
+    set(colors, sys::ImGuiCol_WindowBg, palette.surface);
+    set(colors, sys::ImGuiCol_ChildBg, palette.surface);
+    set(colors, sys::ImGuiCol_PopupBg, palette.surface_raised);
+    set(colors, sys::ImGuiCol_Border, palette.border_dark);
+    set(colors, sys::ImGuiCol_BorderShadow, transparent);
+    set(colors, sys::ImGuiCol_FrameBg, palette.surface_inset);
+    set(colors, sys::ImGuiCol_FrameBgHovered, frame_hover);
+    set(
+        colors,
+        sys::ImGuiCol_FrameBgActive,
+        shade(palette.surface_inset, 0.08),
+    );
+    set(colors, sys::ImGuiCol_TitleBg, palette.surface);
+    set(colors, sys::ImGuiCol_TitleBgActive, palette.surface_raised);
+    set(colors, sys::ImGuiCol_TitleBgCollapsed, palette.surface);
+    set(colors, sys::ImGuiCol_MenuBarBg, palette.surface_raised);
+    set(
+        colors,
+        sys::ImGuiCol_ScrollbarBg,
+        with_alpha(palette.surface_inset, 180),
+    );
+    set(colors, sys::ImGuiCol_ScrollbarGrab, palette.border_dark);
+    set(
+        colors,
+        sys::ImGuiCol_ScrollbarGrabHovered,
+        mix(palette.border_dark, palette.selection, 0.35),
+    );
+    set(colors, sys::ImGuiCol_ScrollbarGrabActive, palette.selection);
+    set(colors, sys::ImGuiCol_CheckMark, palette.selection);
+    set(colors, sys::ImGuiCol_SliderGrab, palette.surface_raised);
+    set(colors, sys::ImGuiCol_SliderGrabActive, palette.selection);
+    set(colors, sys::ImGuiCol_Button, palette.surface_raised);
+    set(colors, sys::ImGuiCol_ButtonHovered, button_hover);
+    set(
+        colors,
+        sys::ImGuiCol_ButtonActive,
+        shade(palette.surface_raised, 0.12),
+    );
+    set(colors, sys::ImGuiCol_Header, palette.surface_raised);
+    set(colors, sys::ImGuiCol_HeaderHovered, header_hover);
+    set(colors, sys::ImGuiCol_HeaderActive, palette.selection);
+    set(colors, sys::ImGuiCol_Separator, separator);
+    set(
+        colors,
+        sys::ImGuiCol_SeparatorHovered,
+        mix(palette.border_dark, palette.selection, 0.45),
+    );
+    set(colors, sys::ImGuiCol_SeparatorActive, palette.selection);
+    set(
+        colors,
+        sys::ImGuiCol_ResizeGrip,
+        with_alpha(palette.border_dark, 72),
+    );
+    set(
+        colors,
+        sys::ImGuiCol_ResizeGripHovered,
+        with_alpha(palette.selection, 170),
+    );
+    set(colors, sys::ImGuiCol_ResizeGripActive, palette.selection);
+    set(colors, sys::ImGuiCol_Tab, palette.surface);
+    set(colors, sys::ImGuiCol_TabHovered, button_hover);
+    set(colors, sys::ImGuiCol_TabActive, palette.selection);
+    set(
+        colors,
+        sys::ImGuiCol_TabUnfocused,
+        shade(palette.surface, 0.04),
+    );
+    set(
+        colors,
+        sys::ImGuiCol_TabUnfocusedActive,
+        mix(palette.surface, palette.selection, 0.45),
+    );
+
+    // Semantic exceptions: these communicate data/action rather than chrome.
+    set(colors, sys::ImGuiCol_PlotLines, palette.text_muted);
+    set(colors, sys::ImGuiCol_PlotLinesHovered, palette.selection);
+    set(colors, sys::ImGuiCol_PlotHistogram, palette.accent);
+    set(
+        colors,
+        sys::ImGuiCol_PlotHistogramHovered,
+        tint(palette.accent, 0.12),
+    );
+    set(colors, sys::ImGuiCol_TableHeaderBg, palette.surface_raised);
+    set(colors, sys::ImGuiCol_TableBorderStrong, palette.border_dark);
+    set(
+        colors,
+        sys::ImGuiCol_TableBorderLight,
+        with_alpha(palette.border_dark, 112),
+    );
+    set(colors, sys::ImGuiCol_TableRowBg, transparent);
+    set(
+        colors,
+        sys::ImGuiCol_TableRowBgAlt,
+        with_alpha(palette.surface_raised, 96),
+    );
+    set(
+        colors,
+        sys::ImGuiCol_TextSelectedBg,
+        with_alpha(palette.selection, 96),
+    );
+    set(colors, sys::ImGuiCol_DragDropTarget, palette.accent);
+    set(
+        colors,
+        sys::ImGuiCol_NavHighlight,
+        with_alpha(palette.selection, 210),
+    );
+    set(
+        colors,
+        sys::ImGuiCol_NavWindowingHighlight,
+        with_alpha(palette.border_light, 220),
+    );
+    set(
+        colors,
+        sys::ImGuiCol_NavWindowingDimBg,
+        with_alpha(palette.text, 48),
+    );
+    set(
+        colors,
+        sys::ImGuiCol_ModalWindowDimBg,
+        with_alpha(palette.text, 76),
+    );
 }
 
 fn point(x: f32, y: f32) -> Vec2 {
@@ -299,5 +466,40 @@ mod tests {
         let combo = combo_field(&palette);
         assert_eq!(combo.frame, inset_control(&palette));
         assert_eq!(combo.arrow_region, raised_button(&palette));
+    }
+
+    #[test]
+    fn imgui_palette_bridge_assigns_every_color_role() {
+        let palette = palette();
+        let mut colors = [[f32::NAN; 4]; sys::ImGuiCol_COUNT as usize];
+        apply_imgui_colors(&mut colors, &palette);
+        assert!(colors.into_iter().flatten().all(f32::is_finite));
+    }
+
+    #[test]
+    fn imgui_palette_bridge_preserves_semantic_color_roles() {
+        let palette = palette();
+        let mut colors = [[0.0; 4]; sys::ImGuiCol_COUNT as usize];
+        apply_imgui_colors(&mut colors, &palette);
+        assert_eq!(
+            colors[sys::ImGuiCol_PlotLines as usize],
+            color_f32(palette.text_muted)
+        );
+        assert_eq!(
+            colors[sys::ImGuiCol_PlotHistogram as usize],
+            color_f32(palette.accent)
+        );
+        assert_eq!(
+            colors[sys::ImGuiCol_DragDropTarget as usize],
+            color_f32(palette.accent)
+        );
+        assert_eq!(
+            colors[sys::ImGuiCol_NavHighlight as usize],
+            color_f32(with_alpha(palette.selection, 210))
+        );
+        assert_eq!(
+            colors[sys::ImGuiCol_ModalWindowDimBg as usize],
+            color_f32(with_alpha(palette.text, 76))
+        );
     }
 }

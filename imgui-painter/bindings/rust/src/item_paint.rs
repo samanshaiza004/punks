@@ -79,6 +79,50 @@ impl StateColors {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectableVisualState {
+    Pressed,
+    Selected,
+    Hovered,
+    Idle,
+}
+
+fn selectable_visual_state(state: &ItemState, selected: bool) -> SelectableVisualState {
+    if state.active {
+        SelectableVisualState::Pressed
+    } else if selected {
+        SelectableVisualState::Selected
+    } else if state.hovered {
+        SelectableVisualState::Hovered
+    } else {
+        SelectableVisualState::Idle
+    }
+}
+
+fn shade_color(color: Color, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    let scale = 1.0 - amount;
+    let channel = |shift| (((color >> shift) & 0xff_u32) as f32 * scale).round() as u8;
+    crate::rgba(
+        channel(0),
+        channel(8),
+        channel(16),
+        ((color >> 24) & 0xff) as u8,
+    )
+}
+
+fn selectable_fill(material: &Material, state: &ItemState, selected: bool) -> Color {
+    match selectable_visual_state(state, selected) {
+        // `StateColors` deliberately remains small. Reuse Active for idle
+        // selection, then darken it only while pressed so persistent rows do
+        // not lose click feedback.
+        SelectableVisualState::Pressed if selected => shade_color(material.fill.active, 0.12),
+        SelectableVisualState::Pressed | SelectableVisualState::Selected => material.fill.active,
+        SelectableVisualState::Hovered => material.fill.hover,
+        SelectableVisualState::Idle => material.fill.base,
+    }
+}
+
 /// The deliberately small appearance shared by today's typed decorators.
 /// Multipart part styles and semantic states remain deferred until they have
 /// a real public consumer.
@@ -509,6 +553,22 @@ fn paint_material(canvas: &mut Canvas<'_>, rect: Rect, material: &Material, stat
     canvas.add_border(&resolved_border(material.border, state.style_alpha));
 }
 
+fn paint_material_color(
+    canvas: &mut Canvas<'_>,
+    rect: Rect,
+    material: &Material,
+    color: Color,
+    style_alpha: f32,
+) {
+    debug_assert!(rect_is_valid(rect));
+    canvas.rounded_rect(rect, material.radius.min(rect_height(rect) * 0.5));
+    if let Some(shadow) = material.shadow {
+        canvas.add_shadow(&resolved_shadow(shadow, style_alpha));
+    }
+    canvas.fill_color(with_style_alpha(color, style_alpha));
+    canvas.add_border(&resolved_border(material.border, style_alpha));
+}
+
 fn paint_material_slot(
     canvas: &mut Canvas<'_>,
     rect: Rect,
@@ -635,6 +695,11 @@ pub unsafe fn decorate_button(
 
 /// Decorate one stock ImGui Selectable while preserving its behavior and text.
 ///
+/// Last-item ID, bounds, hover, active, and drag/drop attachment remain the
+/// submitted Selectable's after this function returns. Persistent selection
+/// paints below active interaction but above hover/base without changing
+/// ImGui's own selected state or return value.
+///
 /// # Safety
 /// A live current ImGui context/window/frame and unsplit current draw list are required.
 ///
@@ -643,6 +708,7 @@ pub unsafe fn decorate_button(
 pub unsafe fn decorate_selectable(
     frame: &mut Frame<'_>,
     material: &Material,
+    selected: bool,
     widget: impl FnOnce() -> bool,
 ) -> bool {
     item_paint(
@@ -651,7 +717,13 @@ pub unsafe fn decorate_selectable(
         widget,
         |_, state, captured, canvas| {
             let anatomy = single_anatomy(Decorator::Selectable, state, captured);
-            paint_material(canvas, anatomy.chrome(), material, state);
+            paint_material_color(
+                canvas,
+                anatomy.chrome(),
+                material,
+                selectable_fill(material, state, selected),
+                state.style_alpha,
+            );
         },
     )
 }
@@ -919,6 +991,60 @@ mod tests {
     }
 
     #[test]
+    fn selectable_priority_is_pressed_selected_hovered_idle() {
+        assert_eq!(
+            selectable_visual_state(&state(true, true), true),
+            SelectableVisualState::Pressed
+        );
+        assert_eq!(
+            selectable_visual_state(&state(true, false), true),
+            SelectableVisualState::Selected
+        );
+        assert_eq!(
+            selectable_visual_state(&state(true, false), false),
+            SelectableVisualState::Hovered
+        );
+        assert_eq!(
+            selectable_visual_state(&state(false, false), false),
+            SelectableVisualState::Idle
+        );
+    }
+
+    #[test]
+    fn selected_selectable_stays_active_colored_and_darkens_when_pressed() {
+        let selected = rgba(100, 120, 140, 255);
+        let material = Material {
+            radius: 0.0,
+            fill: StateColors {
+                base: BASE,
+                hover: HOVER,
+                active: selected,
+            },
+            border: Border {
+                thickness: 0.0,
+                color: 0,
+            },
+            shadow: None,
+        };
+        assert_eq!(
+            selectable_fill(&material, &state(false, false), true),
+            selected
+        );
+        assert_eq!(
+            selectable_fill(&material, &state(true, false), true),
+            selected
+        );
+        assert_eq!(
+            selectable_fill(&material, &state(true, true), true),
+            shade_color(selected, 0.12)
+        );
+        assert_eq!(
+            selectable_fill(&material, &state(true, false), false),
+            HOVER
+        );
+    }
+
+    #[test]
     fn slider_visual_state_priority_is_adjusting_focused_hovered_idle() {
         assert_eq!(
             slider_visual_state(&focused_state(true, true, true)),
@@ -1174,6 +1300,91 @@ mod tests {
         assert!(!rect_contains(outer, rect(2.0, 2.0, 120.0, 18.0)));
         assert!(!rect_is_valid(rect(f32::NAN, 0.0, 10.0, 10.0)));
         assert!(!rect_is_valid(rect(10.0, 0.0, 5.0, 10.0)));
+    }
+
+    #[test]
+    fn decoration_preserves_last_item_queries() {
+        let _context_lock = IMGUI_CONTEXT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut context = imgui::Context::create();
+        context.set_ini_filename(None);
+        context.io_mut().display_size = [640.0, 480.0];
+        context.io_mut().delta_time = 1.0 / 60.0;
+        context.fonts().build_rgba32_texture();
+
+        let material = Material {
+            radius: 2.0,
+            fill: StateColors {
+                base: rgba(20, 30, 40, 255),
+                hover: rgba(30, 40, 50, 255),
+                active: rgba(40, 50, 60, 255),
+            },
+            border: Border {
+                thickness: 1.0,
+                color: rgba(255, 255, 255, 30),
+            },
+            shadow: None,
+        };
+        let mut painter = crate::Painter::new();
+
+        // Establish the window and an up state before the active frame.
+        context.io_mut().mouse_pos = [30.0, 18.0];
+        context.io_mut().mouse_down[0] = false;
+        {
+            let ui = context.frame();
+            ui.window("last-item contract")
+                .position([0.0, 0.0], imgui::Condition::Always)
+                .size([300.0, 120.0], imgui::Condition::Always)
+                .title_bar(false)
+                .movable(false)
+                .build(|| {
+                    ui.button("Contract button");
+                });
+            context.render();
+        }
+
+        context.io_mut().mouse_pos = [30.0, 18.0];
+        context.io_mut().mouse_down[0] = true;
+        let ui = context.frame();
+        let mut frame = painter.begin_frame();
+        ui.window("last-item contract")
+            .position([0.0, 0.0], imgui::Condition::Always)
+            .size([300.0, 120.0], imgui::Condition::Always)
+            .title_bar(false)
+            .movable(false)
+            .build(|| {
+                let mut inside_id = 0;
+                let mut inside_min = sys::ImVec2 { x: 0.0, y: 0.0 };
+                let mut inside_max = sys::ImVec2 { x: 0.0, y: 0.0 };
+                let mut inside_hovered = false;
+                let mut inside_active = false;
+                unsafe {
+                    decorate_button(&mut frame, &material, || {
+                        let clicked = ui.button("Contract button");
+                        inside_id = sys::igGetItemID();
+                        sys::igGetItemRectMin(&mut inside_min);
+                        sys::igGetItemRectMax(&mut inside_max);
+                        inside_hovered = sys::igIsItemHovered(0);
+                        inside_active = sys::igIsItemActive();
+                        clicked
+                    });
+
+                    assert_eq!(sys::igGetItemID(), inside_id);
+                    let mut after_min = sys::ImVec2 { x: 0.0, y: 0.0 };
+                    let mut after_max = sys::ImVec2 { x: 0.0, y: 0.0 };
+                    sys::igGetItemRectMin(&mut after_min);
+                    sys::igGetItemRectMax(&mut after_max);
+                    assert_eq!([after_min.x, after_min.y], [inside_min.x, inside_min.y]);
+                    assert_eq!([after_max.x, after_max.y], [inside_max.x, inside_max.y]);
+                    assert_eq!(sys::igIsItemHovered(0), inside_hovered);
+                    assert_eq!(sys::igIsItemActive(), inside_active);
+                    assert!(inside_hovered);
+                    assert!(inside_active);
+                }
+            });
+        drop(frame);
+        context.render();
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use drag::{DragItem, Image};
-use imgui::FontSource;
+use imgui::{FontGlyphRanges, FontSource};
 use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
 use pollster::block_on;
@@ -24,6 +24,16 @@ use winit::{
 
 use punks_browser::SampleBrowser;
 use punks_ui::BrowserPanel;
+
+const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+const UI_GLYPH_RANGES: &[u32] = &[
+    0x0020, 0x024f, // Basic + Extended Latin.
+    0x0370, 0x052f, // Greek + Cyrillic.
+    0x2000, 0x206f, // General punctuation.
+    0x2190, 0x21ff, // Arrows.
+    0x25a0, 0x26ff, // Geometric/misc symbols, including transport icons.
+    0,
+];
 
 #[cfg(debug_assertions)]
 struct CountingAllocator(System);
@@ -261,14 +271,18 @@ impl AppWindow {
         );
 
         let hidpi = gpu.window.scale_factor();
-        let font_size = (14.0 * hidpi) as f32;
+        let font_size = (13.0 * hidpi) as f32;
         context.io_mut().font_global_scale = (1.0 / hidpi) as f32;
 
-        context.fonts().add_font(&[FontSource::DefaultFontData {
+        context.fonts().add_font(&[FontSource::TtfData {
+            data: INTER_REGULAR,
+            size_pixels: font_size,
             config: Some(imgui::FontConfig {
-                oversample_h: 1,
-                pixel_snap_h: true,
+                glyph_ranges: FontGlyphRanges::from_slice(UI_GLYPH_RANGES),
+                oversample_h: 2,
+                pixel_snap_h: false,
                 size_pixels: font_size,
+                name: Some("Inter Regular 4.1".into()),
                 ..Default::default()
             }),
         }]);

@@ -1,19 +1,21 @@
-//! Palette tokens and stock ImGui style colors have no imgui-painter bridge, so they are hand-synced here; this duplication is recorded in the redesign findings.
+//! Punks' compact blue-gray desktop theme and application-specific surfaces.
 
-use imgui::StyleColor;
-use imgui_painter::{recipes, recipes::Palette, rgba, Border, Color, Material, StateColors};
+use imgui_painter::{
+    recipes, recipes::Palette, rgba, Border, Canvas, Color, ColorStop, Gradient, GradientMode,
+    Material, Rect, Shadow, StateColors, Vec2,
+};
 
 pub(crate) fn neon_palette() -> Palette {
     Palette {
-        surface: rgba(197, 211, 226, 255),
+        surface: rgba(188, 203, 221, 255),
         surface_raised: rgba(220, 231, 242, 255),
-        surface_inset: rgba(174, 191, 210, 255),
-        border_light: rgba(240, 246, 252, 255),
-        border_dark: rgba(90, 107, 128, 255),
-        accent: rgba(240, 145, 58, 255),
-        selection: rgba(59, 120, 208, 255),
-        text: rgba(16, 23, 34, 255),
-        text_muted: rgba(58, 72, 92, 255),
+        surface_inset: rgba(168, 185, 205, 255),
+        border_light: rgba(245, 249, 253, 255),
+        border_dark: rgba(82, 103, 126, 255),
+        accent: rgba(233, 141, 61, 255),
+        selection: rgba(61, 120, 200, 255),
+        text: rgba(22, 34, 49, 255),
+        text_muted: rgba(75, 92, 112, 255),
     }
 }
 
@@ -83,9 +85,6 @@ pub(crate) fn toolbar_material() -> Material {
     material
 }
 
-// decorate_selectable has no persistent-selection parameter (Selectable.active
-// is activation interaction, not selection), so the app swaps materials per
-// row — the same pattern the tab bar uses.
 pub(crate) fn row_material() -> Material {
     let palette = neon_palette();
     Material {
@@ -93,28 +92,11 @@ pub(crate) fn row_material() -> Material {
         fill: StateColors {
             base: palette.surface,
             hover: mix(palette.surface, palette.selection, 0.15),
-            active: mix(palette.surface, palette.selection, 0.35),
+            active: palette.selection,
         },
         border: Border {
             thickness: 0.0,
             color: palette.surface,
-        },
-        shadow: None,
-    }
-}
-
-pub(crate) fn row_selected_material() -> Material {
-    let palette = neon_palette();
-    Material {
-        radius: 1.0,
-        fill: StateColors {
-            base: palette.selection,
-            hover: tint(palette.selection, 0.08),
-            active: shade(palette.selection, 0.90),
-        },
-        border: Border {
-            thickness: 0.0,
-            color: palette.selection,
         },
         shadow: None,
     }
@@ -149,82 +131,159 @@ pub(crate) fn color_f32(color: Color) -> [f32; 4] {
     ]
 }
 
-fn lighter(color: [f32; 4]) -> [f32; 4] {
-    const AMOUNT: f32 = 0.10;
-    [
-        color[0] + (1.0 - color[0]) * AMOUNT,
-        color[1] + (1.0 - color[1]) * AMOUNT,
-        color[2] + (1.0 - color[2]) * AMOUNT,
-        color[3],
-    ]
+fn alpha(color: Color, value: u8) -> Color {
+    (color & 0x00ff_ffff) | ((value as Color) << 24)
 }
 
-fn darker(color: [f32; 4]) -> [f32; 4] {
-    const SCALE: f32 = 0.86;
-    [
-        color[0] * SCALE,
-        color[1] * SCALE,
-        color[2] * SCALE,
-        color[3],
-    ]
+fn point(x: f32, y: f32) -> Vec2 {
+    Vec2 { x, y }
 }
 
-fn with_alpha(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
-    color[3] = alpha;
-    color
+/// Paint the full application workspace before any controls are submitted.
+pub(crate) fn paint_workspace_surface(canvas: &mut Canvas<'_>, rect: Rect) {
+    let palette = neon_palette();
+    let hairline = canvas.device_pixel();
+    canvas.rounded_rect(rect, 0.0);
+    canvas.fill_gradient(&Gradient {
+        mode: GradientMode::Linear,
+        from: point(rect.min.x, rect.min.y),
+        to: point(rect.min.x, rect.max.y),
+        stops: vec![
+            ColorStop {
+                t: 0.0,
+                color: tint(palette.surface, 0.08),
+            },
+            ColorStop {
+                t: 0.42,
+                color: palette.surface,
+            },
+            ColorStop {
+                t: 1.0,
+                color: shade(palette.surface, 0.96),
+            },
+        ],
+    });
+    canvas.fill_band_color(
+        rect.min.y + hairline,
+        rect.min.y + hairline * 2.0,
+        alpha(palette.border_light, 180),
+    );
+}
+
+/// Paint an explicit popup rectangle. The caller owns popup sizing/lifecycle.
+pub(crate) fn paint_popup_surface(canvas: &mut Canvas<'_>, rect: Rect) {
+    let palette = neon_palette();
+    let hairline = canvas.device_pixel();
+    canvas.rounded_rect(rect, 3.0);
+    canvas.fill_gradient(&Gradient {
+        mode: GradientMode::Linear,
+        from: point(rect.min.x, rect.min.y),
+        to: point(rect.min.x, rect.max.y),
+        stops: vec![
+            ColorStop {
+                t: 0.0,
+                color: tint(palette.surface_raised, 0.05),
+            },
+            ColorStop {
+                t: 1.0,
+                color: palette.surface_raised,
+            },
+        ],
+    });
+    canvas.add_shadow(&Shadow {
+        offset: point(0.0, 1.0),
+        blur: 4.0,
+        spread: hairline,
+        color: alpha(palette.border_dark, 90),
+        inset: true,
+    });
+    canvas.add_border(&Border {
+        thickness: hairline,
+        color: palette.border_dark,
+    });
+    canvas.fill_band_color(
+        rect.min.y + hairline,
+        rect.min.y + hairline * 2.0,
+        alpha(palette.border_light, 190),
+    );
+}
+
+/// Paint the orange clip surface; waveform geometry is layered over it by the caller.
+pub(crate) fn paint_waveform_surface(canvas: &mut Canvas<'_>, rect: Rect) {
+    let palette = neon_palette();
+    let hairline = canvas.device_pixel();
+    canvas.rounded_rect(rect, 2.0);
+    canvas.fill_gradient(&Gradient {
+        mode: GradientMode::Linear,
+        from: point(rect.min.x, rect.min.y),
+        to: point(rect.min.x, rect.max.y),
+        stops: vec![
+            ColorStop {
+                t: 0.0,
+                color: tint(palette.accent, 0.18),
+            },
+            ColorStop {
+                t: 0.42,
+                color: palette.accent,
+            },
+            ColorStop {
+                t: 1.0,
+                color: shade(palette.accent, 0.88),
+            },
+        ],
+    });
+    canvas.add_shadow(&Shadow {
+        offset: point(0.0, 2.0),
+        blur: 4.0,
+        spread: hairline,
+        color: alpha(palette.text, 72),
+        inset: true,
+    });
+    canvas.fill_band_color(
+        rect.min.y + hairline,
+        rect.min.y + hairline * 2.0,
+        alpha(palette.border_light, 130),
+    );
+}
+
+pub(crate) fn waveform_bar_color() -> Color {
+    alpha(neon_palette().text, 205)
+}
+
+pub(crate) fn waveform_outline_color() -> Color {
+    alpha(neon_palette().text, 150)
+}
+
+pub(crate) fn waveform_playhead_color() -> Color {
+    neon_palette().selection
+}
+
+pub(crate) fn waveform_text_color() -> Color {
+    alpha(neon_palette().text, 225)
 }
 
 /// Applies the punks Neon Live theme; punks-standalone calls this at startup.
 pub fn apply_theme(style: &mut imgui::Style) {
     let palette = neon_palette();
-    let surface = color_f32(palette.surface);
-    let surface_raised = color_f32(palette.surface_raised);
-    let surface_inset = color_f32(palette.surface_inset);
-    let border_dark = color_f32(palette.border_dark);
-    let selection = color_f32(palette.selection);
-    let text = color_f32(palette.text);
-    let text_muted = color_f32(palette.text_muted);
+    recipes::apply_imgui_colors(&mut style.colors, &palette);
 
     style.window_rounding = 0.0;
-    style.child_rounding = 2.0;
+    style.child_rounding = 3.0;
     style.popup_rounding = 3.0;
     style.frame_rounding = 2.0;
     style.grab_rounding = 2.0;
     style.scrollbar_rounding = 2.0;
+    style.tab_rounding = 2.0;
     style.frame_border_size = 0.0;
     style.window_border_size = 0.0;
-    style.frame_padding = [8.0, 4.0];
-    style.item_spacing = [8.0, 6.0];
-    style.scrollbar_size = 12.0;
-
-    style[StyleColor::WindowBg] = surface;
-    style[StyleColor::ChildBg] = surface;
-    style[StyleColor::PopupBg] = surface_raised;
-    style[StyleColor::Text] = text;
-    style[StyleColor::TextDisabled] = text_muted;
-    style[StyleColor::Button] = surface_raised;
-    style[StyleColor::ButtonHovered] = lighter(surface_raised);
-    style[StyleColor::ButtonActive] = darker(surface_raised);
-    style[StyleColor::FrameBg] = surface_inset;
-    style[StyleColor::FrameBgHovered] = lighter(surface_inset);
-    style[StyleColor::FrameBgActive] = darker(surface_inset);
-    style[StyleColor::Header] = with_alpha(selection, 0.85);
-    style[StyleColor::HeaderHovered] = with_alpha(selection, 0.95);
-    style[StyleColor::HeaderActive] = selection;
-    style[StyleColor::SliderGrab] = border_dark;
-    style[StyleColor::SliderGrabActive] = selection;
-    style[StyleColor::CheckMark] = selection;
-    style[StyleColor::Border] = border_dark;
-    style[StyleColor::Separator] = with_alpha(border_dark, 0.6);
-    style[StyleColor::ScrollbarBg] = with_alpha(surface_inset, 0.6);
-    style[StyleColor::ScrollbarGrab] = with_alpha(border_dark, 0.55);
-    style[StyleColor::ScrollbarGrabHovered] = with_alpha(border_dark, 0.75);
-    style[StyleColor::ScrollbarGrabActive] = border_dark;
-    style[StyleColor::PlotHistogram] = selection;
-    style[StyleColor::NavHighlight] = selection;
-    style[StyleColor::TitleBg] = surface;
-    style[StyleColor::TitleBgActive] = surface;
-    style[StyleColor::TitleBgCollapsed] = surface;
+    style.popup_border_size = 1.0;
+    style.window_padding = [8.0, 7.0];
+    style.frame_padding = [6.0, 3.0];
+    style.item_spacing = [6.0, 4.0];
+    style.item_inner_spacing = [4.0, 3.0];
+    style.cell_padding = [4.0, 2.0];
+    style.scrollbar_size = 10.0;
+    style.grab_min_size = 8.0;
 }
 
 #[cfg(test)]

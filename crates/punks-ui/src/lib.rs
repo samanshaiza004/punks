@@ -173,12 +173,6 @@ const KEYBIND_ACTIONS: &[(BrowserAction, &str)] = &[
     (BrowserAction::ToggleInspector, "Toggle inspector"),
 ];
 
-// text_muted.
-const TAB_CLOSE_TEXT: [f32; 4] = [0.22745, 0.28235, 0.36078, 1.0];
-
-// selection darkened 20%.
-const DIR_TEXT_COLOR: [f32; 4] = [0.18510, 0.37647, 0.65255, 1.0];
-
 // Left rail: library status + tag filters live here; tags on rows are pills.
 const SIDEBAR_WIDTH: f32 = 180.0;
 /// Width of the drag strip between Results and the Inspector.
@@ -186,17 +180,34 @@ const SPLITTER_WIDTH: f32 = 6.0;
 /// Height of the waveform strip. Shared so the panel can reserve exactly the
 /// right room below the file list for it + the metadata lines + transport row.
 const WAVEFORM_HEIGHT: f32 = 64.0;
-// surface.
-const SIDEBAR_BG: [f32; 4] = [0.77255, 0.82745, 0.88627, 1.0];
-// surface_inset.
-const PILL_BG: [f32; 4] = [0.68235, 0.74902, 0.82353, 1.0];
-// text.
-const PILL_TEXT: [f32; 4] = [0.06275, 0.09020, 0.13333, 1.0];
 
 // File list lays out entries in width-adaptive columns; each column is at least
 // this wide, so wide windows show 2+ columns and narrow ones collapse to 1.
 const MIN_COLUMN_WIDTH: f32 = 300.0;
 const COLUMN_GUTTER: f32 = 8.0;
+
+fn painter_rect(min: [f32; 2], size: [f32; 2]) -> imgui_painter::Rect {
+    imgui_painter::Rect {
+        min: imgui_painter::Vec2 {
+            x: min[0],
+            y: min[1],
+        },
+        max: imgui_painter::Vec2 {
+            x: min[0] + size[0],
+            y: min[1] + size[1],
+        },
+    }
+}
+
+fn paint_popup_background(frame: &mut imgui_painter::Frame<'_>, rect: imgui_painter::Rect) {
+    // SAFETY: callers invoke this as the first operation inside the current
+    // popup. The explicit rect comes from that popup; no sizing is inferred.
+    unsafe {
+        let dl = imgui::sys::igGetWindowDrawList();
+        let mut canvas = frame.canvas(dl);
+        theme::paint_popup_surface(&mut canvas, rect);
+    }
+}
 
 fn column_count(avail_width: f32) -> usize {
     ((avail_width / MIN_COLUMN_WIDTH).floor() as usize).max(1)
@@ -455,6 +466,18 @@ impl BrowserPanel {
         let inset_material = theme::inset_field_material();
         let volume_slider_style = theme::volume_slider_style();
 
+        // Paint the application workspace first. ImGui still owns the window,
+        // clipping and every submitted item; this only replaces the flat root
+        // fill with the redesign's restrained blue-gray depth cue.
+        unsafe {
+            let dl = imgui::sys::igGetWindowDrawList();
+            let mut canvas = frame.canvas(dl);
+            theme::paint_workspace_surface(
+                &mut canvas,
+                painter_rect(ui.window_pos(), ui.window_size()),
+            );
+        }
+
         // When the active tab changes, reload the search box from that tab's
         // stored query and resync the debounce trackers so we don't re-issue a
         // search for text the tab already has results for.
@@ -551,7 +574,10 @@ impl BrowserPanel {
             // tab. Hidden on the only tab so one always remains.
             if tab_count > 1 {
                 ui.same_line_with_spacing(0.0, 0.0);
-                let ctext = ui.push_style_color(imgui::StyleColor::Text, TAB_CLOSE_TEXT);
+                let ctext = ui.push_style_color(
+                    imgui::StyleColor::Text,
+                    theme::color_f32(palette.text_muted),
+                );
                 // SAFETY: the closure submits exactly one stock button in the active window.
                 let clicked = unsafe {
                     imgui_painter::decorate_button(frame, &tab_material, || {
@@ -631,9 +657,9 @@ impl BrowserPanel {
         let inspector_clicked = unsafe {
             imgui_painter::decorate_button(frame, &toolbar_material, || {
                 ui.button(if self.prefs.inspector_visible {
-                    "Inspector \u{25b8}"
+                    "Inspector \u{25b6}"
                 } else {
-                    "Inspector \u{25c2}"
+                    "Inspector \u{25c0}"
                 })
             })
         };
@@ -728,9 +754,33 @@ impl BrowserPanel {
         let content_w =
             (full_w - SIDEBAR_WIDTH - splitter_w - inspector_w - gap_count * spacing).max(160.0);
 
+        // Parent draw-list surfaces come before transparent child windows:
+        // workspace -> pane chrome -> children -> rows/widgets -> overlays.
+        let body_min = ui.cursor_screen_pos();
+        let sidebar_rect = painter_rect(body_min, [SIDEBAR_WIDTH, body_height]);
+        let content_min = [body_min[0] + SIDEBAR_WIDTH + spacing, body_min[1]];
+        let content_rect = painter_rect(content_min, [content_w, body_height]);
+        let inspector_min = [
+            content_min[0] + content_w + spacing + splitter_w + spacing,
+            body_min[1],
+        ];
+        unsafe {
+            let dl = imgui::sys::igGetWindowDrawList();
+            let mut canvas = frame.canvas(dl);
+            imgui_painter::recipes::panel(&mut canvas, sidebar_rect, &palette);
+            imgui_painter::recipes::inset_panel(&mut canvas, content_rect, &palette);
+            if self.prefs.inspector_visible {
+                imgui_painter::recipes::panel(
+                    &mut canvas,
+                    painter_rect(inspector_min, [inspector_w, body_height]),
+                    &palette,
+                );
+            }
+        }
+
         // Left rail: library status + tag filters. Tag display on rows stays
         // inline (pills); the sidebar is only for filtering and library setup.
-        let sidebar_bg = ui.push_style_color(imgui::StyleColor::ChildBg, SIDEBAR_BG);
+        let sidebar_bg = ui.push_style_color(imgui::StyleColor::ChildBg, [0.0, 0.0, 0.0, 0.0]);
         ui.child_window("sidebar")
             .size([SIDEBAR_WIDTH, body_height])
             .build(|| {
@@ -739,6 +789,7 @@ impl BrowserPanel {
         sidebar_bg.pop();
 
         ui.same_line();
+        let content_bg = ui.push_style_color(imgui::StyleColor::ChildBg, [0.0, 0.0, 0.0, 0.0]);
         ui.child_window("content")
             .size([content_w, body_height])
             .build(|| {
@@ -807,6 +858,7 @@ impl BrowserPanel {
                     }
                 });
             });
+        content_bg.pop();
 
         if self.prefs.inspector_visible {
             // Splitter: an invisible hit strip whose horizontal drag resizes the
@@ -826,7 +878,8 @@ impl BrowserPanel {
             }
 
             ui.same_line();
-            let inspector_bg = ui.push_style_color(imgui::StyleColor::ChildBg, SIDEBAR_BG);
+            let inspector_bg =
+                ui.push_style_color(imgui::StyleColor::ChildBg, [0.0, 0.0, 0.0, 0.0]);
             ui.child_window("inspector")
                 .size([inspector_w, body_height])
                 .build(|| {
@@ -1054,6 +1107,7 @@ impl BrowserPanel {
         draw_metadata_editor_modal(ui, browser, &mut self.editor, frame);
 
         ui.popup("##tag_editor", || {
+            paint_popup_background(frame, painter_rect(ui.window_pos(), ui.window_size()));
             if let Some(path) = self.tag_popup_path.clone() {
                 // If the row this popup was opened for is part of a live
                 // multi-selection, tag edits apply to the whole marked set —
@@ -1144,6 +1198,7 @@ impl BrowserPanel {
         });
 
         ui.popup("##tag_delete", || {
+            paint_popup_background(frame, painter_rect(ui.window_pos(), ui.window_size()));
             if let Some((id, name)) = self.tag_delete_target.clone() {
                 if ui
                     .selectable_config(format!("Delete tag \"{name}\""))
@@ -1165,7 +1220,6 @@ impl BrowserPanel {
         let toolbar_material = theme::toolbar_material();
         let raised_material = theme::raised_material();
         let row_material = theme::row_material();
-        let row_selected_material = theme::row_selected_material();
         ui.spacing();
         ui.text_disabled("LIBRARY");
         ui.separator();
@@ -1268,14 +1322,9 @@ impl BrowserPanel {
                 for t in &tags {
                     let selected = filter.contains(&t.id);
                     let label = format!("{}  ({})##sbtag{}", t.name, t.count, t.id);
-                    let material = if selected {
-                        &row_selected_material
-                    } else {
-                        &row_material
-                    };
                     // SAFETY: the closure submits exactly one stock Selectable in the active window.
                     if unsafe {
-                        imgui_painter::decorate_selectable(frame, material, || {
+                        imgui_painter::decorate_selectable(frame, &row_material, selected, || {
                             ui.selectable_config(&label).selected(selected).build()
                         })
                     } {
@@ -1659,6 +1708,7 @@ impl BrowserPanel {
             ui.open_popup("##delete_library");
         }
         ui.popup("##delete_library", || {
+            paint_popup_background(frame, painter_rect(ui.window_pos(), ui.window_size()));
             ui.text("Delete this library's .punks store?");
             ui.text_disabled("Tags and cached waveforms are lost. Irreversible.");
             ui.spacing();
@@ -1750,7 +1800,6 @@ impl BrowserPanel {
         let selected = browser.search_selected();
         let mut click_action: Option<(usize, PathBuf)> = None;
         let row_material = theme::row_material();
-        let row_selected_material = theme::row_selected_material();
 
         // Width-adaptive columns; the clipper iterates rows of `cols` items so
         // only visible rows allocate label strings.
@@ -1790,14 +1839,9 @@ impl BrowserPanel {
 
                 let sel_w = col_w - COLUMN_GUTTER;
                 let is_selected = selected == Some(i);
-                let material = if is_selected {
-                    &row_selected_material
-                } else {
-                    &row_material
-                };
                 // SAFETY: the closure submits exactly one stock Selectable in the active window.
                 let clicked = unsafe {
-                    imgui_painter::decorate_selectable(frame, material, || {
+                    imgui_painter::decorate_selectable(frame, &row_material, is_selected, || {
                         ui.selectable_config(&label)
                             .selected(is_selected)
                             .size([sel_w.max(40.0), 0.0])
@@ -1917,7 +1961,6 @@ impl BrowserPanel {
         let entry_count = browser.entries().len();
         let mut click_action: Option<(usize, bool, PathBuf)> = None;
         let row_material = theme::row_material();
-        let row_selected_material = theme::row_selected_material();
 
         if entry_count == 0 {
             if browser.current_directory().is_some() {
@@ -1973,35 +2016,43 @@ impl BrowserPanel {
                 };
 
                 let is_selected = selected == Some(i) || browser.selection().contains(&i);
-                let material = if is_selected {
-                    &row_selected_material
-                } else {
-                    &row_material
-                };
                 let sel_w = col_w - COLUMN_GUTTER;
                 let size = [sel_w.max(40.0), 0.0];
                 let clicked = if is_dir {
-                    let color = ui.push_style_color(imgui::StyleColor::Text, DIR_TEXT_COLOR);
+                    let color = ui.push_style_color(
+                        imgui::StyleColor::Text,
+                        theme::color_f32(theme::neon_palette().selection),
+                    );
                     // SAFETY: the closure submits exactly one stock Selectable in the active window.
                     let clicked = unsafe {
-                        imgui_painter::decorate_selectable(frame, material, || {
-                            ui.selectable_config(&label)
-                                .selected(is_selected)
-                                .size(size)
-                                .build()
-                        })
+                        imgui_painter::decorate_selectable(
+                            frame,
+                            &row_material,
+                            is_selected,
+                            || {
+                                ui.selectable_config(&label)
+                                    .selected(is_selected)
+                                    .size(size)
+                                    .build()
+                            },
+                        )
                     };
                     color.pop();
                     clicked
                 } else {
                     // SAFETY: the closure submits exactly one stock Selectable in the active window.
                     unsafe {
-                        imgui_painter::decorate_selectable(frame, material, || {
-                            ui.selectable_config(&label)
-                                .selected(is_selected)
-                                .size(size)
-                                .build()
-                        })
+                        imgui_painter::decorate_selectable(
+                            frame,
+                            &row_material,
+                            is_selected,
+                            || {
+                                ui.selectable_config(&label)
+                                    .selected(is_selected)
+                                    .size(size)
+                                    .build()
+                            },
+                        )
                     }
                 };
                 #[cfg(debug_assertions)]
@@ -2079,6 +2130,7 @@ impl BrowserPanel {
         let toolbar_material = theme::toolbar_material();
         let raised_material = theme::raised_material();
         ui.popup("##override_editor", || {
+            paint_popup_background(frame, painter_rect(ui.window_pos(), ui.window_size()));
             let Some(path) = self.override_popup_path.clone() else {
                 return;
             };
@@ -2162,12 +2214,14 @@ impl BrowserPanel {
         frame: &mut imgui_painter::Frame<'_>,
     ) {
         let toolbar_material = theme::toolbar_material();
+        let rebind_material = theme::tab_active_material();
         let modal = ui
             .modal_popup_config("Settings##modal")
             .save_settings(false)
             .always_auto_resize(true);
 
         if let Some(_token) = modal.begin_popup() {
+            paint_popup_background(frame, painter_rect(ui.window_pos(), ui.window_size()));
             ui.text("Samples folder");
             let dir_label = self
                 .prefs
@@ -2175,7 +2229,10 @@ impl BrowserPanel {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "(none)".into());
-            ui.text_disabled(&dir_label);
+            ui.text_colored(
+                theme::color_f32(theme::neon_palette().text_muted),
+                &dir_label,
+            );
             ui.same_line();
             // SAFETY: the closure submits exactly one stock button in the active window.
             if unsafe {
@@ -2207,12 +2264,27 @@ impl BrowserPanel {
 
                 ui.text(label);
                 ui.same_line_with_pos(180.0);
+                let active_text = is_rebinding.then(|| {
+                    ui.push_style_color(
+                        imgui::StyleColor::Text,
+                        theme::color_f32(theme::neon_palette().border_light),
+                    )
+                });
                 // SAFETY: the closure submits exactly one stock button in the active window.
                 let clicked = unsafe {
-                    imgui_painter::decorate_button(frame, &toolbar_material, || {
-                        ui.button(&btn_label)
-                    })
+                    imgui_painter::decorate_button(
+                        frame,
+                        if is_rebinding {
+                            &rebind_material
+                        } else {
+                            &toolbar_material
+                        },
+                        || ui.button(&btn_label),
+                    )
                 };
+                if let Some(color) = active_text {
+                    color.pop();
+                }
                 if clicked && !is_rebinding {
                     self.rebinding = Some(action);
                     self.rebind_conflict = None;
@@ -2276,25 +2348,6 @@ impl Default for BrowserPanel {
     }
 }
 
-// surface_inset.
-const WAVEFORM_BG: [f32; 4] = [0.68235, 0.74902, 0.82353, 1.0];
-// accent.
-const WAVEFORM_BAR: [f32; 4] = [0.94118, 0.56863, 0.22745, 1.0];
-// text at 0.9 alpha.
-const WAVEFORM_PLAYHEAD: [f32; 4] = [0.06275, 0.09020, 0.13333, 0.9];
-// text at 0.85 alpha.
-const WAVEFORM_TEXT: [f32; 4] = [0.06275, 0.09020, 0.13333, 0.85];
-// text at 0.35 alpha for the hover/scrub crosshair.
-const WAVEFORM_HOVER: [f32; 4] = [0.06275, 0.09020, 0.13333, 0.35];
-
-fn color_u32(c: [f32; 4]) -> u32 {
-    let r = (c[0] * 255.0) as u32;
-    let g = (c[1] * 255.0) as u32;
-    let b = (c[2] * 255.0) as u32;
-    let a = (c[3] * 255.0) as u32;
-    (a << 24) | (b << 16) | (g << 8) | r
-}
-
 /// Right-aligned tag pills inside a file row's rect, drawn over the
 /// selectable. Stops before eating the space reserved for the file name.
 fn draw_tag_pills(
@@ -2304,8 +2357,9 @@ fn draw_tag_pills(
     rect_min: [f32; 2],
     rect_max: [f32; 2],
 ) {
-    let bg = color_u32(PILL_BG);
-    let fg = color_u32(PILL_TEXT);
+    let palette = theme::neon_palette();
+    let bg = palette.surface_inset;
+    let fg = palette.text;
     let y0 = rect_min[1] + 1.0;
     let y1 = rect_max[1] - 1.0;
     // Keep the left part of the row readable for the name.
@@ -2381,10 +2435,10 @@ fn draw_waveform_widget(
     // the same interleave Stage 1 proved safe.
     let draw = ui.get_window_draw_list();
 
-    let bg = color_u32(WAVEFORM_BG);
-    let bar_color = color_u32(WAVEFORM_BAR);
-    let playhead_color = color_u32(WAVEFORM_PLAYHEAD);
-    let text_color = color_u32(WAVEFORM_TEXT);
+    let bar_color = theme::waveform_bar_color();
+    let outline_color = theme::waveform_outline_color();
+    let playhead_color = theme::waveform_playhead_color();
+    let text_color = theme::waveform_text_color();
 
     // Geometry helpers so the Canvas calls below read cleanly.
     let rect = |x0: f32, y0: f32, x1: f32, y1: f32| imgui_painter::Rect {
@@ -2400,19 +2454,39 @@ fn draw_waveform_widget(
     let has_peaks = unsafe {
         let dl = imgui::sys::igGetWindowDrawList();
         let mut canvas = frame.canvas(dl);
-        canvas.fill_rect(rect(cx, cy, cx + w, cy + H), 0.0, bg);
+        let waveform_rect = rect(cx, cy, cx + w, cy + H);
+        theme::paint_waveform_surface(&mut canvas, waveform_rect);
+        let center_color = (outline_color & 0x00ff_ffff) | (42_u32 << 24);
+        canvas.line(
+            pt(cx + 1.0, cy + H * 0.5),
+            pt(cx + w - 1.0, cy + H * 0.5),
+            canvas.device_pixel(),
+            center_color,
+        );
         if let Some(peaks) = browser.waveform_peaks() {
             let bar_w = (w / peaks.num_buckets as f32).max(1.0);
             let mid_y = cy + H / 2.0;
-            let half_h = H / 2.0;
+            let half_h = H / 2.0 - 3.0;
+            let gap = (bar_w * 0.28).clamp(0.25, 0.75);
             for (i, &(lo, hi)) in peaks.peaks.iter().enumerate() {
                 let x = cx + i as f32 * bar_w;
                 let y_top = mid_y - hi * half_h;
                 let y_bot = (mid_y - lo * half_h).max(y_top + 1.0);
-                canvas.fill_rect(rect(x, y_top, x + bar_w - 0.5, y_bot), 0.0, bar_color);
+                let x1 = (x + bar_w - gap).max(x + canvas.device_pixel());
+                canvas.fill_rect(rect(x, y_top, x1, y_bot), 0.0, bar_color);
             }
+            canvas.rounded_rect(waveform_rect, 2.0);
+            canvas.add_border(&imgui_painter::Border {
+                thickness: canvas.device_pixel(),
+                color: outline_color,
+            });
             true
         } else {
+            canvas.rounded_rect(waveform_rect, 2.0);
+            canvas.add_border(&imgui_painter::Border {
+                thickness: canvas.device_pixel(),
+                color: outline_color,
+            });
             false
         }
     };
@@ -2461,11 +2535,7 @@ fn draw_waveform_widget(
         }
         PlaybackStatus::Idle => {
             if !has_peaks {
-                draw.add_text(
-                    [cx + 4.0, cy + H / 2.0 - 7.0],
-                    color_u32([0.5, 0.5, 0.5, 0.7]),
-                    "Idle",
-                );
+                draw.add_text([cx + 4.0, cy + H / 2.0 - 7.0], text_color, "Idle");
             }
         }
     }
@@ -2474,7 +2544,7 @@ fn draw_waveform_widget(
     if let Some((start, dur)) = axis {
         if hovered || active {
             let mx = mouse_x.clamp(cx, cx + w);
-            let hover = color_u32(WAVEFORM_HOVER);
+            let hover = (outline_color & 0x00ff_ffff) | (90_u32 << 24);
             let mid = cy + H / 2.0;
             // Both crosshair strokes in one Canvas, submitted here so the
             // hover label below stays on top (pre-conversion draw order).
@@ -2488,7 +2558,7 @@ fn draw_waveform_widget(
             let t = (start + frac * dur) as u64;
             let label = format!("{}:{:02}", t / 60, t % 60);
             let lx = (mx + 4.0).clamp(cx + 2.0, cx + w - 36.0);
-            draw.add_text([lx, cy + 2.0], color_u32(WAVEFORM_TEXT), label);
+            draw.add_text([lx, cy + 2.0], text_color, label);
             ui.set_mouse_cursor(Some(imgui::MouseCursor::ResizeEW));
         }
     }
@@ -2685,6 +2755,7 @@ fn draw_metadata_editor_modal(
     let raised_material = theme::raised_material();
     let inset_material = theme::inset_field_material();
     ui.modal_popup("Edit Metadata##metadata_editor", || {
+        paint_popup_background(frame, painter_rect(ui.window_pos(), ui.window_size()));
         let Some(path) = editor.path.clone() else {
             ui.close_current_popup();
             return;

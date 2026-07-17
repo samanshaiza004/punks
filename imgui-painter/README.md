@@ -57,6 +57,16 @@ explicit decorator-selection mismatch from normal use; the raw mechanism is now
 private. Note that widget-specific active-slot semantics and chrome-vs-ImGui
 ownership are documented on each entry point.
 
+The real Punks redesign added the two host-integration APIs earned by repeated
+application pressure. `recipes::apply_imgui_colors(&mut style.colors, &palette)`
+maps the compact palette across every stock ImGui color role without adding an
+`imgui-rs` dependency. `decorate_selectable(frame, material, selected, widget)`
+accepts persistent selection explicitly: pressed interaction outranks selection,
+then hover, then base. Decorators preserve the submitted widget as ImGui's last
+item, including its ID, bounds, hover, and active queries; this is tested as a
+public compatibility contract so tooltips, context menus, and drag/drop may be
+attached immediately after a decorated call.
+
 The core, Rust adapter, tests, benchmarks, and examples live under this
 directory and build independently from any host application. The crate is
 still unpublished while its API develops.
