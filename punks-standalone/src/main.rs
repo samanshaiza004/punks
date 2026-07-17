@@ -131,16 +131,23 @@ const DRAG_PREVIEW_ICON_PNG: &[u8] = &[
 ];
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn start_file_drag(window: &Window, path: &std::path::Path) {
-    let drag_path = match std::fs::canonicalize(path) {
-        Ok(path) => path,
-        Err(err) => {
-            log::error!("failed to canonicalize drag path {path:?}: {err}");
-            return;
-        }
-    };
+fn start_file_drag(window: &Window, paths: &[std::path::PathBuf]) {
+    let drag_paths: Vec<std::path::PathBuf> = paths
+        .iter()
+        .filter_map(|path| match std::fs::canonicalize(path) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                log::warn!("skipping drag path that could not be canonicalized {path:?}: {err}");
+                None
+            }
+        })
+        .collect();
+    if drag_paths.is_empty() {
+        log::error!("failed to start file drag: no valid paths remain");
+        return;
+    }
 
-    let item = DragItem::Files(vec![drag_path]);
+    let item = DragItem::Files(drag_paths);
     let preview = Image::Raw(DRAG_PREVIEW_ICON_PNG.to_vec());
     if let Err(err) = drag::start_drag(
         window,
@@ -253,6 +260,10 @@ impl AppWindow {
     fn init_imgui(gpu: &GpuState) -> ImguiState {
         let mut context = imgui::Context::create();
         context.set_ini_filename(None);
+        context
+            .io_mut()
+            .config_flags
+            .insert(imgui::ConfigFlags::NAV_ENABLE_KEYBOARD);
         punks_ui::apply_theme(context.style_mut());
 
         // winit deliberately has no clipboard API; without a backend here,
@@ -384,13 +395,14 @@ impl ApplicationHandler for App {
 
                         #[cfg(any(target_os = "macos", target_os = "windows"))]
                         {
-                            let mut on_drag_file =
-                                |path: &std::path::Path| start_file_drag(&app.gpu.window, path);
+                            let mut on_drag_files = |paths: &[std::path::PathBuf]| {
+                                start_file_drag(&app.gpu.window, paths)
+                            };
                             app.panel.draw(
                                 ui,
                                 &mut app.browser,
                                 &mut frame_painter,
-                                Some(&mut on_drag_file),
+                                Some(&mut on_drag_files),
                             );
                         }
 

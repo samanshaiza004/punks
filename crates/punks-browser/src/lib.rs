@@ -190,6 +190,8 @@ fn fact_filter_matches(
 struct TabState {
     history: Vec<PathBuf>,
     listing: Option<DirListing>,
+    /// Changes whenever browse-row indexes may name different entries.
+    listing_revision: u64,
     selected: Option<usize>,
     /// Committed search text, so a tab restores its query when reactivated.
     search_query: String,
@@ -201,6 +203,9 @@ struct TabState {
     raw_results: Option<Vec<FileEntry>>,
     search_rx: Option<mpsc::Receiver<Vec<FileEntry>>>,
     search_selected: Option<usize>,
+    search_selection: Vec<usize>,
+    /// Changes whenever search-row indexes may name different results.
+    search_revision: u64,
     /// Index into SampleBrowser::libraries when this tab is inside a library
     /// root. Tag IDs are meaningful only relative to that library and are
     /// never persisted outside the session.
@@ -215,8 +220,6 @@ struct TabState {
     /// what keyboard nav moves and what plays — and is not itself part of this
     /// set unless the user has explicitly multi-selected.
     selection: Vec<usize>,
-    /// Shift-click range anchor: the index a range extends from.
-    anchor: Option<usize>,
 }
 
 /// An opened library plus in-memory display caches, so per-frame UI reads
@@ -468,32 +471,6 @@ fn resolve_fact(
         Some(None) => None,
         None => detected.and_then(|r| detected_fact_of(r, metric)),
     }
-}
-
-/// Ctrl/Cmd-click transition: flip `index`'s membership in `selection`. Pure so
-/// it's testable without a `SampleBrowser`.
-fn selection_after_toggle(mut selection: Vec<usize>, index: usize) -> Vec<usize> {
-    match selection.iter().position(|&i| i == index) {
-        Some(pos) => {
-            selection.remove(pos);
-        }
-        None => selection.push(index),
-    }
-    selection
-}
-
-/// Shift-click transition: the inclusive range from `anchor` to `index` (in
-/// either direction), replacing whatever was marked before. `anchor` defaults
-/// to `index` itself (a single-element range) when there's no prior anchor.
-/// Pure so it's testable without a `SampleBrowser`.
-fn selection_after_range(anchor: Option<usize>, index: usize) -> Vec<usize> {
-    let anchor = anchor.unwrap_or(index);
-    let (lo, hi) = if anchor <= index {
-        (anchor, index)
-    } else {
-        (index, anchor)
-    };
-    (lo..=hi).collect()
 }
 
 /// Index of the most-specific (longest) root in `roots` that `dir` is a
@@ -936,6 +913,8 @@ impl SampleBrowser {
             tab.history = vec![path.to_path_buf()];
             tab.listing = Some(listing);
             tab.selected = None;
+            tab.selection.clear();
+            tab.listing_revision = tab.listing_revision.wrapping_add(1);
             // Browse is a fresh start for this tab: drop the filters too.
             tab.tag_filter.clear();
             tab.fact_filter = FactFilter::default();
@@ -960,6 +939,8 @@ impl SampleBrowser {
         tab.history.push(path);
         tab.listing = Some(listing);
         tab.selected = None;
+        tab.selection.clear();
+        tab.listing_revision = tab.listing_revision.wrapping_add(1);
         self.attach_library_for_active();
         Ok(())
     }
@@ -977,6 +958,8 @@ impl SampleBrowser {
         let tab = self.active_mut();
         tab.listing = Some(listing);
         tab.selected = None;
+        tab.selection.clear();
+        tab.listing_revision = tab.listing_revision.wrapping_add(1);
         self.attach_library_for_active();
         Ok(())
     }
@@ -994,6 +977,8 @@ impl SampleBrowser {
         let tab = self.active_mut();
         tab.listing = Some(listing);
         tab.selected = None;
+        tab.selection.clear();
+        tab.listing_revision = tab.listing_revision.wrapping_add(1);
         self.attach_library_for_active();
         Ok(())
     }
@@ -1029,10 +1014,14 @@ impl SampleBrowser {
     /// what a keyboard step or an unmodified click does.
     pub fn select(&mut self, index: usize) {
         if index < self.entries().len() {
+            let is_directory = self.entries()[index].is_directory;
             let tab = self.active_mut();
             tab.selected = Some(index);
-            tab.selection = vec![index];
-            tab.anchor = Some(index);
+            tab.selection = if is_directory {
+                Vec::new()
+            } else {
+                vec![index]
+            };
         }
     }
 
@@ -1046,35 +1035,36 @@ impl SampleBrowser {
         &self.active().selection
     }
 
-    /// Ctrl/Cmd-click: toggle `index` in the marked set. The cursor follows the
-    /// clicked row (so an immediately-following Shift-click ranges from here),
-    /// but nothing plays — multi-selecting isn't "open this file".
-    pub fn toggle_select(&mut self, index: usize) {
-        if index >= self.entries().len() {
-            return;
-        }
-        let tab = self.active_mut();
-        tab.selection = selection_after_toggle(std::mem::take(&mut tab.selection), index);
-        tab.selected = Some(index);
-        tab.anchor = Some(index);
+    /// Revision of the active browse listing's index space.
+    pub fn browse_revision(&self) -> u64 {
+        self.active().listing_revision
     }
 
-    /// Shift-click: replace the marked set with the inclusive range from the
-    /// last anchor to `index` — standard range-select. The anchor itself is
-    /// left in place so repeated Shift-clicks keep extending from the same
-    /// origin rather than from wherever the previous range ended.
-    pub fn range_select(&mut self, index: usize) {
-        if index >= self.entries().len() {
-            return;
-        }
+    /// Commit application-owned native multi-select state for browse rows.
+    /// Directories remain cursor/navigation targets but never batch targets.
+    pub fn set_browse_selection(&mut self, mut selection: Vec<usize>, cursor: Option<usize>) {
+        let entries = self.entries();
+        selection.retain(|&i| entries.get(i).is_some_and(|entry| !entry.is_directory));
+        selection.sort_unstable();
+        selection.dedup();
+        let cursor = cursor.filter(|&i| i < entries.len());
         let tab = self.active_mut();
-        tab.selection = selection_after_range(tab.anchor, index);
-        tab.selected = Some(index);
+        tab.selection = selection;
+        tab.selected = cursor;
     }
 
     /// Absolute paths of every marked, non-directory row — the input to batch
     /// operations (batch tag today; batch override/metadata are a next pass).
     pub fn selection_paths(&self) -> Vec<PathBuf> {
+        if let Some(results) = self.active().search_results.as_ref() {
+            return self
+                .active()
+                .search_selection
+                .iter()
+                .filter_map(|&i| results.get(i))
+                .map(|entry| entry.path.clone())
+                .collect();
+        }
         let entries = self.entries();
         self.active()
             .selection
@@ -1492,6 +1482,8 @@ impl SampleBrowser {
         tab.search_results = None;
         tab.raw_results = None;
         tab.search_selected = None;
+        tab.search_selection.clear();
+        tab.search_revision = tab.search_revision.wrapping_add(1);
         tab.search_query = query;
     }
 
@@ -1503,6 +1495,8 @@ impl SampleBrowser {
         tab.raw_results = None;
         tab.search_rx = None;
         tab.search_selected = None;
+        tab.search_selection.clear();
+        tab.search_revision = tab.search_revision.wrapping_add(1);
         tab.search_query = String::new();
         let i = self.active_tab;
         self.rebuild_tab_results(i);
@@ -1524,6 +1518,15 @@ impl SampleBrowser {
         self.active().search_selected
     }
 
+    pub fn search_selection(&self) -> &[usize] {
+        &self.active().search_selection
+    }
+
+    /// Revision of the active search result index space.
+    pub fn search_revision(&self) -> u64 {
+        self.active().search_revision
+    }
+
     pub fn select_search_result(&mut self, index: usize) {
         let valid = self
             .active()
@@ -1531,8 +1534,22 @@ impl SampleBrowser {
             .as_ref()
             .is_some_and(|r| index < r.len());
         if valid {
-            self.active_mut().search_selected = Some(index);
+            let tab = self.active_mut();
+            tab.search_selected = Some(index);
+            tab.search_selection = vec![index];
         }
+    }
+
+    /// Commit application-owned native multi-select state for search rows.
+    pub fn set_search_selection(&mut self, mut selection: Vec<usize>, cursor: Option<usize>) {
+        let len = self.active().search_results.as_ref().map_or(0, Vec::len);
+        selection.retain(|&i| i < len);
+        selection.sort_unstable();
+        selection.dedup();
+        let cursor = cursor.filter(|&i| i < len);
+        let tab = self.active_mut();
+        tab.search_selection = selection;
+        tab.search_selected = cursor;
     }
 
     // --- Library / tags -----------------------------------------------------
@@ -1594,16 +1611,11 @@ impl SampleBrowser {
             tab.fact_filter = FactFilter::default();
         }
         tab.search_results = display;
-        match &tab.search_results {
-            Some(r) if !r.is_empty() => {
-                if let Some(s) = tab.search_selected {
-                    if s >= r.len() {
-                        tab.search_selected = Some(r.len() - 1);
-                    }
-                }
-            }
-            _ => tab.search_selected = None,
-        }
+        // A rebuilt or reordered result list invalidates every index-based
+        // selection request and range source. Start a new ImGui ID scope.
+        tab.search_selected = None;
+        tab.search_selection.clear();
+        tab.search_revision = tab.search_revision.wrapping_add(1);
     }
 
     /// Bind the active tab to the library owning its current directory, if
@@ -2223,8 +2235,7 @@ mod tests {
     use super::{
         adjust_active_after_close, adjust_active_after_reorder, ensure_waveform_cached,
         fact_filter_matches, longest_containing_root_index, resolve_fact, restore_tab_plan,
-        selection_after_range, selection_after_toggle, AnalysisReport, Fact, FactFacets,
-        FactFilter, LibraryContext, UndoStack,
+        AnalysisReport, Fact, FactFacets, FactFilter, LibraryContext, UndoStack,
     };
     use punks_library::Library;
     use std::collections::HashMap;
@@ -2343,25 +2354,6 @@ mod tests {
             resolve_fact(Some(&detected), Some(&overrides), "loop"),
             None
         );
-    }
-
-    #[test]
-    fn toggle_select_flips_membership() {
-        assert_eq!(selection_after_toggle(vec![], 2), vec![2]);
-        assert_eq!(selection_after_toggle(vec![2], 2), Vec::<usize>::new()); // toggling off
-        assert_eq!(selection_after_toggle(vec![1, 3], 2), vec![1, 3, 2]);
-        assert_eq!(selection_after_toggle(vec![1, 2, 3], 2), vec![1, 3]);
-    }
-
-    #[test]
-    fn range_select_spans_anchor_to_index_either_direction() {
-        assert_eq!(selection_after_range(Some(2), 5), vec![2, 3, 4, 5]);
-        // Clicking "backwards" from the anchor still produces an ordered range.
-        assert_eq!(selection_after_range(Some(5), 2), vec![2, 3, 4, 5]);
-        // No anchor yet (first-ever Shift-click) collapses to a single row.
-        assert_eq!(selection_after_range(None, 4), vec![4]);
-        // Same start and end.
-        assert_eq!(selection_after_range(Some(3), 3), vec![3]);
     }
 
     #[test]
