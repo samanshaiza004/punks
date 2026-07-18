@@ -289,6 +289,28 @@ fn drag_payload(is_selected: bool, selected_paths: &[PathBuf], row_path: &Path) 
     }
 }
 
+/// Resolve the row cursor after a list frame from the competing cursor sources.
+///
+/// Two keyboard-nav systems coexist: the app's configurable W/S binds (which
+/// call `browser.select` and are already reflected in `app_cursor`), and
+/// ImGui's own arrow-key navigation (surfaced as `imgui_nav` =
+/// `EndMultiSelect().nav_id_item()`). A mouse click always wins. Otherwise
+/// ImGui nav only wins when it *actually moved this frame* — `imgui_nav`
+/// otherwise sits pinned on the last clicked row forever and, if trusted
+/// unconditionally, clobbers the W/S cursor every frame (the cursor then just
+/// bounces one row either side of the clicked row). The app cursor is the
+/// default; a still-unmoved `imgui_nav` is only the initial seed when nothing
+/// is selected yet.
+fn cursor_after_nav(
+    clicked: Option<usize>,
+    imgui_nav: Option<usize>,
+    prev_imgui_nav: Option<usize>,
+    app_cursor: Option<usize>,
+) -> Option<usize> {
+    let imgui_nav_moved = imgui_nav.filter(|&n| Some(n) != prev_imgui_nav);
+    clicked.or(imgui_nav_moved).or(app_cursor).or(imgui_nav)
+}
+
 fn selection_if_revision_matches(
     mut candidate: Vec<usize>,
     started_revision: u64,
@@ -431,6 +453,12 @@ pub struct BrowserPanel {
     /// Set when W/S keyboard nav moves the selection; consumed on the next
     /// list render to scroll the newly selected row into view if it isn't.
     scroll_to_selected: bool,
+    /// ImGui's `nav_id_item` from the previous browse / search frame. Lets the
+    /// cursor resolver tell a real ImGui arrow-key move (value changed) from a
+    /// stale nav id pinned on an earlier click (unchanged) so the latter can't
+    /// clobber the app's W/S cursor. See `cursor_after_nav`.
+    last_browse_nav: Option<usize>,
+    last_search_nav: Option<usize>,
     /// Sidebar "new tag" input buffer.
     new_tag_buf: String,
     /// "New tag" buffer inside the per-file tag popup.
@@ -493,6 +521,8 @@ impl BrowserPanel {
             last_searched_query: String::new(),
             volume,
             last_active_tab: 0,
+            last_browse_nav: None,
+            last_search_nav: None,
             scrub_last_x: None,
             scroll_to_selected: false,
             new_tag_buf: String::new(),
@@ -1995,6 +2025,8 @@ impl BrowserPanel {
             .filter(|&index| index < count);
         drop(ended);
 
+        let prev_nav = std::mem::replace(&mut self.last_search_nav, nav_cursor);
+
         let Some(candidate) =
             selection_if_revision_matches(candidate, revision, browser.search_revision())
         else {
@@ -2003,7 +2035,8 @@ impl BrowserPanel {
         };
 
         let clicked_cursor = click_action.as_ref().map(|(index, _)| *index);
-        browser.set_search_selection(candidate, clicked_cursor.or(nav_cursor).or(selected));
+        let cursor = cursor_after_nav(clicked_cursor, nav_cursor, prev_nav, selected);
+        browser.set_search_selection(candidate, cursor);
         if let Some((_, path)) = click_action {
             if !ui.io().key_shift && !ui.io().key_ctrl && !ui.io().key_super {
                 browser.play_file(&path);
@@ -2256,6 +2289,8 @@ impl BrowserPanel {
             .filter(|&index| index < entry_count);
         drop(ended);
 
+        let prev_nav = std::mem::replace(&mut self.last_browse_nav, nav_cursor);
+
         let Some(candidate) =
             selection_if_revision_matches(candidate, revision, browser.browse_revision())
         else {
@@ -2264,7 +2299,8 @@ impl BrowserPanel {
         };
 
         let clicked_cursor = click_action.as_ref().map(|(index, _, _)| *index);
-        browser.set_browse_selection(candidate, clicked_cursor.or(nav_cursor).or(selected));
+        let cursor = cursor_after_nav(clicked_cursor, nav_cursor, prev_nav, selected);
+        browser.set_browse_selection(candidate, cursor);
 
         if let Some((i, is_dir, _)) = click_action {
             if is_dir {
@@ -3012,7 +3048,9 @@ fn draw_metadata_editor_modal(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_selection_requests, drag_payload, selection_if_revision_matches};
+    use super::{
+        apply_selection_requests, cursor_after_nav, drag_payload, selection_if_revision_matches,
+    };
     use imgui::{SelectionDirection, SelectionRequest};
     use std::path::PathBuf;
 
@@ -3083,6 +3121,33 @@ mod tests {
             Some(vec![1, 3])
         );
         assert_eq!(selection_if_revision_matches(vec![1, 3], 7, 8), None);
+    }
+
+    #[test]
+    fn stale_imgui_nav_does_not_clobber_ws_cursor() {
+        // The W/S cursor advanced to row 4 (app_cursor); ImGui's nav id is
+        // still pinned to the earlier clicked row 6 and unchanged since last
+        // frame. The app cursor must win — this is the bug where W/S bounced
+        // one row either side of the clicked row.
+        assert_eq!(cursor_after_nav(None, Some(6), Some(6), Some(4)), Some(4));
+    }
+
+    #[test]
+    fn real_imgui_arrow_move_updates_cursor() {
+        // ImGui nav actually moved (5 -> 6) this frame: it wins over the app
+        // cursor so arrow-key navigation still drives the cursor.
+        assert_eq!(cursor_after_nav(None, Some(6), Some(5), Some(3)), Some(6));
+    }
+
+    #[test]
+    fn click_wins_and_imgui_nav_seeds_first_selection() {
+        // A click always wins.
+        assert_eq!(
+            cursor_after_nav(Some(2), Some(6), Some(6), Some(4)),
+            Some(2)
+        );
+        // Nothing selected yet: an unmoved ImGui nav id is the initial seed.
+        assert_eq!(cursor_after_nav(None, Some(1), Some(1), None), Some(1));
     }
 
     #[test]
