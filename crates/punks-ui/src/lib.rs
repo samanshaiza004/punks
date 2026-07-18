@@ -1715,20 +1715,6 @@ impl BrowserPanel {
         } {
             ui.set_clipboard_text(path.to_string_lossy());
         }
-        // SAFETY: the closure submits exactly one stock button in the active window.
-        if unsafe {
-            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Override"))
-        } {
-            self.override_popup_path = Some(path.clone());
-            self.open_override_editor = true;
-        }
-        ui.same_line();
-        // SAFETY: the closure submits exactly one stock button in the active window.
-        if unsafe {
-            imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Edit Metadata"))
-        } {
-            self.open_metadata_editor = true;
-        }
         ui.separator();
 
         // Facts (open by default): the read-only analysis readout — what the
@@ -1777,6 +1763,13 @@ impl BrowserPanel {
                 ui.text_disabled(format!("analyzing{}", ".".repeat(dots)));
             } else {
                 ui.text_disabled("no analysis yet");
+            }
+            // SAFETY: the closure submits exactly one stock button in the active window.
+            if unsafe {
+                imgui_painter::decorate_button(frame, &toolbar_material, || ui.button("Override"))
+            } {
+                self.override_popup_path = Some(path.clone());
+                self.open_override_editor = true;
             }
         }
 
