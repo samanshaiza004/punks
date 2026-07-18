@@ -180,6 +180,7 @@ const KEYBIND_ACTIONS: &[(BrowserAction, &str)] = &[
 
 // Left rail: library status + tag filters live here; tags on rows are pills.
 const SIDEBAR_WIDTH: f32 = 180.0;
+const PANEL_PADDING: [f32; 2] = [14.0, 12.0];
 /// Width of the drag strip between Results and the Inspector.
 const SPLITTER_WIDTH: f32 = 6.0;
 /// Height of the waveform strip. Shared so the panel can reserve exactly the
@@ -898,18 +899,26 @@ impl BrowserPanel {
 
         // Left rail: library status + tag filters. Tag display on rows stays
         // inline (pills); the sidebar is only for filtering and library setup.
+        let sidebar_padding = ui.push_style_var(imgui::StyleVar::WindowPadding(PANEL_PADDING));
         let sidebar_bg = ui.push_style_color(imgui::StyleColor::ChildBg, [0.0, 0.0, 0.0, 0.0]);
         ui.child_window("sidebar")
             .size([SIDEBAR_WIDTH, body_height])
+            // Borderless child windows discard WindowPadding unless this flag is
+            // set, so without it PANEL_PADDING is inert and content sits flush
+            // against the painted panel edge.
+            .child_flags(imgui::ChildFlags::ALWAYS_USE_WINDOW_PADDING)
             .build(|| {
                 self.draw_sidebar(ui, browser, frame);
             });
         sidebar_bg.pop();
+        sidebar_padding.pop();
 
         ui.same_line();
+        let content_padding = ui.push_style_var(imgui::StyleVar::WindowPadding(PANEL_PADDING));
         let content_bg = ui.push_style_color(imgui::StyleColor::ChildBg, [0.0, 0.0, 0.0, 0.0]);
         ui.child_window("content")
             .size([content_w, body_height])
+            .child_flags(imgui::ChildFlags::ALWAYS_USE_WINDOW_PADDING)
             .build(|| {
                 let w = ui.content_region_avail()[0];
                 if focus_search {
@@ -949,6 +958,13 @@ impl BrowserPanel {
                 let is = browser.is_in_search_mode();
                 in_search = is;
 
+                // Transparent bg so the inset well painted behind `content`
+                // shows through. No padding flag: the rows should sit flush with
+                // this child's edge, which `content`'s padding has already
+                // inset to the panel margin — keeping them aligned under the
+                // search field above.
+                let file_list_bg =
+                    ui.push_style_color(imgui::StyleColor::ChildBg, [0.0, 0.0, 0.0, 0.0]);
                 ui.child_window("file_list").size([0.0, 0.0]).build(|| {
                     if is {
                         self.draw_search_results(
@@ -975,8 +991,10 @@ impl BrowserPanel {
                         );
                     }
                 });
+                file_list_bg.pop();
             });
         content_bg.pop();
+        content_padding.pop();
 
         if self.prefs.inspector_visible {
             // Splitter: an invisible hit strip whose horizontal drag resizes the
@@ -996,14 +1014,18 @@ impl BrowserPanel {
             }
 
             ui.same_line();
+            let inspector_padding =
+                ui.push_style_var(imgui::StyleVar::WindowPadding(PANEL_PADDING));
             let inspector_bg =
                 ui.push_style_color(imgui::StyleColor::ChildBg, [0.0, 0.0, 0.0, 0.0]);
             ui.child_window("inspector")
                 .size([inspector_w, body_height])
+                .child_flags(imgui::ChildFlags::ALWAYS_USE_WINDOW_PADDING)
                 .build(|| {
                     self.draw_inspector(ui, browser, frame);
                 });
             inspector_bg.pop();
+            inspector_padding.pop();
         }
 
         if let Some(paths) = drag_requested.as_deref() {
