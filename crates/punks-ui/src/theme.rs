@@ -220,15 +220,15 @@ pub(crate) fn paint_waveform_surface(canvas: &mut Canvas<'_>, rect: Rect) {
         stops: vec![
             ColorStop {
                 t: 0.0,
-                color: tint(palette.accent, 0.18),
+                color: tint(palette.surface_inset, 0.06),
             },
             ColorStop {
                 t: 0.42,
-                color: palette.accent,
+                color: palette.surface_inset,
             },
             ColorStop {
                 t: 1.0,
-                color: shade(palette.accent, 0.88),
+                color: shade(palette.surface_inset, 0.90),
             },
         ],
     });
@@ -238,6 +238,10 @@ pub(crate) fn paint_waveform_surface(canvas: &mut Canvas<'_>, rect: Rect) {
         spread: hairline,
         color: alpha(palette.text, 72),
         inset: true,
+    });
+    canvas.add_border(&Border {
+        thickness: hairline,
+        color: palette.border_dark,
     });
     canvas.fill_band_color(
         rect.min.y + hairline,
@@ -255,7 +259,7 @@ pub(crate) fn waveform_outline_color() -> Color {
 }
 
 pub(crate) fn waveform_playhead_color() -> Color {
-    neon_palette().selection
+    neon_palette().accent
 }
 
 pub(crate) fn waveform_text_color() -> Color {
