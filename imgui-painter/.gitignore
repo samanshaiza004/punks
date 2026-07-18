@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target
+**/target
+
+# mdBook output
+book/book/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

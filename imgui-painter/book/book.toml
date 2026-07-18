@@ -1,0 +1,24 @@
+[book]
+title = "imgui-painter"
+description = "A rendering and styling toolkit for Dear ImGui, built on ImDrawList."
+authors = ["Saman Shaiza"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/samanshaiza004/imgui-painter"
+edit-url-template = "https://github.com/samanshaiza004/imgui-painter/edit/main/book/{path}"
+additional-css = []
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
