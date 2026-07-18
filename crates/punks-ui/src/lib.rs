@@ -2190,45 +2190,50 @@ impl BrowserPanel {
                 };
 
                 let is_selected = candidate.binary_search(&i).is_ok();
+                // Directories are excluded from the multi-select vector, so a
+                // directory under the W/S cursor is never `is_selected` and
+                // would otherwise render with no highlight — leaving keyboard
+                // nav invisible on folders. Fold the cursor into the row's
+                // focused state so the current row is always highlighted,
+                // directory or file.
+                let is_cursor = Some(i) == selected;
+                let is_focused = is_selected || is_cursor;
                 ui.set_next_item_selection_user_data(i);
                 let _row_id = ui.push_id_usize(i);
                 let sel_w = col_w - COLUMN_GUTTER;
                 let size = [sel_w.max(40.0), 0.0];
                 let clicked = if is_dir {
-                    let color = ui.push_style_color(
-                        imgui::StyleColor::Text,
-                        theme::color_f32(theme::neon_palette().selection),
-                    );
+                    // Blue directory text on the light row, but drop it on the
+                    // focused row: there the fill is already selection blue, so
+                    // default (dark) text stays legible — same as file rows.
+                    let color = (!is_focused).then(|| {
+                        ui.push_style_color(
+                            imgui::StyleColor::Text,
+                            theme::color_f32(theme::neon_palette().selection),
+                        )
+                    });
                     // SAFETY: the closure submits exactly one stock Selectable in the active window.
                     let clicked = unsafe {
-                        imgui_painter::decorate_selectable(
-                            frame,
-                            &row_material,
-                            is_selected,
-                            || {
-                                ui.selectable_config(&label)
-                                    .selected(is_selected)
-                                    .size(size)
-                                    .build()
-                            },
-                        )
+                        imgui_painter::decorate_selectable(frame, &row_material, is_focused, || {
+                            ui.selectable_config(&label)
+                                .selected(is_focused)
+                                .size(size)
+                                .build()
+                        })
                     };
-                    color.pop();
+                    if let Some(color) = color {
+                        color.pop();
+                    }
                     clicked
                 } else {
                     // SAFETY: the closure submits exactly one stock Selectable in the active window.
                     unsafe {
-                        imgui_painter::decorate_selectable(
-                            frame,
-                            &row_material,
-                            is_selected,
-                            || {
-                                ui.selectable_config(&label)
-                                    .selected(is_selected)
-                                    .size(size)
-                                    .build()
-                            },
-                        )
+                        imgui_painter::decorate_selectable(frame, &row_material, is_focused, || {
+                            ui.selectable_config(&label)
+                                .selected(is_focused)
+                                .size(size)
+                                .build()
+                        })
                     }
                 };
                 #[cfg(debug_assertions)]
