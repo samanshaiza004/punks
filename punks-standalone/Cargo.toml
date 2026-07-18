@@ -19,4 +19,4 @@ drag = "2"
 arboard = { version = "3.6.1", default-features = false }
 # The app owns the long-lived Painter and opens a frame per render pass (see
 # main.rs). Shares one imgui-sys build with `imgui`.
-imgui-painter = { path = "../imgui-painter/bindings/rust" }
+imgui-painter = { git = "https://github.com/samanshaiza004/imgui-painter", rev = "1b3b001ae90daf6b4235615876e4ff85f6e309ed" }

@@ -8,7 +8,6 @@ members = [
     "crates/punks-browser",
     "crates/punks-ui",
     "punks-standalone",
-    "imgui-painter/bindings/rust",
 ]
 
 [patch.crates-io]
