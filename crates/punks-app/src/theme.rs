@@ -68,17 +68,15 @@ pub fn apply_neon_theme(cx: &mut App) {
     theme.colors.list_active_border = hsla(SELECTION);
 }
 
-// Not consumed until the waveform lands (a later milestone -- custom
-// `canvas()` painting, per the viability spike); kept here now rather than
-// deleted-and-recreated later since these are a direct, already-verified
-// port of the original palette (see the test below), not speculative.
-#[allow(dead_code)]
 /// Waveform bar fill. Direct-paint color, not a theme token -- see module docs.
 pub const WAVEFORM_BAR: u32 = TEXT;
+// Not consumed yet -- no stroke/hover-label rendering exists in
+// `waveform.rs`. Kept here rather than deleted-and-recreated later since
+// these are a direct, already-verified port of the original palette (see
+// the test below), not speculative.
 #[allow(dead_code)]
 /// Waveform outline stroke.
 pub const WAVEFORM_OUTLINE: u32 = TEXT;
-#[allow(dead_code)]
 /// Playhead line color.
 pub const WAVEFORM_PLAYHEAD: u32 = ACCENT;
 #[allow(dead_code)]

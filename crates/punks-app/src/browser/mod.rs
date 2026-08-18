@@ -1,31 +1,43 @@
 //! The application shell: Sidebar | Results | Inspector, wired to a real
-//! [`SampleBrowser`] through [`Browser`]. M2 scope only -- selection
-//! semantics, the waveform/transport strip, and the inspector's detail
-//! sections are later milestones; this proves the state/render boundary
-//! (a real `SampleBrowser` driving a virtualized GPUI list) works first.
+//! [`SampleBrowser`] through [`Browser`]. Selection semantics live in
+//! [`selection`] (pure reducers) and [`results`] (the GPUI wiring that
+//! commits them); [`sidebar`] holds the library/tag pane. This file owns
+//! composition/layout and the small amount of action wiring that doesn't
+//! belong to any one pane.
 
+#[cfg(test)]
+mod component_audit;
+pub mod inspector;
+pub mod results;
+pub mod search;
+pub mod selection;
+pub mod sidebar;
 pub mod state;
+pub mod transport;
+pub mod waveform;
 
 pub use state::Browser;
 
-use std::ops::Range;
-
 use gpui::prelude::*;
-use gpui::{uniform_list, Context, Entity, Window};
-use gpui_component::{button::*, h_flex, v_flex, ActiveTheme};
+use gpui::{Context, Entity, FocusHandle, Point, Window};
+use gpui_component::input::InputState;
+use gpui_component::slider::SliderState;
+use gpui_component::{h_flex, v_flex, ActiveTheme};
 
 use crate::actions::{OpenFolder, ToggleInspector};
-use crate::filesystem::FileEntry;
-use crate::platform::drag::{draggable, DragPaths};
-use crate::theme;
-use crate::LibraryState;
 
 /// Results below this are padded with synthetic rows so the list actually
 /// exercises `uniform_list`'s virtualization at the scale the spike proved
 /// (10k rows) rather than trivially rendering a handful of real entries.
-/// Synthetic rows are visually and structurally distinct from real ones
-/// (see `render_row`) -- never conflated with real `SampleBrowser` data.
-const MIN_LIST_ROWS: usize = 1000;
+/// Synthetic rows are visually and structurally distinct from real ones --
+/// never conflated with real `SampleBrowser` data.
+pub(crate) const MIN_LIST_ROWS: usize = 1000;
+
+/// Pane widths, shared between `sidebar.rs`'s/this file's inspector layout
+/// and `results.rs`'s available-width calculation for the grid's column
+/// count -- kept as one source of truth so the two stay consistent.
+pub(crate) const SIDEBAR_WIDTH: f32 = 220.0;
+pub(crate) const INSPECTOR_WIDTH: f32 = 280.0;
 
 pub struct MainWindow {
     browser: Entity<Browser>,
@@ -38,10 +50,36 @@ pub struct MainWindow {
     render_count: u64,
     perf_started: std::time::Instant,
     last_perf_log: std::time::Instant,
+
+    // Results pane state -- see `results.rs` for the methods that own it.
+    // Transient gesture state (never committed selection data -- see
+    // `selection.rs`'s module doc for why it lives separately from
+    // `SampleBrowser`).
+    gesture: selection::SelectionGesture,
+    // Box-select's press-origin and current-drag point, in window-space
+    // pixels. GPUI-specific (not portable/testable data), unlike
+    // `SelectionGesture`'s fields -- see `results.rs`.
+    box_select_start: Option<Point<gpui::Pixels>>,
+    box_select_current: Option<Point<gpui::Pixels>>,
+    scroll_handle: gpui::UniformListScrollHandle,
+    results_focus: FocusHandle,
+
+    // Transport strip state -- see `transport.rs`/`waveform.rs`.
+    volume_slider: Entity<SliderState>,
+
+    // Search bar state -- see `search.rs`.
+    search_input: Entity<InputState>,
+
+    // Inspector pane state -- see `inspector.rs`.
+    description_input: Entity<InputState>,
+    // The path `description_input` was last seeded from, so switching the
+    // inspected file re-seeds the field instead of leaking one file's
+    // in-progress edit onto the next.
+    description_seeded_for: Option<std::path::PathBuf>,
 }
 
 impl MainWindow {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Read once here, matching the "cfg is read once by the caller"
         // contract `SampleBrowser::new`'s doc comment describes.
         let cfg = crate::config::load();
@@ -63,6 +101,10 @@ impl MainWindow {
         cx.observe(&browser, |_this, _browser, cx| cx.notify())
             .detach();
 
+        let volume_slider = Self::new_volume_slider(cfg.volume, cx);
+        let search_input = Self::new_search_input(window, cx);
+        let description_input = Self::new_description_input(window, cx);
+
         let now = std::time::Instant::now();
         Self {
             browser,
@@ -71,6 +113,15 @@ impl MainWindow {
             render_count: 0,
             perf_started: now,
             last_perf_log: now,
+            gesture: selection::SelectionGesture::default(),
+            box_select_start: None,
+            box_select_current: None,
+            scroll_handle: gpui::UniformListScrollHandle::new(),
+            results_focus: cx.focus_handle(),
+            volume_slider,
+            search_input,
+            description_input,
+            description_seeded_for: None,
         }
     }
 
@@ -101,55 +152,10 @@ impl MainWindow {
         self.inspector_visible = !self.inspector_visible;
         cx.notify();
     }
-
-    fn select_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, cx| {
-            browser.inner.select(index);
-            cx.notify();
-        });
-    }
-
-    fn render_row(
-        &mut self,
-        ix: usize,
-        real_count: usize,
-        real_entries: &[FileEntry],
-        selected: Option<usize>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let real_entry = real_entries.get(ix).filter(|_| ix < real_count);
-        let label = match real_entry {
-            Some(e) => format!("{}{}", if e.is_directory { "[dir] " } else { "" }, e.name),
-            None => format!("(synthetic row {ix})"),
-        };
-        let is_synthetic = real_entry.is_none();
-
-        let row = h_flex()
-            .id(("row", ix))
-            .px_2()
-            .py_1()
-            .when(Some(ix) == selected, |el| el.bg(cx.theme().list_active))
-            .when(is_synthetic, |el| el.opacity(0.35))
-            .cursor_pointer()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| this.select_row(ix, cx)),
-            )
-            .child(label);
-
-        // Files (not directories, not synthetic padding) drag out to other
-        // apps -- the same mechanism the viability spike proved end-to-end
-        // on macOS, now exercised by a real result row instead of a
-        // standalone placeholder.
-        match real_entry.filter(|e| !e.is_directory) {
-            Some(e) => draggable(row, DragPaths(vec![e.path.clone()])),
-            None => row,
-        }
-    }
 }
 
 impl Render for MainWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.perf_enabled {
             self.render_count += 1;
             if self.last_perf_log.elapsed() > std::time::Duration::from_secs(2) {
@@ -164,108 +170,45 @@ impl Render for MainWindow {
             }
         }
 
-        let browser = self.browser.read(cx);
-        let inner = &browser.inner;
+        // Results is the default initial focus target. This only fires on
+        // the very first frame (before anything has focus) -- once Search
+        // or any other element takes focus, `window.focused(cx)` is `Some`,
+        // so this never fights a later focus change (e.g. typing into
+        // Search, which re-renders on every keystroke via its own
+        // `InputEvent::Change` subscription).
+        if window.focused(cx).is_none() {
+            window.focus(&self.results_focus, cx);
+        }
 
-        let library_state = inner.library_state();
-        let tags = inner.library_tags().to_vec();
-        let current_dir = inner
-            .current_directory()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "No folder open".into());
-        let real_entries: Vec<FileEntry> = inner.entries().to_vec();
-        let selected = inner.selected();
-        let selected_summary = selected
-            .and_then(|i| real_entries.get(i))
-            .map(|e| format!("{}  |  {} bytes", e.name, e.size_bytes))
-            .unwrap_or_else(|| "No selection".into());
+        let inspector_visible = self.inspector_visible;
 
-        let row_count = real_entries.len().max(MIN_LIST_ROWS);
-        let real_count = real_entries.len();
-
-        h_flex()
+        v_flex()
             .id("main-window")
             .key_context("MainWindow")
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::toggle_inspector))
+            .on_action(cx.listener(Self::focus_search))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .child(self.render_search(cx))
             .child(
-                // Sidebar: real library/tag state.
-                v_flex()
-                    .id("sidebar")
-                    .w(gpui::px(220.))
-                    .h_full()
-                    .p_3()
-                    .gap_2()
-                    .border_r_1()
-                    .border_color(cx.theme().border)
-                    .child(Button::new("open-folder").label("Open Folder...").on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.open_folder(&OpenFolder, window, cx)
-                        }),
-                    ))
-                    .child(current_dir)
-                    .child(match library_state {
-                        LibraryState::NotALibrary => "Library: not attached".to_string(),
-                        LibraryState::Scanning => "Library: scanning...".to_string(),
-                        LibraryState::Ready => "Library: ready".to_string(),
-                    })
-                    .child("Tags:")
-                    .children(
-                        tags.into_iter()
-                            .map(|t| format!("  {} ({})", t.name, t.count)),
-                    ),
-            )
-            .child(
-                // Results: real entries, padded with synthetic rows so the
-                // list genuinely exercises virtualization at scale.
-                v_flex()
-                    .id("results")
+                h_flex()
+                    .id("panes")
                     .flex_1()
-                    .h_full()
-                    .child(
-                        uniform_list(
-                            "results-list",
-                            row_count,
-                            cx.processor(
-                                move |this: &mut Self, range: Range<usize>, _window, cx| {
-                                    range
-                                        .map(|ix| {
-                                            this.render_row(
-                                                ix,
-                                                real_count,
-                                                &real_entries,
-                                                selected,
-                                                cx,
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                },
-                            ),
-                        )
-                        .h_full(),
-                    )
-                    .child(
-                        gpui::div()
-                            .text_color(gpui::rgb(theme::TEXT_MUTED))
-                            .child(format!("{real_count} real / {row_count} total rows")),
-                    ),
+                    .child(self.render_sidebar(cx))
+                    .child(self.render_results(window, cx))
+                    .when(inspector_visible, |el| {
+                        el.child(self.render_inspector(window, cx))
+                    }),
             )
-            .when(self.inspector_visible, |el| {
-                el.child(
-                    v_flex()
-                        .id("inspector")
-                        .w(gpui::px(280.))
-                        .h_full()
-                        .p_3()
-                        .gap_2()
-                        .border_l_1()
-                        .border_color(cx.theme().border)
-                        .child("Inspector")
-                        .child(selected_summary),
-                )
-            })
+            .child(
+                v_flex()
+                    .id("bottom-strip")
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(self.render_waveform(cx))
+                    .child(self.render_transport(cx)),
+            )
     }
 }

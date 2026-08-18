@@ -46,3 +46,12 @@ gpui-component = { git = "https://github.com/samanshaiza004/gpui-component", rev
 # winit-family windows either, and nothing here used it there before.
 [target.'cfg(windows)'.dependencies]
 drag = "2"
+
+[dev-dependencies]
+# `#[gpui::test]`, `TestAppContext`, `debug_selector`/`debug_bounds`, and the
+# `simulate_*` input harness are all gated behind gpui's own `test-support`
+# feature -- see M3's browser/results.rs and browser/selection.rs tests. Same
+# pinned rev as the main dependency; never bumped independently of it.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "8b1497dbd22fb06f5838a7c0b84a1e54fafa71bc", package = "gpui", features = [
+    "test-support",
+] }
