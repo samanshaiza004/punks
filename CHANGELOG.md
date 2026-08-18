@@ -6,8 +6,8 @@ Workspace crates are all `0.2.0` and unstable — expect breaking changes before
 
 ### Features
 
-- **Analyzer registry + background analysis pipeline**: `punks-analysis` gained a trait-based
-  analyzer contract and registry; a global background worker in `punks-browser` runs analyzers
+- **Analyzer registry + background analysis pipeline**: `punks-audio` owns the trait-based
+  analyzer contract and registry; a background worker in `punks-app` runs analyzers
   per-file through a versioned, per-asset job queue and orchestrates results back to the UI
 - **Duration analyzer**: length and peak level (dBFS) now shown for the selected file
 - **Filename analysis**: a `Filename` analyzer parses instrument/BPM/key straight from filenames
@@ -49,13 +49,13 @@ Workspace crates are all `0.2.0` and unstable — expect breaking changes before
 
 - WAV metadata test coverage: foreign-chunk-survives-edit, round-trip, capability, and atomicity
   tests guard the new Backend abstraction
-- Integration tests for the analysis pipeline in `punks-browser`
+- Integration tests for the analysis pipeline in `punks-app`
 
 ## v0.1.0 — first release (pre-1.0, unstable)
 
-Initial release of punks2, a modular sample browser for musicians. Workspace crates
-(`punks-core`, `punks-analysis`, `punks-library`, `punks-playback`, `punks-browser`, `punks-ui`,
-`punks-standalone`) are all `0.1.0` and unstable — expect breaking changes before `1.0`.
+Initial release of punks, a modular sample browser for musicians. The original
+seven-crate workspace was `0.1.0` and unstable; expect breaking changes before
+`1.0`.
 
 ### Features
 
@@ -70,7 +70,7 @@ Initial release of punks2, a modular sample browser for musicians. Workspace cra
 - Multi-tab browsing with persistence across restarts
 - Opt-in per-folder library (SQLite in a `.punks` folder): tag samples, filter by tags (AND),
   tags survive renames/moves; background scan with progress bar and reconciliation
-- `punks-analysis`: dependency-free time-domain audio features (RMS, peak, zero-crossing rate)
+- `punks-audio`: dependency-free time-domain audio features (RMS, peak, zero-crossing rate)
   with a versioned analysis job queue in the library, ready for a future scheduler
 - Remappable keybinds and configurable samples folder via Settings modal
 - Restores the last directory on next launch

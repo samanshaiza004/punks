@@ -1,5 +1,3 @@
-pub mod config;
-
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
@@ -207,8 +205,39 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn make_audio_dir() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "punks_filesystem_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            TempDir(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tempdir() -> TempDir {
+        TempDir::new()
+    }
+
+    fn make_audio_dir() -> TempDir {
+        let dir = tempdir();
         fs::write(dir.path().join("kick.wav"), b"fake wav").unwrap();
         fs::write(dir.path().join("snare.flac"), b"fake flac").unwrap();
         fs::write(dir.path().join("hihat.mp3"), b"fake mp3").unwrap();
@@ -277,7 +306,7 @@ mod tests {
 
     #[test]
     fn list_excludes_hidden_entries() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         fs::write(dir.path().join("kick.wav"), b"data").unwrap();
         fs::write(dir.path().join(".hidden.wav"), b"data").unwrap();
         fs::create_dir(dir.path().join(".hiddendir")).unwrap();
@@ -289,14 +318,14 @@ mod tests {
 
     #[test]
     fn list_empty_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let result = list_directory(dir.path()).unwrap();
         assert!(result.entries.is_empty());
     }
 
     #[test]
     fn list_not_a_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let file = dir.path().join("file.wav");
         fs::write(&file, b"data").unwrap();
         assert!(matches!(
@@ -312,7 +341,7 @@ mod tests {
 
     #[test]
     fn list_dir_entry_has_correct_fields() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         fs::create_dir(dir.path().join("drums")).unwrap();
         let result = list_directory(dir.path()).unwrap();
         let entry = &result.entries[0];
@@ -324,7 +353,7 @@ mod tests {
 
     #[test]
     fn list_file_entry_has_correct_fields() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         fs::write(dir.path().join("kick.wav"), b"12345").unwrap();
         let result = list_directory(dir.path()).unwrap();
         let entry = &result.entries[0];
@@ -336,7 +365,7 @@ mod tests {
 
     #[test]
     fn list_case_insensitive_extension() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         fs::write(dir.path().join("test.WAV"), b"data").unwrap();
         fs::write(dir.path().join("test.Mp3"), b"data").unwrap();
         let result = list_directory(dir.path()).unwrap();

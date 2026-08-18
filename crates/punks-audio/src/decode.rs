@@ -378,13 +378,13 @@ fn splice_chunk(
 
 // ---- RIFF INFO (a LIST/INFO chunk): Creator / Category / Keywords ----
 //
-// The RIFF INFO list holds free-text tags; punks2 maps three of them —
+// The RIFF INFO list holds free-text tags; punks maps three of them —
 // IART (artist → Creator), IGNR (genre → Category), IKEY (keywords). Every
 // other INFO subfield (INAM, ICMT, ICOP, …) is read-modify-write-preserved,
 // as is every non-INFO chunk. These fourcc tags live here, inside
-// punks-playback; nothing above `metadata::Backend` ever names them.
+// punks-audio; nothing above `metadata::Backend` ever names them.
 
-/// The RIFF INFO subfields punks2 maps to canonical [`crate::metadata`]
+/// The RIFF INFO subfields punks maps to canonical [`crate::metadata`]
 /// fields. `None` = the tag was absent or empty.
 #[derive(Default)]
 pub(crate) struct InfoFields {
@@ -559,7 +559,7 @@ pub(crate) fn write_riff_info(path: &Path, w: &InfoWrite) -> Result<(), Playback
 
 // ---- iXML: keep an existing <BWF_DESCRIPTION> mirror in sync ----
 //
-// iXML is an opaque XML chunk written by field recorders. punks2 never
+// iXML is an opaque XML chunk written by field recorders. punks never
 // creates it, never parses it as a model, and touches exactly one leaf:
 // <BWF_DESCRIPTION>, the spec-defined mirror of bext Description. On write we
 // update that leaf iff it already exists (so the file stays self-consistent);
@@ -627,7 +627,7 @@ pub(crate) fn read_ixml_description(prefix: &[u8]) -> Option<String> {
 
 /// If `path` has an iXML chunk with a `<BWF_DESCRIPTION>` leaf, update it to
 /// `description` so it can't disagree with the bext Description we just wrote.
-/// No-op when there's no iXML chunk or no such leaf — punks2 never creates
+/// No-op when there's no iXML chunk or no such leaf — punks never creates
 /// either. Preserves the rest of the iXML (and every other chunk) verbatim.
 pub(crate) fn write_ixml_description_mirror(
     path: &Path,
@@ -1470,7 +1470,7 @@ mod tests {
         v.extend_from_slice(&data);
 
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("punks2_rf64_{}.wav", std::process::id()));
+        let path = dir.join(format!("punks_rf64_{}.wav", std::process::id()));
         std::fs::write(&path, &v).expect("write temp rf64");
         let out = decode_file(&path);
         let _ = std::fs::remove_file(&path);
@@ -1485,7 +1485,7 @@ mod tests {
     /// Write bytes to a unique temp file; caller removes it.
     fn temp_wav(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
-            "punks2_{tag}_{}_{}.wav",
+            "punks_{tag}_{}_{}.wav",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -117,7 +117,7 @@ fn best(
 /// doesn't count as supplying the field.
 ///
 /// **Not yet wired to any caller — this is deliberate, not an oversight.**
-/// `punks_browser::resolve_fact` is the resolver actually in use today
+/// `punks_app::resolve_fact` is the resolver actually in use today
 /// (override ?? analysis, over the tag/instrument/key/bpm facts in
 /// punks-library). The two intentionally don't share an implementation
 /// because `resolve_fact` has one thing this one can't yet express: a

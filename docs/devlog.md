@@ -1,19 +1,13 @@
-# punks2 devlog #1 — Rebuilding a sample browser in Rust
+# punks devlog #1 — Rebuilding a sample browser in Rust
 
 *Draft / outline — 2026-06-22*
 
-## What punks2 is
+## What punks is
 
-punks2 is a modular **sample browser** for musicians: open a folder of audio
+punks is a modular **sample browser** for musicians: open a folder of audio
 files, step through them, hear each one instantly, and drag the one you want
-into your DAW. It's a small, fast, native desktop app (~3k lines of Rust across
-five crates).
-
-It's also the **foundation of a larger project**. punks2 is the first module of
-a future Rust DAW — the browser is being built first, standalone, so the audio,
-navigation, and persistence layers can be hardened in isolation and then
-embedded into the bigger app as a library. The guiding rule throughout is *each
-layer owns exactly what belongs to it*.
+into your DAW. It's a small, fast, native desktop app with a deliberately short
+dependency graph.
 
 ## Goals
 
@@ -21,42 +15,41 @@ layer owns exactly what belongs to it*.
   and hear samples with no perceptible delay.
 - **Real-time-safe audio.** The output path never blocks, never allocates on the
   audio thread, and never glitches under load.
-- **Reusable by design.** The browser and playback engine are libraries with no
-  UI dependencies, so the DAW can embed them directly.
+- **Clear ownership.** Audio, persistence, application state, and the native
+  executable shell have separate responsibilities and tests.
 - **Small and boring.** Smallest correct solution; few dependencies, few
   abstractions, no runtime to ship.
 - **Cross-platform.** macOS, Linux, Windows from one codebase.
 
 ## How it's made
 
-A Rust workspace of five crates, layered so dependencies only ever point
-"downward":
+A Rust workspace of three library crates plus one executable:
 
 ```
-punks-core  →  punks-playback  →  punks-browser  →  punks-ui  →  punks-standalone
+punks-audio ─┐
+             ├─> punks-app ─> punks-standalone
+punks-library┘
 ```
 
-- **`punks-core`** — directory listing and JSON config/persistence
-  (`serde`, `dirs`). No audio, no UI. Pure, well-tested.
-- **`punks-playback`** — the audio engine. `cpal` for native output
+- **`punks-audio`** — the audio engine. `cpal` for native output
   (CoreAudio / WASAPI / ALSA), `symphonia` for decoding WAV/FLAC/MP3/OGG,
-  `rubato` for sample-rate conversion, and an `lru` decode cache for instant
-  replay. The audio callback is **lock-free**: state lives in atomics and an
+  `rubato` for sample-rate conversion, an `lru` decode cache, and the pure
+  filename/time-domain analysis algorithms. The audio callback is **lock-free**:
+  state lives in atomics and an
   `RwLock` the callback only ever `try_read`s, degrading to silence rather than
   blocking. Decoding happens on a background thread; a `Release`/`Acquire` pair
   hands the finished buffer to the callback safely.
-- **`punks-browser`** — navigation as a domain model: directory history,
-  selection, threaded recursive search, and now multi-tab state. Wraps the
-  playback engine. Still no UI dependency.
-- **`punks-ui`** — an immediate-mode GUI built on `imgui`, plus `rfd` for the
-  native folder picker. One `BrowserPanel::draw` per frame.
+- **`punks-library`** — SQLite-backed roots/assets, reconciliation, tags,
+  facts, overrides, and disposable analysis/waveform caches.
+- **`punks-app`** — preferences, directory history, selection, threaded search,
+  tabs, commands, health checks, worker orchestration, and the application UI.
 - **`punks-standalone`** — the shell: a `winit` window, `wgpu` + `imgui-wgpu`
   render loop, and native drag-out (`drag`) so you can drag a sample straight
   into another app.
 
 ## Why it's an upgrade from the original Electron codebase
 
-punks2 is a ground-up rewrite of an earlier Electron version. The move to native
+punks is a ground-up rewrite of an earlier Electron version. The move to native
 Rust is mostly about what an *audio* app needs:
 
 - **No garbage collector in the audio path.** A GC pause during playback is an
@@ -69,10 +62,10 @@ Rust is mostly about what an *audio* app needs:
   hundreds-of-megabytes app that boots a browser to draw a list.
 - **In-process decoding.** `symphonia` decodes on a worker thread with no IPC
   bridge between a renderer and a main process.
-- **Reusable, enforced boundaries.** The Rust crate layering makes the browser
-  and engine embeddable libraries with compiler-checked module boundaries — the
-  DAW will `use punks_browser::SampleBrowser` directly. The Electron structure
-  didn't give us that seam.
+- **Small, enforced boundaries.** The Rust crate layering keeps audio and
+  persistence testable without a window or audio device, while application
+  orchestration stays with the UI that consumes it. There is no unused
+  toolkit-neutral or future-host layer.
 
 *(Honest caveat: this section is the rationale for going native, grounded in the
 current architecture — not a feature-by-feature diff against the old app.)*
@@ -80,8 +73,8 @@ current architecture — not a feature-by-feature diff against the old app.)*
 ## Log — what's been done so far
 
 **Foundation**
-- Layered workspace; core listing + config; lock-free playback engine;
-  background decode thread + LRU cache; imgui UI; winit/wgpu standalone shell.
+- Layered workspace; audio engine and analysis; SQLite library; application UI;
+  winit/wgpu standalone shell.
 - Waveform visualizer with playhead; remappable keybinds; configurable samples
   folder; native drag-out.
 
@@ -127,8 +120,6 @@ current architecture — not a feature-by-feature diff against the old app.)*
 - Metadata/tags, favorites, and BPM/key detection.
 - Waveform zoom, loop region, and quick trim.
 
-**Toward the DAW**
-- Define the `AudioSink` seam so the engine can render into a host mix bus, not
-  just the default device.
-- Embed `punks-browser` into the DAW shell; build out timeline, mixer, and
-  plugin hosting on top of the same layered core.
+The crate boundaries are intentionally limited to responsibilities with real
+consumers today. A future host or DAW integration can earn a new boundary when
+that second consumer exists.

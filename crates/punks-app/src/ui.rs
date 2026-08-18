@@ -2,16 +2,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use imgui::Key;
-use punks_browser::{
+use crate::config::{self, Keybinds, PunksConfig};
+use crate::{
     Capability, Fact, Field, HealthIssue, HealthIssueKind, LibraryState, Metadata, MetadataSource,
     PlaybackStatus, SampleBrowser, TagCount,
 };
-use punks_core::config::{Keybinds, PunksConfig};
+use imgui::Key;
 
-mod theme;
-
-pub use theme::apply_theme;
+use crate::theme;
 
 /// Host callback that begins a native OS drag for one or more files — the
 /// canonicalized paths of the drag payload (the whole selection on a selected
@@ -509,7 +507,7 @@ const OVERRIDE_FIELDS: &[(&str, &str, bool)] = &[
 
 impl BrowserPanel {
     pub fn new() -> Self {
-        let prefs = punks_core::config::load();
+        let prefs = config::load();
         let volume = prefs.volume;
         BrowserPanel {
             prefs,
@@ -630,7 +628,7 @@ impl BrowserPanel {
             if let Some(dir) = current_dir {
                 self.prefs.last_directory = Some(dir);
             }
-            punks_core::config::save(&self.prefs);
+            config::save(&self.prefs);
         }
 
         // --- Tab bar: switch / drag-reorder / close / new ------------------
@@ -784,7 +782,7 @@ impl BrowserPanel {
         };
         if inspector_clicked {
             self.prefs.inspector_visible = !self.prefs.inspector_visible;
-            punks_core::config::save(&self.prefs);
+            config::save(&self.prefs);
         }
 
         self.draw_settings_modal(ui, browser, frame);
@@ -1010,7 +1008,7 @@ impl BrowserPanel {
                     (self.prefs.inspector_width - ui.io().mouse_delta[0]).clamp(180.0, 600.0);
             }
             if ui.is_item_deactivated() {
-                punks_core::config::save(&self.prefs);
+                config::save(&self.prefs);
             }
 
             ui.same_line();
@@ -1083,7 +1081,7 @@ impl BrowserPanel {
                 browser.redo();
             } else if pressed(&self.prefs.keybinds.toggle_inspector) {
                 self.prefs.inspector_visible = !self.prefs.inspector_visible;
-                punks_core::config::save(&self.prefs);
+                config::save(&self.prefs);
             }
         }
 
@@ -1184,7 +1182,7 @@ impl BrowserPanel {
         }
         if committed {
             self.prefs.volume = self.volume;
-            punks_core::config::save(&self.prefs);
+            config::save(&self.prefs);
         }
 
         if let Some(err) = browser.last_error() {
@@ -1742,7 +1740,7 @@ impl BrowserPanel {
                 ui.text_disabled(format!(
                     "{}   \u{b7}   Peak {:.1} dB",
                     format_duration(a.duration),
-                    punks_browser::amp_to_dbfs(a.peak),
+                    crate::amp_to_dbfs(a.peak),
                 ));
                 ui.text_disabled(format!(
                     "RMS {:.1} dBFS   \u{b7}   ZCR {:.3}",
@@ -2523,7 +2521,7 @@ impl BrowserPanel {
                         } else {
                             *keybind_field_mut(&mut self.prefs.keybinds, action) = name.to_string();
                             self.rebind_conflict = None;
-                            punks_core::config::save(&self.prefs);
+                            config::save(&self.prefs);
                         }
                         self.rebinding = None;
                         break;
@@ -2544,7 +2542,7 @@ impl BrowserPanel {
             } {
                 self.prefs.keybinds = Keybinds::default();
                 self.rebind_conflict = None;
-                punks_core::config::save(&self.prefs);
+                config::save(&self.prefs);
             }
             ui.same_line();
             // SAFETY: the closure submits exactly one stock button in the active window.

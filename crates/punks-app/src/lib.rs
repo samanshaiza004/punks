@@ -6,25 +6,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod command;
+mod config;
+mod filesystem;
 mod health;
+mod theme;
+mod ui;
 
 pub use command::{
     AssignTagCommand, BatchCommand, Command, CommandContext, CommandError, OverrideAction,
     SetOverrideCommand, UnassignTagCommand, UndoStack, WriteMetadataCommand,
 };
+pub use config::PunksConfig;
+pub use filesystem::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
 pub use health::{HealthIssue, HealthIssueKind};
-pub use punks_analysis::{amp_to_dbfs, AnalysisReport};
-pub use punks_core::config::PunksConfig;
-pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
-pub use punks_library::{Fact, LibraryError, ScanSummary, TagCount};
-pub use punks_playback::{
-    AudioMetadata, Capability, Field, Metadata, MetadataSource, PlaybackError, PlaybackStatus,
-    ResolvedMetadata, Sourced, TrackInfo, WaveformPeaks,
+pub use punks_audio::{
+    amp_to_dbfs, AnalysisReport, AudioMetadata, Backend, Capability, Field, Metadata,
+    MetadataSource, PlaybackError, PlaybackStatus, ResolvedMetadata, Sourced, TrackInfo,
+    WaveformPeaks,
 };
+pub use punks_library::{Fact, LibraryError, ScanSummary, TagCount};
+pub use theme::apply_theme;
+pub use ui::BrowserPanel;
 
-use punks_analysis::{AnalysisContext, AudioBuffer};
+use punks_audio::{decode_file, MetadataBackend, PlaybackEngine, RequestSlot};
+use punks_audio::{AnalysisContext, AudioBuffer};
 use punks_library::Library;
-use punks_playback::{decode_file, Backend, MetadataBackend, PlaybackEngine, RequestSlot};
 
 /// How many buckets a full-source waveform is computed at (matches the preview
 /// waveform's resolution).
@@ -57,7 +63,7 @@ fn ensure_waveform_cached(path: &Path) -> Option<WaveformPeaks> {
             });
         }
     }
-    match punks_playback::compute_source_peaks(path, WAVEFORM_BUCKETS) {
+    match punks_audio::compute_source_peaks(path, WAVEFORM_BUCKETS) {
         Ok(peaks) => {
             if let Some(lib) = &lib {
                 if let Err(e) = lib.store_waveform(path, &peaks.peaks) {
@@ -417,7 +423,7 @@ fn spawn_scan(
                 .reconcile_with_progress(&files, |done| prog.done.store(done, Ordering::Relaxed))?;
             // Queue analysis for everything present at the current pipeline
             // version (idempotent). The worker drains it after the scan resolves.
-            lib.enqueue_all(punks_analysis::pipeline_version())?;
+            lib.enqueue_all(punks_audio::pipeline_version())?;
             Ok(summary)
         });
         let _ = tx.send(result);
@@ -427,7 +433,7 @@ fn spawn_scan(
 
 /// Bridge: a report's typed facts → the library's storage `Fact`s. The browser
 /// is the only place the analysis report and the library's storage vocabulary
-/// meet, so `punks_library::Fact` never enters `punks-analysis`.
+/// meet, so `punks_library::Fact` never enters the audio algorithms.
 fn report_to_facts(report: &AnalysisReport) -> Vec<(&'static str, Fact)> {
     let mut facts: Vec<(&'static str, Fact)> = report
         .numeric_facts()
@@ -458,7 +464,7 @@ fn detected_fact_of(report: &AnalysisReport, metric: &str) -> Option<Fact> {
 /// something — "this sound has no key" is different from "not corrected yet".
 /// Pure so it's testable without a `SampleBrowser` or a real library.
 ///
-/// This is the live two-layer resolver; `punks_playback::metadata::resolve`
+/// This is the live two-layer resolver; `punks_audio::metadata::resolve`
 /// is a separate four-source (`MetadataSource`) resolver with no callers yet
 /// — see its doc comment for why the two aren't merged.
 fn resolve_fact(
@@ -532,7 +538,7 @@ fn analyze_claimed(lib: &mut Library, path: &Path, done_tx: &mpsc::Sender<PathBu
                     .and_then(|s| s.to_str())
                     .unwrap_or_default(),
             };
-            let report = punks_analysis::run_all(&ctx);
+            let report = punks_audio::run_all(&ctx);
             let dur = t.elapsed().as_millis() as u32;
             let mut facts = report_to_facts(&report);
             // The embedded Description, cached as a fact so it's searchable/
@@ -907,7 +913,7 @@ impl SampleBrowser {
     }
 
     pub fn open_directory(&mut self, path: &Path) -> Result<(), BrowserError> {
-        let listing = punks_core::list_directory(path)?;
+        let listing = filesystem::list_directory(path)?;
         {
             let tab = self.active_mut();
             tab.history = vec![path.to_path_buf()];
@@ -934,7 +940,7 @@ impl SampleBrowser {
             entry.path.clone()
         };
 
-        let listing = punks_core::list_directory(&path)?;
+        let listing = filesystem::list_directory(&path)?;
         let tab = self.active_mut();
         tab.history.push(path);
         tab.listing = Some(listing);
@@ -954,7 +960,7 @@ impl SampleBrowser {
             tab.history.pop();
             tab.history.last().unwrap().clone()
         };
-        let listing = punks_core::list_directory(&path)?;
+        let listing = filesystem::list_directory(&path)?;
         let tab = self.active_mut();
         tab.listing = Some(listing);
         tab.selected = None;
@@ -973,7 +979,7 @@ impl SampleBrowser {
             tab.history.truncate(level + 1);
             tab.history.last().unwrap().clone()
         };
-        let listing = punks_core::list_directory(&path)?;
+        let listing = filesystem::list_directory(&path)?;
         let tab = self.active_mut();
         tab.listing = Some(listing);
         tab.selected = None;
@@ -1470,7 +1476,7 @@ impl SampleBrowser {
         let (tx, rx) = mpsc::channel();
         let thread_query = query.clone();
         std::thread::spawn(move || {
-            let results = punks_core::search_directory(&root, &thread_query, SUPPORTED_EXTENSIONS)
+            let results = filesystem::search_directory(&root, &thread_query, SUPPORTED_EXTENSIONS)
                 .unwrap_or_else(|e| {
                     log::warn!("search in {}: {e}", root.display());
                     Vec::new()
@@ -2400,7 +2406,7 @@ mod tests {
     impl TempDirs {
         fn new(tag: &str) -> Self {
             let base = std::env::temp_dir().join(format!(
-                "punks2_tabrestore_{}_{tag}_{}",
+                "punks_tabrestore_{}_{tag}_{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -2582,7 +2588,7 @@ mod tests {
         // detected) feeding the aggregation and sort that `library_fact_facets`
         // hands the sidebar.
         let dir = std::env::temp_dir().join(format!(
-            "punks2_facets_{}_{}",
+            "punks_facets_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

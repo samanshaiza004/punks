@@ -1,0 +1,16 @@
+[package]
+name = "punks-app"
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+punks-audio = { path = "../punks-audio" }
+punks-library = { path = "../punks-library" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+imgui = "0.12"
+imgui-painter = { git = "https://github.com/samanshaiza004/imgui-painter", rev = "1b3b001ae90daf6b4235615876e4ff85f6e309ed" }
+rfd = "0.15"
+log = "0.4"

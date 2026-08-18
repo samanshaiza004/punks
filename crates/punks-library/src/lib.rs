@@ -669,7 +669,7 @@ impl Library {
     // lifecycle (pending → running → done/error, with profiling) and stores
     // results as opaque (metric, value) pairs. Which analyzers exist, what they
     // compute, and the single `pipeline_version` that decides staleness all live
-    // in punks-analysis; nothing here names an analyzer.
+    // in punks-audio; nothing here names an analyzer.
 
     /// Enqueue a `pending` job for every present asset at `pipeline_version`,
     /// in one set-based statement. Idempotent: re-queues an asset only if its
@@ -1240,26 +1240,71 @@ fn row_to_override_at(r: &rusqlite::Row, base: usize) -> Result<Option<Fact>, ru
 }
 
 /// Walk `root` for supported audio files, described cheaply for reconcile.
-/// Reuses punks-core's recursive walker (which skips hidden entries, so the
-/// `.punks` folder itself is never scanned).
+/// The library owns this scan because it is the input to reconciliation; the
+/// application has a separate listing/search model for interactive browsing.
 pub fn scan_files(root: &Path) -> Result<Vec<ScannedFile>, LibraryError> {
-    let entries = punks_core::search_directory(root, "", punks_core::SUPPORTED_EXTENSIONS)
-        .map_err(|e| LibraryError::Io(e.to_string()))?;
-    let mut out = Vec::with_capacity(entries.len());
-    for e in entries {
-        let Ok(rel) = e.path.strip_prefix(root) else {
+    if !root.is_dir() {
+        return Err(LibraryError::Io(format!(
+            "not a directory: {}",
+            root.display()
+        )));
+    }
+
+    let mut out = Vec::new();
+    collect_audio_files(root, root, &mut out)?;
+    Ok(out)
+}
+
+const SUPPORTED_EXTENSIONS: &[&str] = &["wav", "flac", "mp3", "ogg"];
+
+fn collect_audio_files(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<ScannedFile>,
+) -> Result<(), LibraryError> {
+    let entries = std::fs::read_dir(current)?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
             continue;
+        }
+
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
         };
-        let Ok(meta) = std::fs::metadata(&e.path) else {
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_audio_files(root, &path, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !SUPPORTED_EXTENSIONS.contains(&extension.as_str()) {
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let Ok(relative_path) = path.strip_prefix(root) else {
             continue;
         };
         out.push(ScannedFile {
-            relative_path: rel.to_path_buf(),
-            size: meta.len(),
-            mtime_ms: mtime_ms(&meta),
+            relative_path: relative_path.to_path_buf(),
+            size: metadata.len(),
+            mtime_ms: mtime_ms(&metadata),
         });
     }
-    Ok(out)
+    Ok(())
 }
 
 fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
@@ -1377,7 +1422,7 @@ mod tests {
     impl TempRoot {
         fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
-                "punks2_lib_{}_{}_{tag}",
+                "punks_lib_{}_{}_{tag}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1472,7 +1517,7 @@ mod tests {
         // leftover temp. Guards the write half of "concurrent requests for one
         // asset -> one persisted entry" ahead of a future parallel sweep. (The
         // "one compute per burst" half is `request_slot_coalesces_to_latest` in
-        // punks-playback.)
+        // punks-audio.)
         let t = TempRoot::new("wave_race");
         let a = write_wav(&t.0, "loop.wav", b"AUDIO-BYTES");
         let mut lib = Library::create(&t.0).unwrap();

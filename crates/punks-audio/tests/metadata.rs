@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use punks_playback::{Backend, Capability, Field, Metadata, MetadataBackend};
+use punks_audio::{Backend, Capability, Field, Metadata, MetadataBackend};
 
 /// Append one RIFF chunk (id + LE size + body + pad byte if odd), as spec.
 fn chunk(id: &[u8; 4], body: &[u8], out: &mut Vec<u8>) {
@@ -67,7 +67,7 @@ fn rf64() -> Vec<u8> {
 
 fn tmp(tag: &str, bytes: &[u8]) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "punks2_meta_{tag}_{}_{}.wav",
+        "punks_meta_{tag}_{}_{}.wav",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -239,7 +239,7 @@ fn wav_riff_info_round_trips_and_preserves_unmapped_subfields() {
 fn wav_ixml_mirror_synced_and_unrelated_elements_survive() {
     // bext absent, so read falls back to the iXML mirror; a Description edit
     // updates bext AND the existing <BWF_DESCRIPTION> leaf, leaving <SCENE>
-    // (a field punks2 doesn't model) untouched. Different-length text
+    // (a field punks doesn't model) untouched. Different-length text
     // exercises the chunk resize + RIFF-size patch.
     let ixml =
         b"<BWFXML><BEXT><BWF_DESCRIPTION>old</BWF_DESCRIPTION></BEXT><SCENE>MyScene</SCENE></BWFXML>";

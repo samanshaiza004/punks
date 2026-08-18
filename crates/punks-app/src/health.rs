@@ -1,6 +1,6 @@
 //! Library-wide metadata health checks: surfaces problems in a library's
 //! embedded metadata by comparing the same [`Metadata`] model + capability
-//! gating `punks-browser` already bridges to `punks_playback::metadata`
+//! gating `punks-app` already bridges to `punks_audio::metadata`
 //! against the facts/overrides `punks-library` already stores. No new
 //! storage, no new schema — this is a read-only diagnostic over data both
 //! crates already own.
@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use punks_audio::{Backend, Capability, Field, Metadata, MetadataBackend};
 use punks_library::Fact;
-use punks_playback::{Backend, Capability, Field, Metadata, MetadataBackend};
 
 /// What's wrong with one (asset, field) pair. Only *disagreement* is a
 /// problem — an absent optional field isn't (see [`check_asset`]).

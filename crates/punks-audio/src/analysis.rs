@@ -67,19 +67,11 @@ pub struct AnalysisContext<'a> {
 /// - `ID` is the stable string key its metrics are stored under.
 /// - `VERSION` bumps whenever the algorithm changes; folded into
 ///   [`pipeline_version`] so persisted results invalidate.
-/// - `DEPENDS_ON` lists the `ID`s of analyzers whose output this one needs. It's
-///   empty for every current analyzer; the field exists so a future scheduler
-///   can topologically order the registry (e.g. key detection → chromagram)
-///   without touching the worker, which only ever calls [`run_all`].
 ///
-/// Infallible for now — RMS/Peak/ZCR/Duration are mathematically total. When the
-/// first fallible analyzer arrives (Tempo, whose requested spectrum may be
-/// absent), give the trait `type Error = Infallible` so only it carries a real
-/// error type, rather than making every analyzer return `Result`.
+/// The current analyzers are infallible because their calculations are total.
 pub trait Analyzer {
     const ID: &'static str;
     const VERSION: u32;
-    const DEPENDS_ON: &'static [&'static str] = &[];
     type Output;
     fn analyze(ctx: &AnalysisContext) -> Self::Output;
 }
@@ -387,7 +379,6 @@ fn camelot_key(tok: &str) -> Option<String> {
 
 /// The registered analyzers as `(id, version)`, in run order. The single place
 /// that knows the analyzer set; [`run_all`] and [`pipeline_version`] read it.
-/// When an analyzer gains a non-empty `DEPENDS_ON`, sort this topologically.
 const PIPELINE: &[(&str, u32)] = &[
     (Rms::ID, Rms::VERSION),
     (Peak::ID, Peak::VERSION),

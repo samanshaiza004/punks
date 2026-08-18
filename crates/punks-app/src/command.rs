@@ -1,7 +1,7 @@
 //! A Command system unifying the app's writes so they can be undone.
 //! Two kinds exist today and both go through the same [`Command`] trait:
 //! SQLite writes (tags, overrides — `punks_library::Library`) and embedded
-//! file metadata writes (`punks_playback::metadata`, e.g. the bext
+//! file metadata writes (`punks_audio::metadata`, e.g. the bext
 //! Description). [`WriteMetadataCommand`] shows the "unify" part
 //! concretely: one command does *both* — the embedded write and the
 //! library's cache sync — as a single undoable step, exactly the shape
@@ -32,8 +32,8 @@
 
 use std::path::PathBuf;
 
+use punks_audio::{Backend, Field, Metadata, MetadataBackend, MetadataError};
 use punks_library::{Fact, Library, LibraryError};
-use punks_playback::{Backend, Field, Metadata, MetadataBackend, MetadataError};
 
 /// What a [`Command`] executes/undoes against. Just the library handle —
 /// every write this module wraps already only needed that (metadata

@@ -7,9 +7,9 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use punks_analysis::{run_all, AnalysisContext, AnalysisReport, AudioBuffer};
+use punks_audio::{decode_file, Backend, Field, Metadata, MetadataBackend};
+use punks_audio::{run_all, AnalysisContext, AnalysisReport, AudioBuffer};
 use punks_library::{Fact, Library};
-use punks_playback::{decode_file, Backend, Field, Metadata, MetadataBackend};
 
 /// Store a report's typed facts, then read them back into a report (the same
 /// numeric/text split the browser's bridge does, via public API only).
@@ -78,7 +78,7 @@ fn worker_chain_decodes_analyzes_and_stores() {
     let mut lib = Library::create(&dir).unwrap();
     lib.reconcile(&punks_library::scan_files(&dir).unwrap())
         .unwrap();
-    lib.enqueue_all(punks_analysis::pipeline_version()).unwrap();
+    lib.enqueue_all(punks_audio::pipeline_version()).unwrap();
 
     // The worker's inner loop, verbatim: claim → decode → run_all → store.
     let claimed = lib.claim_next_pending().unwrap().expect("a pending job");
@@ -139,7 +139,7 @@ fn priority_claim_completes_out_of_fifo_order() {
     let mut lib = Library::create(&dir).unwrap();
     lib.reconcile(&punks_library::scan_files(&dir).unwrap())
         .unwrap();
-    lib.enqueue_all(punks_analysis::pipeline_version()).unwrap();
+    lib.enqueue_all(punks_audio::pipeline_version()).unwrap();
 
     // Jump straight to "b" via claim_path — the same call the worker makes for
     // a priority request — bypassing claim_next_pending's FIFO order entirely,
@@ -177,7 +177,7 @@ fn undecodable_file_is_failed_not_reclaimed() {
     let mut lib = Library::create(&dir).unwrap();
     lib.reconcile(&punks_library::scan_files(&dir).unwrap())
         .unwrap();
-    lib.enqueue_all(punks_analysis::pipeline_version()).unwrap();
+    lib.enqueue_all(punks_audio::pipeline_version()).unwrap();
 
     let claimed = lib.claim_next_pending().unwrap().unwrap();
     match decode_file(&claimed) {
@@ -219,7 +219,7 @@ fn bext_description_is_written_then_cached_by_analysis() {
     let mut lib = Library::create(&dir).unwrap();
     lib.reconcile(&punks_library::scan_files(&dir).unwrap())
         .unwrap();
-    lib.enqueue_all(punks_analysis::pipeline_version()).unwrap();
+    lib.enqueue_all(punks_audio::pipeline_version()).unwrap();
 
     // The worker's inner loop, plus the description-caching line it adds.
     let claimed = lib.claim_next_pending().unwrap().unwrap();

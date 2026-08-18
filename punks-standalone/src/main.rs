@@ -22,8 +22,7 @@ use winit::{
     window::Window,
 };
 
-use punks_browser::SampleBrowser;
-use punks_ui::BrowserPanel;
+use punks_app::{BrowserPanel, SampleBrowser};
 
 const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
 const UI_GLYPH_RANGES: &[u32] = &[
@@ -220,7 +219,7 @@ impl AppWindow {
         let size = LogicalSize::new(800.0, 600.0);
         let attributes = Window::default_attributes()
             .with_inner_size(size)
-            .with_title("punks2");
+            .with_title("punks");
         let window = Arc::new(event_loop.create_window(attributes).unwrap());
 
         let phys_size = window.inner_size();
@@ -264,7 +263,7 @@ impl AppWindow {
             .io_mut()
             .config_flags
             .insert(imgui::ConfigFlags::NAV_ENABLE_KEYBOARD);
-        punks_ui::apply_theme(context.style_mut());
+        punks_app::apply_theme(context.style_mut());
 
         // winit deliberately has no clipboard API; without a backend here,
         // imgui's internal Ctrl+C/Ctrl+V in text fields (e.g. the selectable

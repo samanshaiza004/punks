@@ -11,11 +11,15 @@ use lru::LruCache;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
 
+mod analysis;
 mod decode;
 pub mod metadata;
 pub mod peaks;
 mod resample;
 
+pub use analysis::{
+    amp_to_dbfs, pipeline_version, run_all, AnalysisContext, AnalysisReport, AudioBuffer,
+};
 pub use decode::{compute_source_peaks, decode_file, AudioMetadata, DecodedAudio};
 pub use metadata::{
     resolve, Backend, Capability, Field, Metadata, MetadataBackend, MetadataError, MetadataSource,
