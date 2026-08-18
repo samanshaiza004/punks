@@ -5,13 +5,17 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod actions;
+mod app;
+mod browser;
 mod command;
 mod config;
 mod filesystem;
 mod health;
+mod platform;
 mod theme;
-mod ui;
 
+pub use app::run;
 pub use command::{
     AssignTagCommand, BatchCommand, Command, CommandContext, CommandError, OverrideAction,
     SetOverrideCommand, UnassignTagCommand, UndoStack, WriteMetadataCommand,
@@ -25,8 +29,6 @@ pub use punks_audio::{
     WaveformPeaks,
 };
 pub use punks_library::{Fact, LibraryError, ScanSummary, TagCount};
-pub use theme::apply_theme;
-pub use ui::BrowserPanel;
 
 use punks_audio::{decode_file, MetadataBackend, PlaybackEngine, RequestSlot};
 use punks_audio::{AnalysisContext, AudioBuffer};
@@ -667,6 +669,19 @@ fn spawn_analysis_worker() -> (mpsc::Sender<AnalysisMsg>, mpsc::Receiver<PathBuf
     (tx, done_rx)
 }
 
+/// Result of one [`SampleBrowser::poll`] call. See that method's doc comment
+/// for why this exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PollOutcome {
+    /// Something was applied this call (results arrived, a scan finished,
+    /// analysis completed, a waveform loaded, ...) — the caller should
+    /// repaint.
+    pub changed: bool,
+    /// At least one background subsystem still has outstanding work after
+    /// this call — the caller should poll again rather than stop.
+    pub pending: bool,
+}
+
 pub struct SampleBrowser {
     tabs: Vec<TabState>,
     active_tab: usize,
@@ -692,9 +707,10 @@ pub struct SampleBrowser {
 const ANALYSIS_DRAIN_PER_FRAME: usize = 32;
 
 impl SampleBrowser {
-    /// `cfg` is read once by the caller (see `BrowserPanel::prefs`) rather than
-    /// loaded again here, so a single app startup only touches disk once for
-    /// config instead of once per component that needs it.
+    /// `cfg` is read once by the caller (`config::load`, called once at
+    /// startup) rather than loaded again here, so a single app startup only
+    /// touches disk once for config instead of once per component that
+    /// needs it.
     pub fn new(cfg: &PunksConfig) -> Result<Self, BrowserError> {
         let playback = PlaybackEngine::new()?;
 
@@ -758,9 +774,26 @@ impl SampleBrowser {
         &mut self.tabs[self.active_tab]
     }
 
-    pub fn poll(&mut self) {
+    /// Drains every background-worker channel (analysis, waveform-peaks,
+    /// library-scan, search, health-check) and folds finished work into
+    /// caches. `changed`/`pending` exist for GPUI's poll-driver bridge (see
+    /// `punks-app/src/browser/state.rs`): GPUI is event-driven, not a
+    /// continuously-running frame loop, so its driver needs to know whether
+    /// to repaint (`changed`) and whether to keep polling at all
+    /// (`pending`) rather than calling this unconditionally forever.
+    pub fn poll(&mut self) -> PollOutcome {
+        let mut changed = false;
+        let mut pending = false;
+
         if let Some(err) = self.playback.poll() {
             self.last_error = Some(err.to_string());
+            changed = true;
+        }
+        if matches!(
+            self.playback.status(),
+            PlaybackStatus::Playing { .. } | PlaybackStatus::Loading { .. }
+        ) {
+            pending = true;
         }
 
         // Drain every tab's search channel, not just the active one, so a
@@ -783,8 +816,14 @@ impl SampleBrowser {
                 }
             }
         }
+        if !rebuild.is_empty() {
+            changed = true;
+        }
         for i in rebuild {
             self.rebuild_tab_results(i);
+        }
+        if self.tabs.iter().any(|tab| tab.search_rx.is_some()) {
+            pending = true;
         }
 
         // Drain library scans the same way; on completion, reload the display
@@ -819,6 +858,9 @@ impl SampleBrowser {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
+        if !scanned.is_empty() || !scan_errors.is_empty() {
+            changed = true;
+        }
         for e in scan_errors {
             log::error!("library scan: {e}");
             self.last_error = Some(format!("library scan: {e}"));
@@ -839,6 +881,9 @@ impl SampleBrowser {
                     .send(AnalysisMsg::Drain(self.libraries[i].root.clone()));
             }
         }
+        if self.libraries.iter().any(|ctx| ctx.scan_rx.is_some()) {
+            pending = true;
+        }
 
         // Fold in finished analysis, capped per frame so a fast worker can't
         // stall a frame. Each completion refreshes just that asset's cache;
@@ -846,9 +891,11 @@ impl SampleBrowser {
         // (not per completion), so a burst of finishes can't turn this into
         // repeated O(library size) work.
         let mut facets_dirty: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut analysis_drained = 0usize;
         for _ in 0..ANALYSIS_DRAIN_PER_FRAME {
             match self.analysis_done_rx.try_recv() {
                 Ok(path) => {
+                    analysis_drained += 1;
                     if let Some(i) = self.apply_analysis_done(&path) {
                         facets_dirty.insert(i);
                     }
@@ -856,39 +903,61 @@ impl SampleBrowser {
                 Err(_) => break,
             }
         }
+        if analysis_drained > 0 {
+            changed = true;
+        }
+        // Hit the per-frame cap: more completions were likely still queued
+        // behind it, so keep polling instead of treating this as settled.
+        if analysis_drained == ANALYSIS_DRAIN_PER_FRAME {
+            pending = true;
+        }
         for i in facets_dirty {
             self.libraries[i].recompute_facets();
         }
 
-        self.poll_full_peaks();
-        self.poll_health_check();
+        if self.poll_full_peaks() {
+            changed = true;
+        }
+        if self.poll_health_check() {
+            changed = true;
+        }
+        if self.libraries.iter().any(|ctx| ctx.health_rx.is_some()) {
+            pending = true;
+        }
+
+        PollOutcome { changed, pending }
     }
 
     /// Fold in a finished health check, if one is running. One-shot (unlike
     /// the scan/analysis workers, there's no partial progress to stream —
     /// the background thread sends its whole `Vec<HealthIssue>` once, when
-    /// the walk finishes).
-    fn poll_health_check(&mut self) {
+    /// the walk finishes). Returns whether anything changed.
+    fn poll_health_check(&mut self) -> bool {
+        let mut changed = false;
         for ctx in &mut self.libraries {
             let Some(rx) = &ctx.health_rx else { continue };
             match rx.try_recv() {
                 Ok(issues) => {
                     ctx.health_issues = Some(issues);
                     ctx.health_rx = None;
+                    changed = true;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     log::error!("health check thread terminated unexpectedly");
                     ctx.health_rx = None;
+                    changed = true;
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
+        changed
     }
 
     /// Kick off / receive the full-source waveform for the current clip. A long
     /// file only shows its preview peaks until this fills in the whole shape,
-    /// which is also what makes the entire source scrubbable.
-    fn poll_full_peaks(&mut self) {
+    /// which is also what makes the entire source scrubbable. Returns whether
+    /// a finished waveform was applied.
+    fn poll_full_peaks(&mut self) -> bool {
         // Request once per loaded clip. A truncated (long) clip needs this to
         // get its whole-source shape and become fully scrubbable; a short clip's
         // preview peaks are already the full waveform on screen, but we still
@@ -905,11 +974,14 @@ impl SampleBrowser {
 
         // Apply any finished waveform to the engine (dropped if it no longer
         // matches the current file — the user moved on).
+        let mut changed = false;
         while let Ok((path, peaks)) = self.peaks_result_rx.try_recv() {
             if let Some(peaks) = peaks {
                 self.playback.set_full_peaks(&path, peaks);
+                changed = true;
             }
         }
+        changed
     }
 
     pub fn open_directory(&mut self, path: &Path) -> Result<(), BrowserError> {
