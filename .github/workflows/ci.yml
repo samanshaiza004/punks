@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: No raw ImDrawList geometry in application code
-        # punks2 describes geometry through imgui-painter (Canvas); only text
+        # punks describes geometry through imgui-painter (Canvas); only text
         # (imgui owns the font atlas) may go straight to ImDrawList. A raw
         # fill/stroke in product code belongs in imgui-painter instead —
         # improve the library until it can express the shape, don't hand-roll
@@ -58,25 +58,3 @@ jobs:
             exit 1
           fi
           echo "OK: application code constructs no raw geometry."
-
-  imgui-painter-independent:
-    name: imgui-painter independent build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build outside the host workspace
-        shell: bash
-        run: |
-          scratch="$(mktemp -d)"
-          cp -R imgui-painter "$scratch/imgui-painter"
-          cd "$scratch/imgui-painter/bindings/rust"
-          cargo build --examples
-          cargo test

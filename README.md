@@ -1,4 +1,4 @@
-# punks2
+# punks
 
 A modular sample browser for musicians, built in Rust.
 
@@ -54,27 +54,26 @@ cargo run -p punks-standalone
 
 Click **Browse...** to open a directory, then click any file to preview it.
 
-## Using as a library
+## Architecture
 
-Add to your `Cargo.toml`:
+The workspace has three library crates and one executable:
 
-```toml
-[dependencies]
-punks-browser = { path = "crates/punks-browser" }
-punks-ui = { path = "crates/punks-ui" }  # if using imgui
+```
+punks-audio ─┐
+             ├─> punks-app ─> punks-standalone
+punks-library┘
 ```
 
-```rust
-use punks_browser::{PunksConfig, SampleBrowser};
+- **`punks-audio`** owns decoding, preview playback, resampling, waveform
+  generation, audio metadata, and the pure analysis algorithms.
+- **`punks-library`** owns SQLite roots/assets, reconciliation, tags, facts,
+  overrides, and generated-data caches.
+- **`punks-app`** owns preferences, browsing, tabs, selection, commands,
+  workers, inspector, transport, and the application UI.
+- **`punks-standalone`** is the native executable shell and renderer.
 
-let cfg = PunksConfig::default(); // or punks_core::config::load()
-let mut browser = SampleBrowser::new(&cfg)?;
-browser.open_directory(Path::new("/path/to/samples"))?;
-browser.select(0);
-browser.play_selected();
-// ...
-browser.stop();
-```
+These are internal application boundaries, not a promise of a reusable browser
+API. The full boundary rationale is in [the crate-boundary audit](docs/crate-boundary-audit.md).
 
 ## License
 

@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/punks-core",
-    "crates/punks-analysis",
+    "crates/punks-audio",
     "crates/punks-library",
-    "crates/punks-playback",
-    "crates/punks-browser",
-    "crates/punks-ui",
+    "crates/punks-app",
     "punks-standalone",
-    "imgui-painter/bindings/rust",
 ]
+
+[patch.crates-io]
+imgui = { git = "https://github.com/samanshaiza004/imgui-rs", rev = "7a89260c79ad1f9d4bfe81d6ca1b76ad38a6b3e3" }
+imgui-sys = { git = "https://github.com/samanshaiza004/imgui-rs", rev = "7a89260c79ad1f9d4bfe81d6ca1b76ad38a6b3e3" }

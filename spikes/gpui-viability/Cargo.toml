@@ -1,0 +1,39 @@
+# Deliberately its own Cargo workspace, NOT a member of the root punks
+# workspace: pinning gpui/gpui_platform to a zed-industries/zed git rev pulls
+# in a `cocoa` version that conflicts with punks-standalone's pinned `drag`
+# crate if the two share one resolved dependency graph. Isolating the spike
+# sidesteps that (unrelated) conflict and keeps the root Cargo.lock untouched.
+[workspace]
+
+[package]
+name = "gpui-viability-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Kill-or-commit spike: does GPUI cover Punks' non-negotiable UI workflows?"
+
+# gpui 0.2.2 (the latest crates.io release, published 2025-10-22) has no
+# AccessKit integration and no external-drag API at all -- both exist only on
+# the zed-industries/zed `main` branch, in the still-unpublished
+# gpui_platform/gpui_macos/gpui_windows/gpui_linux crate split. Pinned to a
+# specific commit so this spike is reproducible; see docs/gpui-viability.md
+# for what that implies about GPUI's readiness.
+# punks-playback was renamed/merged into punks-audio (with punks-analysis)
+# by other work on this branch partway through this spike. Same package
+# version (0.2.0) and identical PlaybackEngine/WaveformPeaks/PlaybackStatus
+# API, so this is a path update, not a rewrite.
+[dependencies]
+punks-audio = { path = "../../crates/punks-audio" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "8b1497dbd22fb06f5838a7c0b84a1e54fafa71bc", package = "gpui" }
+# gpui_platform's OWN default features are `[]` -- font-kit/wayland/x11 are
+# NOT on by default despite the README example implying a plain `version = "*"`
+# dependency is a safe cross-platform default. Omitting this list silently
+# renders a text-less UI (empty layout boxes, no glyphs) with no warning or
+# error at build or run time. Found by actually running the spike.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "8b1497dbd22fb06f5838a7c0b84a1e54fafa71bc", package = "gpui_platform", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
+log = "0.4"
+env_logger = "0.11"

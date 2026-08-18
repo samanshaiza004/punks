@@ -1,9 +1,16 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(debug_assertions)]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(debug_assertions)]
+use std::time::Duration;
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use drag::{DragItem, Image};
-use imgui::FontSource;
+use imgui::{FontGlyphRanges, FontSource};
 use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
 use pollster::block_on;
@@ -15,8 +22,88 @@ use winit::{
     window::Window,
 };
 
-use punks_browser::SampleBrowser;
-use punks_ui::BrowserPanel;
+use punks_app::{BrowserPanel, SampleBrowser};
+
+const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+const UI_GLYPH_RANGES: &[u32] = &[
+    0x0020, 0x024f, // Basic + Extended Latin.
+    0x0370, 0x052f, // Greek + Cyrillic.
+    0x2000, 0x206f, // General punctuation.
+    0x2190, 0x21ff, // Arrows.
+    0x25a0, 0x26ff, // Geometric/misc symbols, including transport icons.
+    0,
+];
+
+#[cfg(debug_assertions)]
+struct CountingAllocator(System);
+
+#[cfg(debug_assertions)]
+static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(debug_assertions)]
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        unsafe { self.0.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { self.0.dealloc(ptr, layout) }
+    }
+}
+
+#[cfg(debug_assertions)]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator(System);
+
+#[cfg(debug_assertions)]
+struct UiPerfProbe {
+    enabled: bool,
+    interval_start: Instant,
+    draw_time: Duration,
+    allocations: usize,
+    decorated_rows: u64,
+    frames: u64,
+}
+
+#[cfg(debug_assertions)]
+impl UiPerfProbe {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("PUNKS_UI_PERF").is_some_and(|value| value == "1"),
+            interval_start: Instant::now(),
+            draw_time: Duration::ZERO,
+            allocations: 0,
+            decorated_rows: 0,
+            frames: 0,
+        }
+    }
+
+    fn record(&mut self, started: Instant, allocations_before: usize, decorated_rows: u32) {
+        self.draw_time += started.elapsed();
+        self.allocations += ALLOCATION_COUNT
+            .load(Ordering::Relaxed)
+            .saturating_sub(allocations_before);
+        self.decorated_rows += u64::from(decorated_rows);
+        self.frames += 1;
+
+        if self.interval_start.elapsed() >= Duration::from_secs(1) {
+            let frames = self.frames as f64;
+            log::info!(
+                "UI perf: frames={}, avg draw ms={:.2}, avg allocs/frame={:.2}, avg decorated rows/frame={:.2}",
+                self.frames,
+                self.draw_time.as_secs_f64() * 1000.0 / frames,
+                self.allocations as f64 / frames,
+                self.decorated_rows as f64 / frames,
+            );
+            self.interval_start = Instant::now();
+            self.draw_time = Duration::ZERO;
+            self.allocations = 0;
+            self.decorated_rows = 0;
+            self.frames = 0;
+        }
+    }
+}
 
 /// Routes imgui's copy/paste to the real OS clipboard via `arboard`. Without
 /// this, imgui falls back to an internal no-op backend: text can be selected
@@ -43,16 +130,23 @@ const DRAG_PREVIEW_ICON_PNG: &[u8] = &[
 ];
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn start_file_drag(window: &Window, path: &std::path::Path) {
-    let drag_path = match std::fs::canonicalize(path) {
-        Ok(path) => path,
-        Err(err) => {
-            log::error!("failed to canonicalize drag path {path:?}: {err}");
-            return;
-        }
-    };
+fn start_file_drag(window: &Window, paths: &[std::path::PathBuf]) {
+    let drag_paths: Vec<std::path::PathBuf> = paths
+        .iter()
+        .filter_map(|path| match std::fs::canonicalize(path) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                log::warn!("skipping drag path that could not be canonicalized {path:?}: {err}");
+                None
+            }
+        })
+        .collect();
+    if drag_paths.is_empty() {
+        log::error!("failed to start file drag: no valid paths remain");
+        return;
+    }
 
-    let item = DragItem::Files(vec![drag_path]);
+    let item = DragItem::Files(drag_paths);
     let preview = Image::Raw(DRAG_PREVIEW_ICON_PNG.to_vec());
     if let Err(err) = drag::start_drag(
         window,
@@ -65,34 +159,6 @@ fn start_file_drag(window: &Window, path: &std::path::Path) {
     ) {
         log::error!("failed to start drag operation: {err}");
     }
-}
-
-/// Slight dark-theme polish: rounded frames, a touch more breathing room, and
-/// muted greys so the only saturated colour is the active tab / selection.
-fn apply_style(style: &mut imgui::Style) {
-    use imgui::StyleColor;
-
-    style.frame_rounding = 4.0;
-    style.grab_rounding = 4.0;
-    style.scrollbar_rounding = 4.0;
-    style.frame_border_size = 0.0;
-    style.window_border_size = 0.0;
-    style.frame_padding = [8.0, 4.0];
-    style.item_spacing = [8.0, 6.0];
-    style.scrollbar_size = 12.0;
-
-    style[StyleColor::WindowBg] = [0.11, 0.12, 0.13, 1.0];
-    style[StyleColor::Button] = [0.22, 0.24, 0.28, 1.0];
-    style[StyleColor::ButtonHovered] = [0.28, 0.30, 0.35, 1.0];
-    style[StyleColor::ButtonActive] = [0.32, 0.34, 0.40, 1.0];
-    style[StyleColor::FrameBg] = [0.14, 0.15, 0.17, 1.0];
-    style[StyleColor::FrameBgHovered] = [0.18, 0.19, 0.22, 1.0];
-    style[StyleColor::FrameBgActive] = [0.20, 0.21, 0.25, 1.0];
-    style[StyleColor::Header] = [0.24, 0.36, 0.52, 0.9];
-    style[StyleColor::HeaderHovered] = [0.28, 0.41, 0.59, 0.9];
-    style[StyleColor::HeaderActive] = [0.28, 0.41, 0.59, 1.0];
-    style[StyleColor::SliderGrab] = [0.36, 0.52, 0.72, 1.0];
-    style[StyleColor::SliderGrabActive] = [0.44, 0.62, 0.84, 1.0];
 }
 
 struct GpuState {
@@ -120,6 +186,8 @@ struct AppWindow {
     // is opened from this each render pass and threaded into the panel; the
     // &mut borrow it takes makes two concurrent frames a compile error.
     painter: imgui_painter::Painter,
+    #[cfg(debug_assertions)]
+    ui_perf: UiPerfProbe,
 }
 
 impl AppWindow {
@@ -137,6 +205,8 @@ impl AppWindow {
             browser,
             panel,
             painter: imgui_painter::Painter::new(),
+            #[cfg(debug_assertions)]
+            ui_perf: UiPerfProbe::new(),
         }
     }
 
@@ -149,7 +219,7 @@ impl AppWindow {
         let size = LogicalSize::new(800.0, 600.0);
         let attributes = Window::default_attributes()
             .with_inner_size(size)
-            .with_title("punks2");
+            .with_title("punks");
         let window = Arc::new(event_loop.create_window(attributes).unwrap());
 
         let phys_size = window.inner_size();
@@ -189,7 +259,11 @@ impl AppWindow {
     fn init_imgui(gpu: &GpuState) -> ImguiState {
         let mut context = imgui::Context::create();
         context.set_ini_filename(None);
-        apply_style(context.style_mut());
+        context
+            .io_mut()
+            .config_flags
+            .insert(imgui::ConfigFlags::NAV_ENABLE_KEYBOARD);
+        punks_app::apply_theme(context.style_mut());
 
         // winit deliberately has no clipboard API; without a backend here,
         // imgui's internal Ctrl+C/Ctrl+V in text fields (e.g. the selectable
@@ -207,14 +281,18 @@ impl AppWindow {
         );
 
         let hidpi = gpu.window.scale_factor();
-        let font_size = (14.0 * hidpi) as f32;
+        let font_size = (13.0 * hidpi) as f32;
         context.io_mut().font_global_scale = (1.0 / hidpi) as f32;
 
-        context.fonts().add_font(&[FontSource::DefaultFontData {
+        context.fonts().add_font(&[FontSource::TtfData {
+            data: INTER_REGULAR,
+            size_pixels: font_size,
             config: Some(imgui::FontConfig {
-                oversample_h: 1,
-                pixel_snap_h: true,
+                glyph_ranges: FontGlyphRanges::from_slice(UI_GLYPH_RANGES),
+                oversample_h: 2,
+                pixel_snap_h: false,
                 size_pixels: font_size,
+                name: Some("Inter Regular 4.1".into()),
                 ..Default::default()
             }),
         }]);
@@ -308,15 +386,22 @@ impl ApplicationHandler for App {
                     .no_decoration()
                     .movable(false)
                     .build(|| {
+                        #[cfg(debug_assertions)]
+                        let perf_start = app
+                            .ui_perf
+                            .enabled
+                            .then(|| (Instant::now(), ALLOCATION_COUNT.load(Ordering::Relaxed)));
+
                         #[cfg(any(target_os = "macos", target_os = "windows"))]
                         {
-                            let mut on_drag_file =
-                                |path: &std::path::Path| start_file_drag(&app.gpu.window, path);
+                            let mut on_drag_files = |paths: &[std::path::PathBuf]| {
+                                start_file_drag(&app.gpu.window, paths)
+                            };
                             app.panel.draw(
                                 ui,
                                 &mut app.browser,
                                 &mut frame_painter,
-                                Some(&mut on_drag_file),
+                                Some(&mut on_drag_files),
                             );
                         }
 
@@ -324,6 +409,15 @@ impl ApplicationHandler for App {
                         {
                             app.panel
                                 .draw(ui, &mut app.browser, &mut frame_painter, None);
+                        }
+
+                        #[cfg(debug_assertions)]
+                        if let Some((started, allocations_before)) = perf_start {
+                            app.ui_perf.record(
+                                started,
+                                allocations_before,
+                                app.panel.row_decorations_last_frame(),
+                            );
                         }
                     });
 
