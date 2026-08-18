@@ -6,16 +6,5 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 punks-app = { path = "../crates/punks-app" }
-imgui = "0.12"
-imgui-wgpu = "0.25"
-imgui-winit-support = "0.13"
-wgpu = "25.0"
-winit = "0.30"
-pollster = "0.4"
 env_logger = "0.11"
 log = "0.4"
-drag = "2"
-arboard = { version = "3.6.1", default-features = false }
-# The app owns the long-lived Painter and opens a frame per render pass (see
-# main.rs). Shares one imgui-sys build with `imgui`.
-imgui-painter = { git = "https://github.com/samanshaiza004/imgui-painter", rev = "1b3b001ae90daf6b4235615876e4ff85f6e309ed" }

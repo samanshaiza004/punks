@@ -6,7 +6,3 @@ members = [
     "crates/punks-app",
     "punks-standalone",
 ]
-
-[patch.crates-io]
-imgui = { git = "https://github.com/samanshaiza004/imgui-rs", rev = "7a89260c79ad1f9d4bfe81d6ca1b76ad38a6b3e3" }
-imgui-sys = { git = "https://github.com/samanshaiza004/imgui-rs", rev = "7a89260c79ad1f9d4bfe81d6ca1b76ad38a6b3e3" }

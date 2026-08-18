@@ -10,7 +10,39 @@ punks-library = { path = "../punks-library" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
-imgui = "0.12"
-imgui-painter = { git = "https://github.com/samanshaiza004/imgui-painter", rev = "1b3b001ae90daf6b4235615876e4ff85f6e309ed" }
 rfd = "0.15"
 log = "0.4"
+
+# GPUI is frozen at the exact commit the viability spike proved (see
+# docs/gpui-viability.md). Do not bump this opportunistically -- a GPUI
+# upgrade is its own future milestone, tracked separately from this rewrite.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "8b1497dbd22fb06f5838a7c0b84a1e54fafa71bc", package = "gpui" }
+# gpui_platform's own default features are `[]` -- font-kit/wayland/x11 are
+# NOT on by default. Omitting these silently renders a text-less UI (empty
+# layout boxes, no glyphs) with no warning or error at build or run time.
+# Found empirically during the viability spike.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "8b1497dbd22fb06f5838a7c0b84a1e54fafa71bc", package = "gpui_platform", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
+# gpui-component's own manifest depends on gpui/gpui_platform via an
+# unqualified (branch-tracking) git reference, which resolves independently
+# of the pinned rev above and produces two different `gpui` sources Cargo
+# can't unify -- `[patch]` can't fix this either, since Cargo refuses to
+# patch a git source with the same URL at a different rev ("patches must
+# point to different sources"). Fixed by depending on a small fork
+# (samanshaiza004/gpui-component, matching the existing imgui/imgui-painter
+# fork pattern in this repo) with gpui/gpui_platform/gpui_web/gpui_macros/
+# reqwest_client pinned to the exact same commit as above. See
+# docs/gpui-component-audit.md for the full story and the fork's diff.
+gpui-component = { git = "https://github.com/samanshaiza004/gpui-component", rev = "4cf3cddc0609a220aed0323678fe5241fdbfd7d6", package = "gpui-component" }
+
+# GPUI's own promoted-drag path covers external file drag-out on macOS
+# (proven end-to-end by the viability spike) and, per gpui_linux's source,
+# on Wayland. Windows has no such promotion upstream, so it keeps using this
+# crate as a stopgap (see platform/drag.rs) until a native OLE bridge lands.
+# Never needed on Linux: this crate's own GTK backend doesn't work with
+# winit-family windows either, and nothing here used it there before.
+[target.'cfg(windows)'.dependencies]
+drag = "2"
