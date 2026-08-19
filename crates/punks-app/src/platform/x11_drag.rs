@@ -8,7 +8,7 @@
 
 #![cfg(target_os = "linux")]
 
-use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, CString};
+use std::ffi::{c_int, c_long, c_uchar, c_ulong, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr;

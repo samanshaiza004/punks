@@ -31,17 +31,18 @@ cargo build --release -p punks-standalone
 
 - Rust 1.84+ (stable)
 - macOS, Linux, or Windows
-- On Linux: ALSA and GTK3 development libraries (`libasound2-dev libgtk-3-dev` on Debian/Ubuntu —
-  `cpal` needs ALSA, `drag`'s Linux backend needs GTK3)
+- On Linux: ALSA, GTK3, and XKB development libraries
+  (`libasound2-dev libgtk-3-dev libxkbcommon-x11-dev` on Debian/Ubuntu)
 
 ### Cross-platform builds
 
 - **macOS**: native — `cargo build --release -p punks-standalone`.
 - **Linux, from macOS**: use [`cross`](https://github.com/cross-rs/cross) (Docker-based), since
-  `cpal` and `drag` need ALSA/GTK3 headers macOS doesn't have:
+  `cpal`, GPUI, and the X11 drag bridge need Linux headers macOS doesn't have:
   `cross build --release --target x86_64-unknown-linux-gnu -p punks-standalone`. The stock `cross`
-  image doesn't ship GTK3 dev headers, so this needs a custom image (or run
-  `apt-get install libgtk-3-dev` in a `Cross.toml` pre-build step) — CI is the simpler path.
+  image doesn't ship the required GTK3/XKB dev headers, so this needs a custom image (or run
+  `apt-get install libgtk-3-dev libxkbcommon-x11-dev` in a `Cross.toml` pre-build step) — CI is
+  the simpler path.
 - **Windows, from macOS**: not worth fighting locally — the `wgpu` + MSVC toolchain doesn't
   cross-compile cleanly. Windows builds run natively on GitHub Actions instead, alongside macOS and
   Linux, in [`.github/workflows/release.yml`](.github/workflows/release.yml) on every `v*` tag push.

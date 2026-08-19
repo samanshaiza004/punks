@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Com::{
     DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
 };
 use windows_sys::Win32::System::Memory::{
-    GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
+    GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
 };
 use windows_sys::Win32::System::Ole::{
     DoDragDrop, OleInitialize, OleUninitialize, CF_HDROP, DROPEFFECT_COPY,
@@ -32,6 +32,14 @@ use windows_sys::Win32::System::Ole::{
 use windows_sys::Win32::System::SystemServices::MK_LBUTTON;
 
 use super::drag::DragPaths;
+
+#[link(name = "kernel32")]
+extern "system" {
+    /// `windows-sys` 0.61 exposes the GlobalAlloc family except GlobalFree.
+    /// CF_HDROP requires the matching kernel32 deallocator for its HGLOBAL.
+    #[link_name = "GlobalFree"]
+    fn global_free(handle: *mut c_void) -> *mut c_void;
+}
 
 const IID_IUNKNOWN: GUID = GUID {
     data1: 0x00000000,
@@ -173,7 +181,7 @@ unsafe extern "system" fn data_query_interface(
     if iid.is_null() || out.is_null() {
         return E_INVALIDARG;
     }
-    if *iid != IID_IUNKNOWN && *iid != IID_IDATA_OBJECT {
+    if !guid_eq(*iid, IID_IUNKNOWN) && !guid_eq(*iid, IID_IDATA_OBJECT) {
         *out = ptr::null_mut();
         return E_NOINTERFACE;
     }
@@ -222,7 +230,7 @@ unsafe extern "system" fn data_get_data(
     }
     let memory = GlobalLock(handle);
     if memory.is_null() {
-        GlobalFree(handle);
+        global_free(handle);
         return E_OUTOFMEMORY;
     }
 
@@ -262,7 +270,11 @@ unsafe extern "system" fn data_query_get_data(
 }
 
 fn data_supports_format(format: &FORMATETC) -> HRESULT {
-    if format.cfFormat == CF_HDROP && (format.tymed & TYMED_HGLOBAL as u32) != 0 {
+    if format.cfFormat == CF_HDROP
+        && format.dwAspect == DVASPECT_CONTENT
+        && format.lindex == -1
+        && (format.tymed & TYMED_HGLOBAL as u32) != 0
+    {
         S_OK
     } else {
         DV_E_FORMATETC
@@ -334,7 +346,7 @@ unsafe extern "system" fn source_query_interface(
     if iid.is_null() || out.is_null() {
         return E_INVALIDARG;
     }
-    if *iid != IID_IUNKNOWN && *iid != IID_IDROP_SOURCE {
+    if !guid_eq(*iid, IID_IUNKNOWN) && !guid_eq(*iid, IID_IDROP_SOURCE) {
         *out = ptr::null_mut();
         return E_NOINTERFACE;
     }
@@ -402,3 +414,21 @@ static DROP_SOURCE_VTABLE: IDropSourceVtbl = IDropSourceVtbl {
     query_continue_drag: source_query_continue,
     give_feedback: source_give_feedback,
 };
+
+fn guid_eq(left: GUID, right: GUID) -> bool {
+    left.data1 == right.data1
+        && left.data2 == right.data2
+        && left.data3 == right.data3
+        && left.data4 == right.data4
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guid_comparison_accepts_only_identical_interface_ids() {
+        assert!(guid_eq(IID_IUNKNOWN, IID_IUNKNOWN));
+        assert!(!guid_eq(IID_IUNKNOWN, IID_IDATA_OBJECT));
+    }
+}
