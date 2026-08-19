@@ -1,15 +1,15 @@
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use lru::LruCache;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::StreamConfig;
+use cpal::{SampleFormat, StreamConfig};
 
 mod analysis;
 mod decode;
@@ -70,11 +70,19 @@ impl fmt::Display for PlaybackError {
 impl std::error::Error for PlaybackError {}
 
 struct SharedState {
-    samples: RwLock<Vec<f32>>,
-    cursor: AtomicUsize,
-    playing: AtomicBool,
-    total_frames: AtomicUsize,
+    /// Raw pointer to the control-owned published buffer. The callback only
+    /// borrows this pointer between `callback_users` increment/decrement;
+    /// `PlaybackEngine` retains the owning `Box` until that count is zero.
+    published: AtomicPtr<PublishedAudio>,
     volume: AtomicU32,
+    callback_users: AtomicUsize,
+    acknowledged_generation: AtomicU64,
+    stream_failed: AtomicBool,
+}
+
+struct DecodeTarget {
+    sample_rate: AtomicU32,
+    channels: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -86,6 +94,56 @@ struct PreparedAudio {
     info: TrackInfo,
     /// Where in the source this buffer starts (0 for a from-the-start preview).
     window_start: Duration,
+}
+
+/// The published sample object visible to the CPAL callback. Its sample data
+/// and metadata are immutable; only its per-buffer atomics change during
+/// playback. Its `Arc` is cloned and dropped only by the control side.
+struct PublishedAudio {
+    generation: u64,
+    audio: Arc<PreparedAudio>,
+    cursor: AtomicUsize,
+    playing: AtomicBool,
+}
+
+impl SharedState {
+    fn new() -> Self {
+        Self {
+            published: AtomicPtr::new(std::ptr::null_mut()),
+            volume: AtomicU32::new(1.0f32.to_bits()),
+            callback_users: AtomicUsize::new(0),
+            acknowledged_generation: AtomicU64::new(0),
+            stream_failed: AtomicBool::new(false),
+        }
+    }
+}
+
+fn build_stream(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    shared: &Arc<SharedState>,
+) -> Result<cpal::Stream, PlaybackError> {
+    let callback_shared = Arc::clone(shared);
+    let error_shared = Arc::clone(shared);
+    let stream = device
+        .build_output_stream(
+            config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                audio_callback(data, &callback_shared);
+            },
+            move |_err| {
+                // CPAL invokes this outside the data callback. Keep it to an
+                // atomic fault signal; control-side `poll()` owns recovery and
+                // user-visible error creation.
+                error_shared.stream_failed.store(true, Ordering::Release);
+            },
+            None,
+        )
+        .map_err(|e| PlaybackError::DeviceError(e.to_string()))?;
+    stream
+        .play()
+        .map_err(|e| PlaybackError::DeviceError(e.to_string()))?;
+    Ok(stream)
 }
 
 /// A "latest wins" single-slot mailbox: `send` replaces whatever is waiting
@@ -139,7 +197,11 @@ enum DecodeRequest {
     /// From-the-start preview (or the whole file, if short).
     Full(PathBuf),
     /// A bounded window starting `start` into the source (scrub target).
-    Window { path: PathBuf, start: Duration },
+    Window {
+        path: PathBuf,
+        start: Duration,
+    },
+    Shutdown,
 }
 
 impl DecodeRequest {
@@ -147,12 +209,14 @@ impl DecodeRequest {
         match self {
             DecodeRequest::Full(p) => p,
             DecodeRequest::Window { path, .. } => path,
+            DecodeRequest::Shutdown => unreachable!("shutdown has no path"),
         }
     }
     fn window(&self) -> Option<Duration> {
         match self {
             DecodeRequest::Full(_) => None,
             DecodeRequest::Window { start, .. } => Some(*start),
+            DecodeRequest::Shutdown => None,
         }
     }
 }
@@ -166,7 +230,7 @@ struct PendingReq {
 
 pub struct PlaybackEngine {
     shared: Arc<SharedState>,
-    _stream: cpal::Stream,
+    stream: Option<cpal::Stream>,
     device_sample_rate: u32,
     device_channels: u16,
     current_file: Option<PathBuf>,
@@ -180,12 +244,20 @@ pub struct PlaybackEngine {
     /// Where the loaded buffer starts in the source (0 unless a window was
     /// decoded on demand).
     current_window_start: Duration,
+    active_buffer: Option<Box<PublishedAudio>>,
+    retired_buffer: Option<Box<PublishedAudio>>,
+    pending_buffer: Option<Arc<PreparedAudio>>,
+    next_buffer_generation: u64,
     /// The decode we're awaiting, if any.
     pending: Option<PendingReq>,
     next_request_id: u64,
     cache: LruCache<PathBuf, Arc<PreparedAudio>>,
     decode_request: Arc<RequestSlot<(u64, DecodeRequest)>>,
-    decode_result_rx: mpsc::Receiver<(u64, Result<PreparedAudio, PlaybackError>)>,
+    decode_target: Arc<DecodeTarget>,
+    decode_result_rx: Option<mpsc::Receiver<(u64, Result<PreparedAudio, PlaybackError>)>>,
+    decode_thread: Option<std::thread::JoinHandle<()>>,
+    recovery_attempted: bool,
+    pending_stream_error: Option<PlaybackError>,
 }
 
 impl PlaybackEngine {
@@ -199,67 +271,53 @@ impl PlaybackEngine {
             .default_output_config()
             .map_err(|e| PlaybackError::DeviceError(e.to_string()))?;
 
+        if supported_config.sample_format() != SampleFormat::F32 {
+            return Err(PlaybackError::UnsupportedFormat);
+        }
+
         let sample_rate = supported_config.sample_rate();
         let channels = supported_config.channels();
 
         let config: StreamConfig = supported_config.into();
 
-        let shared = Arc::new(SharedState {
-            samples: RwLock::new(Vec::new()),
-            cursor: AtomicUsize::new(0),
-            playing: AtomicBool::new(false),
-            total_frames: AtomicUsize::new(0),
-            volume: AtomicU32::new(1.0f32.to_bits()),
-        });
-
-        let cb_shared = Arc::clone(&shared);
-
-        let stream = device
-            .build_output_stream(
-                &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    audio_callback(data, &cb_shared);
-                },
-                |err| log::error!("audio stream error: {err}"),
-                None,
-            )
-            .map_err(|e| PlaybackError::DeviceError(e.to_string()))?;
-
-        stream
-            .play()
-            .map_err(|e| PlaybackError::DeviceError(e.to_string()))?;
+        let shared = Arc::new(SharedState::new());
+        let stream = build_stream(&device, &config, &shared)?;
 
         // One persistent decode worker for the engine's lifetime, instead of a
         // thread per play() call. Rapid navigation (holding W/S) now coalesces
         // into a single in-flight decode via RequestSlot rather than spawning
         // and fully decoding a thread per keypress.
         let decode_request = Arc::new(RequestSlot::<(u64, DecodeRequest)>::new());
-        let (result_tx, result_rx) = mpsc::channel();
+        let decode_target = Arc::new(DecodeTarget {
+            sample_rate: AtomicU32::new(sample_rate),
+            channels: AtomicUsize::new(channels as usize),
+        });
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let decode_thread;
         {
             let decode_request = Arc::clone(&decode_request);
-            let target_channels = channels as usize;
-            let target_rate = sample_rate;
-            std::thread::spawn(move || loop {
+            let decode_target = Arc::clone(&decode_target);
+            decode_thread = std::thread::spawn(move || loop {
                 let (id, req) = decode_request.recv();
+                if matches!(&req, DecodeRequest::Shutdown) {
+                    break;
+                }
+                let target_channels = decode_target.channels.load(Ordering::Acquire);
+                let target_rate = decode_target.sample_rate.load(Ordering::Acquire);
                 let result =
                     decode_and_prepare(req.path(), target_channels, target_rate, req.window());
-                // ponytail: no explicit shutdown signal. If the engine is
-                // dropped while this thread is between decodes (blocked in
-                // recv()), the thread parks forever rather than exiting.
-                // Acceptable because PlaybackEngine is owned by SampleBrowser
-                // for the app's entire process lifetime today — process exit
-                // reclaims it regardless. Upgrade path if that ever changes:
-                // give RequestSlot a Shutdown variant the worker checks after
-                // waking.
+                // This bounded send may wait for control-side `poll()`, never
+                // the CPAL callback. `Drop` disconnects the receiver before
+                // joining, which wakes this send during shutdown.
                 if result_tx.send((id, result)).is_err() {
-                    break; // receiver dropped; nothing left to report to.
+                    break;
                 }
             });
         }
 
         Ok(PlaybackEngine {
             shared,
-            _stream: stream,
+            stream: Some(stream),
             device_sample_rate: sample_rate,
             device_channels: channels,
             current_file: None,
@@ -267,11 +325,19 @@ impl PlaybackEngine {
             current_full_peaks: None,
             current_info: None,
             current_window_start: Duration::ZERO,
+            active_buffer: None,
+            retired_buffer: None,
+            pending_buffer: None,
+            next_buffer_generation: 0,
             pending: None,
             next_request_id: 0,
             cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
             decode_request,
-            decode_result_rx: result_rx,
+            decode_target,
+            decode_result_rx: Some(result_rx),
+            decode_thread: Some(decode_thread),
+            recovery_attempted: false,
+            pending_stream_error: None,
         })
     }
 
@@ -281,32 +347,162 @@ impl PlaybackEngine {
         id
     }
 
-    fn commit(&mut self, audio: &Arc<PreparedAudio>) {
-        {
-            // Recover from a poisoned lock rather than propagating a panic to
-            // the UI thread. The samples are the source of truth; if the lock
-            // was poisoned mid-write the data is suspect, but silence from the
-            // audio callback is safer than a crash.
-            let mut buf = self
-                .shared
-                .samples
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            buf.clone_from(&audio.samples);
+    fn publish_now(&mut self, audio: Arc<PreparedAudio>) {
+        self.next_buffer_generation = self.next_buffer_generation.wrapping_add(1);
+        let published = Box::new(PublishedAudio {
+            generation: self.next_buffer_generation,
+            audio: Arc::clone(&audio),
+            cursor: AtomicUsize::new(0),
+            playing: AtomicBool::new(true),
+        });
+        let old = self.active_buffer.replace(published);
+        let new_ptr = self
+            .active_buffer
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |buffer| {
+                (&**buffer) as *const PublishedAudio as *mut PublishedAudio
+            });
+
+        // The new Box is already owned by `active_buffer` before publication.
+        // The old Box stays alive in this stack variable until it is either
+        // retired or dropped after the callback-user count proves safety.
+        self.shared.published.store(new_ptr, Ordering::Release);
+
+        if let Some(old) = old {
+            if self.shared.callback_users.load(Ordering::SeqCst) == 0 {
+                drop(old);
+            } else {
+                debug_assert!(self.retired_buffer.is_none());
+                self.retired_buffer = Some(old);
+            }
         }
-        self.shared.cursor.store(0, Ordering::SeqCst);
-        self.shared
-            .total_frames
-            .store(audio.total_frames, Ordering::SeqCst);
+
         self.current_file = Some(audio.file.clone());
         self.current_peaks = Some(audio.peaks.clone());
         self.current_info = Some(audio.info.clone());
         self.current_window_start = audio.window_start;
-        // Release pairs with the Acquire load in audio_callback, so the
-        // callback is guaranteed to observe cursor=0 and the new samples
-        // whenever it sees playing==true.
-        self.shared.playing.store(true, Ordering::Release);
-        self.pending = None;
+    }
+
+    /// Drop a superseded published buffer only after every callback that could
+    /// have loaded its pointer has finished. A callback increments the count
+    /// before loading the pointer; a callback starting after the publication
+    /// sees the new pointer, so a zero count is the retirement acknowledgement.
+    fn advance_handoff(&mut self) {
+        if self.retired_buffer.is_some() {
+            if self.shared.callback_users.load(Ordering::SeqCst) != 0 {
+                return;
+            }
+            self.retired_buffer.take();
+        }
+
+        if let Some(audio) = self.pending_buffer.take() {
+            self.publish_now(audio);
+        }
+    }
+
+    fn commit(&mut self, audio: &Arc<PreparedAudio>) {
+        self.pending_buffer = Some(Arc::clone(audio));
+        self.advance_handoff();
+    }
+
+    fn stop_stream_and_clear_handoff(&mut self) {
+        self.set_active_playing(false);
+        drop(self.stream.take());
+        while self.shared.callback_users.load(Ordering::SeqCst) != 0 {
+            std::thread::yield_now();
+        }
+
+        // No future callback can run after the stream is dropped and all
+        // in-flight callbacks have acknowledged. The control side may now
+        // clear the published pointer and destroy every owned buffer.
+        self.shared
+            .published
+            .store(std::ptr::null_mut(), Ordering::SeqCst);
+        self.active_buffer = None;
+        self.retired_buffer = None;
+        self.pending_buffer = None;
+    }
+
+    fn request_full_decode(&mut self, path: PathBuf) {
+        let id = self.alloc_id();
+        self.pending = Some(PendingReq {
+            id,
+            file: path.clone(),
+        });
+        self.decode_request.send((id, DecodeRequest::Full(path)));
+    }
+
+    fn set_active_playing(&self, playing: bool) {
+        if let Some(active) = self.active_buffer.as_ref() {
+            active.playing.store(playing, Ordering::SeqCst);
+        }
+    }
+
+    fn restart_stream(&mut self) -> Result<(), PlaybackError> {
+        let current_file = self.current_file.clone();
+        self.stop_stream_and_clear_handoff();
+
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| PlaybackError::DeviceError("no output device found".into()))?;
+        let supported_config = device
+            .default_output_config()
+            .map_err(|e| PlaybackError::DeviceError(e.to_string()))?;
+        if supported_config.sample_format() != SampleFormat::F32 {
+            return Err(PlaybackError::UnsupportedFormat);
+        }
+
+        self.device_sample_rate = supported_config.sample_rate();
+        self.device_channels = supported_config.channels();
+        self.decode_target
+            .sample_rate
+            .store(self.device_sample_rate, Ordering::Release);
+        self.decode_target
+            .channels
+            .store(self.device_channels as usize, Ordering::Release);
+        self.stream = Some(build_stream(
+            &device,
+            &supported_config.into(),
+            &self.shared,
+        )?);
+
+        // Prepared samples are normalized to the device format by the decode
+        // worker. Re-decode after any stream restart instead of reusing a
+        // buffer prepared for a device that may have a different rate/channel
+        // layout. Clearing the cache also prevents a stale-format cache hit.
+        self.cache.clear();
+        self.current_peaks = None;
+        self.current_info = None;
+        if let Some(path) = current_file {
+            self.request_full_decode(path);
+        }
+        Ok(())
+    }
+
+    fn poll_stream_failure(&mut self) -> Option<PlaybackError> {
+        if !self.shared.stream_failed.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+
+        self.set_active_playing(false);
+        if self.recovery_attempted {
+            return Some(PlaybackError::DeviceError(
+                "audio stream failed again; press Play to retry".into(),
+            ));
+        }
+
+        self.recovery_attempted = true;
+        match self.restart_stream() {
+            Ok(()) => {
+                self.recovery_attempted = false;
+                None
+            }
+            Err(error) => {
+                self.pending = None;
+                Some(error)
+            }
+        }
     }
 
     /// Begin loading and playing a file. If the file was recently decoded it
@@ -315,7 +511,18 @@ impl PlaybackEngine {
     /// this returns immediately. Call [`poll`] each frame to check for
     /// completion and commit the audio buffer.
     pub fn play(&mut self, path: &Path) {
-        self.shared.playing.store(false, Ordering::SeqCst);
+        self.set_active_playing(false);
+        self.pending_buffer = None;
+        self.recovery_attempted = false;
+        self.pending_stream_error = None;
+
+        if self.stream.is_none() {
+            if let Err(error) = self.restart_stream() {
+                self.pending = None;
+                self.pending_stream_error = Some(error);
+                return;
+            }
+        }
 
         let path_buf = path.to_path_buf();
         // New clip: drop the previous file's full-source waveform.
@@ -334,20 +541,25 @@ impl PlaybackEngine {
         // If a decode is already in flight, this replaces the queued request —
         // RequestSlot coalesces to the latest — so rapid navigation collapses
         // into a single decode instead of spawning a thread per keypress.
-        let id = self.alloc_id();
-        self.pending = Some(PendingReq {
-            id,
-            file: path_buf.clone(),
-        });
-        self.decode_request
-            .send((id, DecodeRequest::Full(path_buf)));
+        self.request_full_decode(path_buf);
     }
 
     pub fn poll(&mut self) -> Option<PlaybackError> {
-        self.pending.as_ref()?;
+        if let Some(error) = self.poll_stream_failure() {
+            return Some(error);
+        }
 
+        self.advance_handoff();
+        if self.pending.is_none() {
+            return self.pending_stream_error.take();
+        }
+
+        let result_rx = self
+            .decode_result_rx
+            .as_ref()
+            .expect("decode result receiver lives until PlaybackEngine::drop");
         loop {
-            match self.decode_result_rx.try_recv() {
+            match result_rx.try_recv() {
                 Ok((id, result)) => {
                     // A result for a request superseded by a later play()/seek
                     // (or abandoned for a cache hit) — discard and keep draining.
@@ -356,6 +568,7 @@ impl PlaybackEngine {
                     }
                     return match result {
                         Ok(audio) => {
+                            self.pending = None;
                             let arc = Arc::new(audio);
                             // Previews/windows of long files are large and
                             // re-auditioned rarely; keep them out of the cache
@@ -384,8 +597,9 @@ impl PlaybackEngine {
     }
 
     pub fn stop(&mut self) {
-        self.shared.playing.store(false, Ordering::SeqCst);
+        self.set_active_playing(false);
         self.pending = None;
+        self.pending_buffer = None;
         // Keep current_file / current_info (and the decoded buffer) so the clip
         // stays loaded and scrubbable after Stop — seek_fraction can resume it,
         // and status() correctly reports Playing once it does. A new play()
@@ -399,14 +613,22 @@ impl PlaybackEngine {
             };
         }
 
-        if !self.shared.playing.load(Ordering::Relaxed) {
+        if !self
+            .active_buffer
+            .as_ref()
+            .is_some_and(|buffer| buffer.playing.load(Ordering::Relaxed))
+        {
             return PlaybackStatus::Idle;
         }
 
         match &self.current_file {
             Some(file) => {
-                let cursor = self.shared.cursor.load(Ordering::Relaxed);
-                let total = self.shared.total_frames.load(Ordering::Relaxed);
+                let cursor = self
+                    .active_buffer
+                    .as_ref()
+                    .map(|buffer| buffer.cursor.load(Ordering::Relaxed))
+                    .unwrap_or(0);
+                let total = self.loaded_total_frames();
                 let channels = self.device_channels as usize;
                 let frame = cursor.checked_div(channels).unwrap_or(0);
                 let rate = self.device_sample_rate as f64;
@@ -462,7 +684,7 @@ impl PlaybackEngine {
         if self.showing_full() {
             Some((0.0, info.source_duration.as_secs_f64().max(1e-9)))
         } else {
-            let total = self.shared.total_frames.load(Ordering::Relaxed);
+            let total = self.loaded_total_frames();
             if total == 0 {
                 return None;
             }
@@ -473,6 +695,13 @@ impl PlaybackEngine {
 
     pub fn current_info(&self) -> Option<&TrackInfo> {
         self.current_info.as_ref()
+    }
+
+    fn loaded_total_frames(&self) -> usize {
+        self.active_buffer
+            .as_ref()
+            .map(|buffer| buffer.audio.total_frames)
+            .unwrap_or(0)
     }
 
     /// Attach a full-source waveform for `path`, if it's still the current file
@@ -490,11 +719,11 @@ impl PlaybackEngine {
     /// that window commits via [`poll`].
     ///
     /// `&mut self` because the out-of-window case enqueues a decode. The
-    /// in-window fast path is atomics only; its `cursor` store is published by
-    /// the `Release` store of `playing`, which the callback loads with
-    /// `Acquire`, so a seek never reads a stale position.
+    /// in-window fast path is atomics only; its cursor store is published by
+    /// the `Release` store of that buffer's playing flag, which the callback
+    /// loads with `Acquire`, so a seek never reads a stale position.
     pub fn seek_to(&mut self, target: Duration) {
-        let total = self.shared.total_frames.load(Ordering::Relaxed);
+        let total = self.loaded_total_frames();
         if total == 0 {
             return;
         }
@@ -507,15 +736,18 @@ impl PlaybackEngine {
             let within = t - ws;
             let frame = ((within * rate) as usize).min(total - 1);
             let channels = self.device_channels.max(1) as usize;
-            self.shared.cursor.store(frame * channels, Ordering::SeqCst);
-            self.shared.playing.store(true, Ordering::Release);
+            if let Some(active) = self.active_buffer.as_ref() {
+                active.cursor.store(frame * channels, Ordering::SeqCst);
+                active.playing.store(true, Ordering::Release);
+            }
             return;
         }
 
         let Some(file) = self.current_file.clone() else {
             return;
         };
-        self.shared.playing.store(false, Ordering::SeqCst);
+        self.set_active_playing(false);
+        self.pending_buffer = None;
         let id = self.alloc_id();
         self.pending = Some(PendingReq {
             id,
@@ -538,6 +770,21 @@ impl PlaybackEngine {
 
     pub fn volume(&self) -> f32 {
         f32::from_bits(self.shared.volume.load(Ordering::Relaxed))
+    }
+}
+
+impl Drop for PlaybackEngine {
+    fn drop(&mut self) {
+        self.stop_stream_and_clear_handoff();
+        // Disconnect a possibly-full result mailbox before joining the worker;
+        // a worker blocked in its bounded send then exits instead of deadlocking
+        // shutdown.
+        self.decode_result_rx.take();
+        self.decode_request
+            .send((u64::MAX, DecodeRequest::Shutdown));
+        if let Some(thread) = self.decode_thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -590,35 +837,50 @@ fn decode_and_prepare(
 }
 
 fn audio_callback(data: &mut [f32], shared: &SharedState) {
-    // Acquire pairs with the Release store in commit(), ensuring this thread
-    // sees cursor=0 and the new sample buffer whenever playing is true.
-    if !shared.playing.load(Ordering::Acquire) {
+    // This counter is the callback's lifetime acknowledgement. It is updated
+    // before the pointer load and after the last sample read, so control-side
+    // retirement can never destroy a buffer that this invocation can touch.
+    shared.callback_users.fetch_add(1, Ordering::SeqCst);
+
+    let ptr = shared.published.load(Ordering::Acquire);
+    if ptr.is_null() {
         data.fill(0.0);
+        shared.callback_users.fetch_sub(1, Ordering::SeqCst);
         return;
     }
 
-    if let Ok(samples) = shared.samples.try_read() {
-        let cursor = shared.cursor.load(Ordering::Relaxed);
-        let remaining = samples.len().saturating_sub(cursor);
-        let to_copy = remaining.min(data.len());
-        let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
-
-        for (dst, &src) in data[..to_copy]
-            .iter_mut()
-            .zip(&samples[cursor..cursor + to_copy])
-        {
-            *dst = src * volume;
-        }
-
-        if to_copy < data.len() {
-            data[to_copy..].fill(0.0);
-            shared.playing.store(false, Ordering::Relaxed);
-        }
-
-        shared.cursor.store(cursor + to_copy, Ordering::Relaxed);
-    } else {
+    // SAFETY: `PlaybackEngine` publishes only heap-stable `PublishedAudio`
+    // pointers and retains their owning Box until `callback_users` reaches
+    // zero after this invocation. The callback never clones/drops the Arc.
+    let published = unsafe { &*ptr };
+    if !published.playing.load(Ordering::Acquire) {
         data.fill(0.0);
+        shared.callback_users.fetch_sub(1, Ordering::SeqCst);
+        return;
     }
+    let samples = &published.audio.samples;
+    let cursor = published.cursor.load(Ordering::Relaxed);
+    let remaining = samples.len().saturating_sub(cursor);
+    let to_copy = remaining.min(data.len());
+    let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
+
+    for (dst, &src) in data[..to_copy]
+        .iter_mut()
+        .zip(&samples[cursor..cursor + to_copy])
+    {
+        *dst = src * volume;
+    }
+
+    if to_copy < data.len() {
+        data[to_copy..].fill(0.0);
+        published.playing.store(false, Ordering::Relaxed);
+    }
+
+    published.cursor.store(cursor + to_copy, Ordering::Relaxed);
+    shared
+        .acknowledged_generation
+        .store(published.generation, Ordering::Release);
+    shared.callback_users.fetch_sub(1, Ordering::SeqCst);
 }
 
 fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
@@ -652,18 +914,48 @@ fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::RequestSlot;
+    use super::*;
     use std::sync::Arc;
     use std::time::Duration;
+
+    fn published(samples: &[f32], generation: u64) -> Box<PublishedAudio> {
+        Box::new(PublishedAudio {
+            generation,
+            audio: Arc::new(PreparedAudio {
+                samples: samples.to_vec(),
+                total_frames: samples.len(),
+                file: PathBuf::from("test.wav"),
+                peaks: WaveformPeaks {
+                    peaks: Vec::new(),
+                    num_buckets: 0,
+                },
+                info: TrackInfo {
+                    metadata: AudioMetadata::default(),
+                    source_sample_rate: 48_000,
+                    source_duration: Duration::from_secs(1),
+                    truncated: false,
+                },
+                window_start: Duration::ZERO,
+            }),
+            cursor: AtomicUsize::new(0),
+            playing: AtomicBool::new(false),
+        })
+    }
+
+    fn publish_for_test(shared: &SharedState, buffer: &PublishedAudio) {
+        let ptr = buffer as *const PublishedAudio as *mut PublishedAudio;
+        shared.published.store(ptr, Ordering::Release);
+        buffer.playing.store(true, Ordering::Release);
+    }
 
     #[test]
     fn request_slot_coalesces_to_latest() {
         // Several sends before anyone reads: only the last one should surface.
         let slot = RequestSlot::new();
-        slot.send(1);
-        slot.send(2);
-        slot.send(3);
-        assert_eq!(slot.recv(), 3);
+        for value in 0..100 {
+            slot.send(value);
+        }
+        assert_eq!(slot.recv(), 99);
     }
 
     #[test]
@@ -674,5 +966,62 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         slot.send(42);
         assert_eq!(handle.join().unwrap(), 42);
+    }
+
+    #[test]
+    fn callback_reads_immutable_buffer_applies_volume_and_acknowledges() {
+        let shared = SharedState::new();
+        let buffer = published(&[0.25, -0.5, 1.0], 7);
+        publish_for_test(&shared, &buffer);
+        shared.volume.store(0.5f32.to_bits(), Ordering::Relaxed);
+
+        let mut output = [0.0; 3];
+        audio_callback(&mut output, &shared);
+
+        assert_eq!(output, [0.125, -0.25, 0.5]);
+        assert_eq!(shared.callback_users.load(Ordering::SeqCst), 0);
+        assert_eq!(shared.acknowledged_generation.load(Ordering::Acquire), 7);
+        assert!(buffer.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn callback_zero_fills_tail_and_stops_on_short_buffer() {
+        let shared = SharedState::new();
+        let buffer = published(&[1.0, 2.0], 1);
+        publish_for_test(&shared, &buffer);
+
+        let mut output = [0.0; 4];
+        audio_callback(&mut output, &shared);
+
+        assert_eq!(output, [1.0, 2.0, 0.0, 0.0]);
+        assert_eq!(buffer.cursor.load(Ordering::Relaxed), 2);
+        assert!(!buffer.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn callback_buffer_replacement_is_observed_by_next_invocation() {
+        let shared = SharedState::new();
+        let first = published(&[1.0, 1.0], 1);
+        let second = published(&[2.0, 2.0], 2);
+        publish_for_test(&shared, &first);
+
+        let mut output = [0.0; 2];
+        audio_callback(&mut output, &shared);
+        assert_eq!(output, [1.0, 1.0]);
+
+        first.cursor.store(0, Ordering::Release);
+        publish_for_test(&shared, &second);
+        audio_callback(&mut output, &shared);
+        assert_eq!(output, [2.0, 2.0]);
+        assert_eq!(shared.acknowledged_generation.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn channel_adaptation_handles_mono_stereo_and_upmix() {
+        assert_eq!(adapt_channels(&[1.0, -1.0, 0.5, 0.5], 2, 1), [0.0, 0.5]);
+        assert_eq!(
+            adapt_channels(&[1.0, 2.0, 3.0, 4.0], 2, 3),
+            [1.0, 2.0, 2.0, 3.0, 4.0, 4.0]
+        );
     }
 }

@@ -175,10 +175,10 @@ read-only, copyable input.
   Workers own their SQLite connections. Results return over channels; the UI thread folds them in
   during `poll()`, capped per frame.
 
-**Threading.** UI thread owns all state mutation. The audio callback is wait-free-ish: atomics
-plus `try_read` (silence over blocking). Cross-thread publication uses an
-`Acquire/Release` pair on `playing` — if you touch cursor/samples/playing, read the comments at
-`commit()` / `audio_callback` first and keep the pairing.
+**Threading.** UI thread owns all state mutation. The audio callback uses only atomics plus a
+control-owned published buffer; it never takes a lock. Each published buffer owns its cursor and
+playing atomics, and the control side retires the old owner only after callback acknowledgement.
+Read `docs/audio-realtime-contract.md` before touching the handoff or callback.
 
 **Metadata.** The file is authoritative; the DB description is a cache of it. All reads/writes
 go through `Backend::for_path` → `MetadataBackend`. WAV/BWF uses our own writer; everything
