@@ -15,7 +15,7 @@ mod settings;
 pub mod sidebar;
 pub mod state;
 pub mod transport;
-pub mod waveform;
+mod waveform;
 
 pub use state::Browser;
 
@@ -72,6 +72,7 @@ pub struct MainWindow {
 
     // Transport strip state -- see `transport.rs`/`waveform.rs`.
     volume_slider: Entity<SliderState>,
+    waveform_cache: waveform::BrowserWaveformCache,
 
     // Search bar state -- see `search.rs`.
     search_input: Entity<InputState>,
@@ -130,6 +131,7 @@ impl MainWindow {
             scroll_handle: gpui::UniformListScrollHandle::new(),
             results_focus: cx.focus_handle(),
             volume_slider,
+            waveform_cache: waveform::BrowserWaveformCache::default(),
             search_input,
             description_input,
             description_seeded_for: None,
