@@ -26,7 +26,9 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::slider::SliderState;
 use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable};
 
-use crate::actions::{OpenFolder, Redo, ShowSettings, ToggleInspector, TogglePlayback, Undo};
+use crate::actions::{
+    NavigateBack, OpenFolder, Redo, ShowSettings, ToggleInspector, TogglePlayback, Undo,
+};
 
 /// Results below this are padded with synthetic rows so the list actually
 /// exercises `uniform_list`'s virtualization at the scale the spike proved
@@ -150,6 +152,16 @@ impl MainWindow {
                     crate::config::save(&cfg);
                 }
                 Err(e) => log::warn!("failed to open directory {path:?}: {e}"),
+            }
+            browser.ensure_polling(cx);
+            cx.notify();
+        });
+    }
+
+    pub(super) fn navigate_back(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.browser.update(cx, |browser, cx| {
+            if let Err(error) = browser.inner.navigate_up() {
+                log::warn!("navigate up failed: {error}");
             }
             browser.ensure_polling(cx);
             cx.notify();
@@ -327,6 +339,9 @@ impl Render for MainWindow {
             .key_context("MainWindow")
             .relative()
             .on_action(cx.listener(Self::open_folder))
+            .on_action(cx.listener(|this, _action: &NavigateBack, _window, cx| {
+                this.navigate_back(_window, cx);
+            }))
             .on_action(cx.listener(Self::toggle_inspector))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::toggle_playback_action))

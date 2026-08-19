@@ -42,7 +42,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(
             &keybinds.navigate_back.to_lowercase(),
             NavigateBack,
-            Some("ResultsPanel"),
+            Some("MainWindow"),
         ),
         KeyBinding::new(
             &keybinds.confirm.to_lowercase(),

@@ -16,7 +16,7 @@ use gpui_component::{h_flex, v_flex, ActiveTheme};
 
 use super::selection::{self, ClickModifiers, GridGeometry};
 use super::{MainWindow, INSPECTOR_WIDTH, MIN_LIST_ROWS, SIDEBAR_WIDTH};
-use crate::actions::{Confirm, CursorDown, CursorUp, NavigateBack};
+use crate::actions::{Confirm, CursorDown, CursorUp};
 use crate::filesystem::FileEntry;
 use crate::theme;
 use crate::SampleBrowser;
@@ -153,7 +153,6 @@ impl MainWindow {
             .relative()
             .on_action(cx.listener(Self::cursor_up))
             .on_action(cx.listener(Self::cursor_down))
-            .on_action(cx.listener(Self::navigate_back))
             .on_action(cx.listener(Self::confirm))
             .on_mouse_down(
                 MouseButton::Left,
@@ -484,16 +483,6 @@ impl MainWindow {
             self.scroll_handle
                 .scroll_to_item(next / cols, ScrollStrategy::Nearest);
         }
-    }
-
-    fn navigate_back(&mut self, _: &NavigateBack, _window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.update(cx, |b, cx| {
-            if let Err(e) = b.inner.navigate_up() {
-                log::warn!("navigate up failed: {e}");
-            }
-            b.ensure_polling(cx);
-            cx.notify();
-        });
     }
 
     fn confirm(&mut self, _: &Confirm, _window: &mut Window, cx: &mut Context<Self>) {
