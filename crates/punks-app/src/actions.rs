@@ -28,5 +28,13 @@ actions!(
         /// Confirm the cursor row: enter a directory, or play a file (config:
         /// `keybinds.confirm`, default D; Enter is always bound too).
         Confirm,
+        /// Toggle playback using the same transport logic as the Play/Stop button.
+        TogglePlayback,
+        /// Undo the active library command.
+        Undo,
+        /// Redo the active library command.
+        Redo,
+        /// Show or hide the Punks settings panel.
+        ShowSettings,
     ]
 );

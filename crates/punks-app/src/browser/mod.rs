@@ -11,6 +11,7 @@ pub mod inspector;
 pub mod results;
 pub mod search;
 pub mod selection;
+mod settings;
 pub mod sidebar;
 pub mod state;
 pub mod transport;
@@ -20,11 +21,12 @@ pub use state::Browser;
 
 use gpui::prelude::*;
 use gpui::{Context, Entity, FocusHandle, Point, Window};
-use gpui_component::input::InputState;
+use gpui_component::button::Button;
+use gpui_component::input::{Input, InputState};
 use gpui_component::slider::SliderState;
-use gpui_component::{h_flex, v_flex, ActiveTheme};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable};
 
-use crate::actions::{OpenFolder, ToggleInspector};
+use crate::actions::{OpenFolder, Redo, ShowSettings, ToggleInspector, TogglePlayback, Undo};
 
 /// Results below this are padded with synthetic rows so the list actually
 /// exercises `uniform_list`'s virtualization at the scale the spike proved
@@ -42,6 +44,10 @@ pub(crate) const INSPECTOR_WIDTH: f32 = 280.0;
 pub struct MainWindow {
     browser: Entity<Browser>,
     inspector_visible: bool,
+    settings_visible: bool,
+    settings_inputs: settings::KeybindInputs,
+    settings_error: Option<String>,
+    settings_saved: bool,
     // Render-count diagnostics, gated the same way the old ImGui frontend's
     // `UiPerfProbe` was (`PUNKS_UI_PERF=1`) -- used to verify GPUI stays
     // event-driven (zero renders while genuinely idle), same method the
@@ -104,11 +110,16 @@ impl MainWindow {
         let volume_slider = Self::new_volume_slider(cfg.volume, cx);
         let search_input = Self::new_search_input(window, cx);
         let description_input = Self::new_description_input(window, cx);
+        let settings_inputs = settings::KeybindInputs::new(window, cx, &cfg.keybinds);
 
         let now = std::time::Instant::now();
         Self {
             browser,
-            inspector_visible: true,
+            inspector_visible: cfg.inspector_visible,
+            settings_visible: false,
+            settings_inputs,
+            settings_error: None,
+            settings_saved: false,
             perf_enabled: std::env::var_os("PUNKS_UI_PERF").is_some_and(|v| v == "1"),
             render_count: 0,
             perf_started: now,
@@ -150,7 +161,134 @@ impl MainWindow {
         cx: &mut Context<Self>,
     ) {
         self.inspector_visible = !self.inspector_visible;
+        let mut cfg = crate::config::load();
+        cfg.inspector_visible = self.inspector_visible;
+        crate::config::save(&cfg);
         cx.notify();
+    }
+
+    fn toggle_playback_action(
+        &mut self,
+        _: &TogglePlayback,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_playback(cx);
+    }
+
+    fn undo_action(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
+        self.browser.update(cx, |browser, cx| {
+            browser.inner.undo();
+            cx.notify();
+        });
+    }
+
+    fn redo_action(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
+        self.browser.update(cx, |browser, cx| {
+            browser.inner.redo();
+            cx.notify();
+        });
+    }
+
+    fn show_settings(&mut self, _: &ShowSettings, _window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(cx);
+    }
+
+    pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_visible = true;
+        self.settings_error = None;
+        self.settings_saved = false;
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_visible = false;
+        self.settings_error = None;
+        self.settings_saved = false;
+        cx.notify();
+    }
+
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let draft = self.settings_inputs.read(cx);
+        let mut cfg = crate::config::load();
+        if let Err(error) = settings::apply_functional_keybinds(&mut cfg, &draft) {
+            self.settings_error = Some(error.into());
+            self.settings_saved = false;
+            cx.notify();
+            return;
+        }
+        cfg.volume = self.browser.read(cx).inner.volume();
+        cfg.inspector_visible = self.inspector_visible;
+        crate::config::save(&cfg);
+        self.settings_error = None;
+        self.settings_saved = true;
+        cx.notify();
+    }
+
+    fn render_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let error = self.settings_error.clone();
+        let saved = self.settings_saved;
+        let row = |label: &'static str, input: &Entity<InputState>| {
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(label)
+                .child(Input::new(input).flex_1())
+        };
+
+        v_flex()
+            .id("settings-panel")
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .w(gpui::px(390.0))
+            .p_4()
+            .gap_2()
+            .bg(cx.theme().background)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child("Settings")
+                    .child(
+                        Button::new("settings-close")
+                            .label("Close")
+                            .small()
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.close_settings(cx);
+                            })),
+                    ),
+            )
+            .child("Keyboard shortcuts")
+            .child("Changes apply after restart.")
+            .child(row("Navigate up", &self.settings_inputs.navigate_up))
+            .child(row("Navigate down", &self.settings_inputs.navigate_down))
+            .child(row("Navigate back", &self.settings_inputs.navigate_back))
+            .child(row("Confirm", &self.settings_inputs.confirm))
+            .child(row("Play / Stop", &self.settings_inputs.play_stop))
+            .child(row(
+                "Toggle Inspector",
+                &self.settings_inputs.toggle_inspector,
+            ))
+            .child(row("Undo", &self.settings_inputs.undo))
+            .child(row("Redo", &self.settings_inputs.redo))
+            .when_some(error, |el, error| {
+                el.child(gpui::div().text_color(cx.theme().danger).child(error))
+            })
+            .when(saved, |el| {
+                el.child("Saved. Restart Punks to activate new shortcuts.")
+            })
+            .child(
+                Button::new("settings-apply")
+                    .label("Apply")
+                    .small()
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.apply_settings(cx);
+                    })),
+            )
     }
 }
 
@@ -185,9 +323,14 @@ impl Render for MainWindow {
         v_flex()
             .id("main-window")
             .key_context("MainWindow")
+            .relative()
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::toggle_inspector))
             .on_action(cx.listener(Self::focus_search))
+            .on_action(cx.listener(Self::toggle_playback_action))
+            .on_action(cx.listener(Self::undo_action))
+            .on_action(cx.listener(Self::redo_action))
+            .on_action(cx.listener(Self::show_settings))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -210,5 +353,8 @@ impl Render for MainWindow {
                     .child(self.render_waveform(cx))
                     .child(self.render_transport(cx)),
             )
+            .when(self.settings_visible, |el| {
+                el.child(self.render_settings(cx))
+            })
     }
 }

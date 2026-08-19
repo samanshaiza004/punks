@@ -1,5 +1,23 @@
 # GPUI viability spike
 
+## M6 implementation follow-up
+
+The original spike below is a historical evidence report. Since it was written, Punks added
+private source-side bridges for the two gaps it identified:
+
+- Windows uses OLE `IDataObject` + `IDropSource` + `DoDragDrop` and offers a bounded `CF_HDROP`
+  file list.
+- Linux/X11 uses a bounded XDND source window and serves `text/uri-list` through the selection
+  protocol.
+
+Those bridges are implemented in `crates/punks-app/src/platform/windows_drag.rs` and
+`crates/punks-app/src/platform/x11_drag.rs`. They are not runtime-verified in this macOS-only
+environment, and the current host has no Windows/Linux Rust targets installed. Wayland remains
+on GPUI's upstream source-side implementation and is likewise not runtime-verified here. Treat
+this as implementation/source evidence, not a claim of cross-platform release readiness.
+
+## Historical spike report (M0–M5)
+
 **Question:** Can GPUI support the non-negotiable workflows Punks needs on macOS, Windows, and
 Linux well enough that we should delete the existing imgui/winit/wgpu frontend?
 

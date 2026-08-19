@@ -15,6 +15,48 @@ design.
 | Audio control path (`play`, `poll`, `stop`, `seek_to`) | Atomic control updates, bounded request/result mailboxes, buffer ownership, CPAL stream lifecycle | Put obsolete work into an unbounded queue |
 | CPAL data callback | Read the published immutable sample buffer, advance cursor, apply gain, write output, acknowledge callback use | Everything in the contract below |
 
+## Callback object audit
+
+This is the complete callback call-graph inventory. “RT safe” means the callback
+may access the object in the listed way; it does not transfer ownership.
+
+| Object touched by the data callback | Classification | Allowed callback operation | Ownership / reason |
+|---|---|---|---|
+| `SharedState::published` | RT safe | Acquire-load a raw pointer | The control side publishes a heap-stable `PublishedAudio` and retains its `Box` until the callback-user acknowledgement reaches zero. |
+| `PublishedAudio::audio.samples` | RT safe | Borrow and read immutable `f32` samples | The `Arc<PreparedAudio>` is cloned and dropped only by control-side code; the callback never changes its reference count. |
+| `PublishedAudio::cursor` | RT safe | Relaxed atomic load/store | Only the callback advances the cursor for that published generation. |
+| `PublishedAudio::playing` | RT safe | Acquire/relaxed atomic load/store | Control-side stop/seek publication uses atomics; the callback only changes it when the bounded buffer is exhausted. |
+| `SharedState::volume` | RT safe | Relaxed atomic load | The control path stores a prepared `f32` bit pattern; the callback applies one multiplication per output sample. |
+| `SharedState::callback_users` | RT safe | Atomic increment/decrement | This is the lifetime acknowledgement, not a lock. It prevents control-side retirement from destroying a borrowed buffer. |
+| `SharedState::acknowledged_generation` | RT safe | Release atomic store | Diagnostic/progress acknowledgement only; it never owns or drops data. |
+| `SharedState::stream_failed` | Forbidden to data callback | Not accessed by the data callback | Only CPAL's separate stream-error callback stores it; `poll()` consumes it and performs recovery. |
+| `PlaybackEngine`, `RequestSlot`, `LruCache`, `cpal::Stream` | Forbidden | No access | These are control-side owners and lifecycle objects. Their locks, channels, allocations, I/O, and device operations stay off the data callback. |
+
+The audit was performed against the callback body and its direct callees:
+atomic operations, slice reads/writes, `f32` multiplication, and `fill` are the
+only operations in the production path. The test-only allocator probe asserts
+that the callback performs neither allocation nor deallocation; lock freedom is
+also a call-graph property because no lock-bearing object is reachable from the
+callback's arguments.
+
+## Audit record
+
+The pre-rewrite callback was inspected before changing the handoff. It used
+`SharedState::samples: RwLock<Vec<f32>>` and called `try_read()` on every audio
+buffer. That avoided waiting in the common path but was still lock acquisition,
+so it did not satisfy this contract. The old stream-error closure logged
+directly, and decode results used an unbounded channel; the decode worker also
+had no shutdown signal. Those were control-boundary violations or lifecycle
+risks, not callback work to preserve.
+
+After the rewrite, the callback path is statically limited to the table above.
+The test-only allocator probe found zero allocations, reallocations, or
+deallocations during a callback invocation. The lock claim is verified by the
+complete callback call-graph audit: no `Mutex`, `RwLock`, channel, logger, or
+allocation-bearing owner is reachable from `audio_callback`. A real-device
+dropout measurement requires an output device and is reported separately from
+these deterministic tests.
+
 ## Callback invariant
 
 The data callback must perform no:
@@ -58,6 +100,9 @@ pointer:
    This acknowledgement is diagnostic and part of the handoff proof; the
    in-flight count is the lifetime guard that makes retirement safe.
 
+The generation acknowledgement must never be implemented by cloning an `Arc` or
+by dropping an owner. Both reference-count operations remain control-side.
+
 At most one active, one retired, and one pending handoff buffer are owned by the
 control side. Stream teardown first stops the stream and waits for in-flight
 callbacks to acknowledge, then clears the published pointer and destroys the
@@ -77,6 +122,9 @@ unbounded result backlog.
   construction error.
 - A runtime stream error stops playback and is observed by `poll()`.
 - One best-effort default-device rebuild is attempted per failure episode.
+- A successful rebuild marks the stream healthy; a later distinct stream-error
+  callback is a new episode. A failed rebuild leaves the engine stopped until
+  the next explicit Play, so `poll()` cannot become a rebuild loop.
 - A successful rebuild re-decodes the current file for the current device rate
   and channel count; old-format cached buffers are discarded.
 - A failed rebuild stops playback and exposes a recoverable error. A later

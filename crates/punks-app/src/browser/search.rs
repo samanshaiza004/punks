@@ -7,8 +7,9 @@
 
 use gpui::prelude::*;
 use gpui::{Context, Entity, Focusable, Window};
-use gpui_component::h_flex;
+use gpui_component::button::*;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::{h_flex, Sizable};
 
 use super::MainWindow;
 use crate::actions::FocusSearch;
@@ -52,11 +53,19 @@ impl MainWindow {
             .focus(window, cx);
     }
 
-    pub(super) fn render_search(&mut self, _cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_search(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .id("search")
             .p_2()
             .child(Input::new(&self.search_input))
+            .child(
+                Button::new("settings")
+                    .label("Settings")
+                    .small()
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.open_settings(cx);
+                    })),
+            )
     }
 }
 

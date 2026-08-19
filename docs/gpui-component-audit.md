@@ -180,6 +180,21 @@ but real-pattern tests). Select/Tooltip/Dialog are genuinely unverified — repo
 open items rather than assumed safe, since none has shipped in real Punks code yet to force the
 issue.
 
+## M6 — Settings and drag-out follow-up
+
+The settings panel in `crates/punks-app/src/browser/settings.rs` is the first real consumer of
+the eight editable keybinding rows. It uses only `Input` and `Button`, both already covered by
+the M4/M5 evidence above; no `Select`, `Tooltip`, or `Dialog` was introduced. The four tab
+keybind fields remain in the persisted schema but are deliberately not rendered or registered
+until visible tabs return. Applying settings persists the normalized values and takes effect after
+restart, so the live keymap is not mutated mid-session.
+
+The Windows OLE and Linux/X11 XDND drag-out paths are private platform bridges, not
+`gpui-component` controls and not a new general drag framework. They have source-level tests for
+the platform-independent URI encoding, but runtime drag verification still requires the target OS
+and a real drop target. Wayland continues to use GPUI's upstream path. Box-select auto-scroll
+remains deferred as planned.
+
 ### Re-measured dependency footprint (vs. M0's baseline)
 
 Same machine (macOS 26.5.2, arm64, rustc 1.97.1), clean builds (`rm -rf target` before each) —

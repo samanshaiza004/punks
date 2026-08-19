@@ -1,0 +1,72 @@
+name: Wayland smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gpui-wayland:
+    name: GPUI headless Wayland smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Wayland runtime
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libgtk-3-dev weston
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build GPUI component smoke example
+        run: cargo build -p punks-app --example gpui_component_smoke
+
+      - name: Run under headless Weston
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_dir="$(mktemp -d)"
+          chmod 700 "$runtime_dir"
+          weston_log="$RUNNER_TEMP/weston.log"
+          smoke_log="$RUNNER_TEMP/gpui-wayland-smoke.log"
+          trap 'if [[ -n "${weston_pid:-}" ]]; then kill "$weston_pid" 2>/dev/null || true; fi; rm -rf "$runtime_dir"' EXIT
+
+          XDG_RUNTIME_DIR="$runtime_dir" weston \
+            --backend=headless-backend.so \
+            --socket=wayland-punks-smoke \
+            --idle-time=0 \
+            >"$weston_log" 2>&1 &
+          weston_pid=$!
+
+          for _ in {1..50}; do
+            if [[ -S "$runtime_dir/wayland-punks-smoke" ]]; then
+              break
+            fi
+            sleep 0.2
+          done
+          if [[ ! -S "$runtime_dir/wayland-punks-smoke" ]]; then
+            cat "$weston_log"
+            echo "Weston did not create its Wayland socket" >&2
+            exit 1
+          fi
+
+          set +e
+          XDG_RUNTIME_DIR="$runtime_dir" \
+            WAYLAND_DISPLAY=wayland-punks-smoke \
+            timeout --signal=TERM --kill-after=5s 15s \
+            target/debug/examples/gpui_component_smoke \
+            >"$smoke_log" 2>&1
+          status=$?
+          set -e
+
+          cat "$smoke_log"
+          if [[ "$status" -ne 124 ]]; then
+            echo "GPUI Wayland smoke exited before the timeout (status $status)" >&2
+            cat "$weston_log"
+            exit "$status"
+          fi

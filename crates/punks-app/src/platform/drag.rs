@@ -6,15 +6,11 @@
 //! - **Wayland**: same GPUI mechanism; upstream `gpui_linux` implements the
 //!   source side of the Wayland drag protocol too, but this is
 //!   source-verified only -- no Linux hardware available to run it.
-//! - **Windows / X11**: GPUI's window layer never promotes an in-app drag to
-//!   a native OS session there (confirmed by reading `gpui_windows` and
-//!   `gpui_linux/x11`: neither overrides `start_external_drag`, both fall
-//!   back to a hardcoded `false`). Windows gets a temporary stopgap below,
-//!   reusing the same `drag` crate this app used before the GPUI rewrite, so
-//!   Windows users don't lose drag-out during the transition. X11 has no
-//!   stopgap (never worked before the rewrite either, so nothing regresses)
-//!   and is deferred, along with retiring this stopgap, to a real native
-//!   XDND / OLE bridge in a later milestone.
+//! - **Windows**: GPUI's window layer has no source-side promotion, so
+//!   `platform/windows_drag.rs` supplies a private OLE `IDataObject` /
+//!   `IDropSource` bridge.
+//! - **Linux X11**: GPUI's X11 backend has only a drop-target implementation,
+//!   so `platform/x11_drag.rs` supplies the private XDND source side.
 
 use std::path::PathBuf;
 
@@ -44,7 +40,10 @@ pub fn draggable<E: StatefulInteractiveElement>(el: E, paths: DragPaths) -> E {
 
     el.on_drag(paths, move |_paths, position, _window, cx| {
         #[cfg(target_os = "windows")]
-        start_windows_drag_stopgap(_window, _paths);
+        crate::platform::windows_drag::start(_paths);
+
+        #[cfg(target_os = "linux")]
+        crate::platform::x11_drag::start(_paths);
 
         cx.new(|_| DragGhost {
             label: ghost_label.clone(),
@@ -82,52 +81,5 @@ impl Render for DragGhost {
                     .shadow_md()
                     .child(self.label.clone()),
             )
-    }
-}
-
-/// `// TODO(M6): replace with a native OLE IDropSource/DoDragDrop bridge.`
-///
-/// Reuses the `drag` crate this app called from the ImGui/winit frontend
-/// before the GPUI rewrite -- `gpui::Window` implements
-/// `raw_window_handle::HasWindowHandle`, exactly what `drag::start_drag`
-/// requires, so this is a straight port of the old call site onto the new
-/// window type. **Not independently verified**: no Windows hardware is
-/// available in this environment. Source-verified only.
-#[cfg(target_os = "windows")]
-fn start_windows_drag_stopgap(window: &Window, paths: &DragPaths) {
-    const DRAG_PREVIEW_ICON_PNG: &[u8] = &[
-        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
-        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255, 63, 0,
-        5, 254, 2, 254, 167, 53, 129, 207, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-    ];
-
-    let drag_paths: Vec<PathBuf> = paths
-        .0
-        .iter()
-        .filter_map(|path| match std::fs::canonicalize(path) {
-            Ok(path) => Some(path),
-            Err(err) => {
-                log::warn!("skipping drag path that could not be canonicalized {path:?}: {err}");
-                None
-            }
-        })
-        .collect();
-    if drag_paths.is_empty() {
-        log::error!("failed to start Windows drag: no valid paths remain");
-        return;
-    }
-
-    let item = drag::DragItem::Files(drag_paths);
-    let preview = drag::Image::Raw(DRAG_PREVIEW_ICON_PNG.to_vec());
-    if let Err(err) = drag::start_drag(
-        window,
-        item,
-        preview,
-        |result, _cursor_position| {
-            log::debug!("drag finished: {result:?}");
-        },
-        Default::default(),
-    ) {
-        log::error!("failed to start Windows drag operation: {err}");
     }
 }

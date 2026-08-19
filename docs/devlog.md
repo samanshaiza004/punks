@@ -34,11 +34,11 @@ punks-library┘
 - **`punks-audio`** — the audio engine. `cpal` for native output
   (CoreAudio / WASAPI / ALSA), `symphonia` for decoding WAV/FLAC/MP3/OGG,
   `rubato` for sample-rate conversion, an `lru` decode cache, and the pure
-  filename/time-domain analysis algorithms. The audio callback is **lock-free**:
-  state lives in atomics and an
-  `RwLock` the callback only ever `try_read`s, degrading to silence rather than
-  blocking. Decoding happens on a background thread; a `Release`/`Acquire` pair
-  hands the finished buffer to the callback safely.
+  filename/time-domain analysis algorithms. The audio callback reads only an
+  already-published immutable buffer plus atomics: no lock, allocation, wait,
+  decode, I/O, or logging is permitted. Decoding happens on a background
+  thread; control-side publication and callback acknowledgement keep buffer
+  ownership off the callback thread. See `docs/audio-realtime-contract.md`.
 - **`punks-library`** — SQLite-backed roots/assets, reconciliation, tags,
   facts, overrides, and disposable analysis/waveform caches.
 - **`punks-app`** — preferences, directory history, selection, threaded search,
@@ -106,6 +106,15 @@ current architecture — not a feature-by-feature diff against the old app.)*
 **UI polish**
 - Browser-like tabs (active accent vs. muted inactive, attached close glyph);
   width-adaptive multi-column file list; a calmer dark theme.
+
+**GPUI settings and drag-out follow-up**
+- Added a restart-applied settings panel for the eight functional keybinds. The
+  four dormant tab keybinds remain persisted but hidden and unregistered until
+  visible tabs return.
+- Replaced the Windows `drag` stopgap with a private OLE `CF_HDROP` source and
+  added a private X11 XDND source bridge. Wayland remains on GPUI's path.
+- Windows, X11, and Wayland runtime verification remains outstanding on this
+  macOS-only host; see `docs/gpui-viability.md`.
 
 ## What's next
 

@@ -1,4 +1,8 @@
-# Crate-boundary audit
+# Crate-boundary audit (historical decision record)
+
+This file records the pre-GPUI consolidation decision. The current production
+ownership and migration status are in [`docs/gpui-migration-report.md`](gpui-migration-report.md);
+the historical ImGui references below are not a description of the current dependency graph.
 
 This audit is based on the current checkout before the consolidation. The
 checkout still contains the ImGui UI (`punks-ui` and the ImGui renderer in

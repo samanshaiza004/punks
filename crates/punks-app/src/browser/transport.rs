@@ -31,6 +31,9 @@ impl MainWindow {
         cx.subscribe(&slider, |this, _slider, event, cx| {
             if let SliderEvent::Change(SliderValue::Single(v)) = event {
                 this.browser.update(cx, |b, _cx| b.inner.set_volume(*v));
+                let mut config = crate::config::load();
+                config.volume = *v;
+                crate::config::save(&config);
             }
         })
         .detach();
@@ -54,23 +57,27 @@ impl MainWindow {
                 Button::new("play-stop")
                     .label(if is_playing { "Stop" } else { "Play" })
                     .disabled(!is_playing && !has_selection)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.browser.update(cx, |b, cx| {
-                            let is_playing = matches!(
-                                b.inner.playback_status(),
-                                PlaybackStatus::Playing { .. } | PlaybackStatus::Loading { .. }
-                            );
-                            if is_playing {
-                                b.inner.stop();
-                            } else {
-                                b.inner.play_selected();
-                                b.ensure_playback_ticking(cx);
-                            }
-                            cx.notify();
-                        });
-                    })),
+                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_playback(cx))),
             )
             .child(Slider::new(&self.volume_slider))
+    }
+
+    /// Single transport transition shared by the visible button and the
+    /// configurable `TogglePlayback` GPUI action.
+    pub(super) fn toggle_playback(&mut self, cx: &mut Context<Self>) {
+        self.browser.update(cx, |browser, cx| {
+            let is_playing = matches!(
+                browser.inner.playback_status(),
+                PlaybackStatus::Playing { .. } | PlaybackStatus::Loading { .. }
+            );
+            if is_playing {
+                browser.inner.stop();
+            } else {
+                browser.inner.play_selected();
+                browser.ensure_playback_ticking(cx);
+            }
+            cx.notify();
+        });
     }
 }
 
