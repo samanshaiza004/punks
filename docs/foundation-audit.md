@@ -91,5 +91,39 @@ only while playback/loading is active; completed worker results supply wakes.
 5. Remove the obsolete GPUI implementation after that validation and update
    build instructions, architecture, protocol and validation records.
 
-The old frontend remains available during the vertical-slice work. Advanced
-comparison, acoustic exploration, segmentation and DAW integration are excluded.
+## Result
+
+The validated standalone frontend is now Alicorn/Odin. After the vertical slice
+passed native smoke checks, the old `punks-app` GPUI crate and Rust standalone
+shell were removed. The retained Rust domain code is in `punks-core`, which
+depends on `punks-audio` and `punks-library` but no GUI toolkit. The adapter is
+`punks-caliber`; the Odin application and build script are in
+`punks-standalone/odin` and `tools/build.sh`. No changes were required in the
+Caliber or Alicorn submodules.
+
+The frontend can open a folder, navigate, search filenames, select a file,
+preview and stop playback, and seek. It displays scan progress, playback state,
+device availability, and errors. Waveform presentation, metadata editing,
+settings, and external drag-out are temporarily unavailable in this first
+interface. They remain out of scope for this foundation.
+
+Validation on macOS arm64:
+
+- `cargo fmt --all -- --check` passed.
+- `cargo test --workspace` passed: 86 tests across audio, library, core, and
+  the Caliber contract, including audio format fixtures and database migration
+  fixtures.
+- `cargo clippy --workspace --all-targets -- -D warnings` passed.
+- `./tools/build.sh` built the Odin executable and verified the macOS app
+  bundle.
+- `./target/debug/punks --smoke --no-audio --folder /private/tmp/punks-native-fixture`
+  passed. It browsed, selected, stopped, searched, and returned to idle.
+- `./target/debug/punks --smoke-audio --folder /private/tmp/punks-native-fixture`
+  passed. CoreAudio playback advanced, stopped, searched, and returned to idle.
+- The native interface was visually exercised for folder selection, file
+  selection, and filename search.
+
+The smoke runs use temporary fixture files and do not access or rewrite a
+user's production library. Windows and Linux builds were not available in this
+environment and remain unverified. Advanced comparison, acoustic exploration,
+segmentation, and DAW integration remain out of scope.
