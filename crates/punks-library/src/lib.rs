@@ -75,49 +75,34 @@ pub struct ScanSummary {
     pub modified: usize,
     pub missing: usize,
     pub unchanged: usize,
-    
+
     pub errors: usize,
 }
 
 fn set_wal_mode_with_retry(conn: &Connection) -> Result<(), LibraryError> {
-    let mut last_err = None;
-    for _ in 0..50 {
-        match conn.pragma_update(None, "journal_mode", "WAL") {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                last_err = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(20));
+    for attempt in 0..3 {
+        match conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0)) {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(mode) => {
+                return Err(LibraryError::Db(format!(
+                    "could not enable WAL: SQLite selected {mode}"
+                )))
             }
+            Err(rusqlite::Error::SqliteFailure(ref e, _))
+                if matches!(
+                    e.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) && attempt < 2 =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            Err(e) => return Err(LibraryError::Db(format!("enable WAL: {e}"))),
         }
     }
-    Err(last_err.unwrap().into())
+    unreachable!()
 }
 
-const SCHEMA_V1: &str = "
-DROP TABLE IF EXISTS fact_overrides_v5;
-
-ALTER TABLE fact_overrides RENAME TO fact_overrides_v5;
-
-CREATE TABLE fact_overrides (
-  asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
-  metric     TEXT NOT NULL,
-  real_value REAL,
-  text_value TEXT,
-  is_absent  INTEGER NOT NULL DEFAULT 0,     -- 1 = explicitly \"no value\", not just uncorrected
-  source     TEXT NOT NULL DEFAULT 'user',
-  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  PRIMARY KEY (asset_id, metric),
-  CHECK (
-    (is_absent = 1 AND real_value IS NULL AND text_value IS NULL)
-    OR (is_absent = 0 AND (real_value IS NOT NULL) + (text_value IS NOT NULL) = 1)
-  )
-) WITHOUT ROWID;
-
-INSERT INTO fact_overrides(asset_id, metric, real_value, text_value, is_absent, source, updated_at)
-  SELECT asset_id, metric, real_value, text_value, 0, source, updated_at FROM fact_overrides_v5;
-
-DROP TABLE fact_overrides_v5;
-";
+mod schema;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fact {
@@ -156,55 +141,38 @@ impl Library {
     }
 
     pub fn create(root: &Path) -> Result<Library, LibraryError> {
+        if !root.is_dir() {
+            return Err(LibraryError::Io(format!(
+                "not a directory: {}",
+                root.display()
+            )));
+        }
         std::fs::create_dir_all(root.join(".punks"))?;
-        Self::open_at(root)
+        Self::open_at(root, true)
     }
 
     pub fn open(root: &Path) -> Result<Library, LibraryError> {
         if !Self::exists(root) {
             return Err(LibraryError::NotALibrary(root.to_path_buf()));
         }
-        Self::open_at(root)
+        Self::open_at(root, false)
     }
 
-    fn open_at(root: &Path) -> Result<Library, LibraryError> {
-        let mut conn = Connection::open(Self::db_path(root))?;
-        conn.busy_timeout(std::time::Duration::from_secs(10))?;
-        set_wal_mode_with_retry(&conn)?;
+    fn open_at(root: &Path, create: bool) -> Result<Library, LibraryError> {
+        let root = root.to_path_buf();
+        let path = Self::db_path(&root);
+        let mut flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE;
+        if create {
+            flags |= rusqlite::OpenFlags::SQLITE_OPEN_CREATE;
+        }
+        let mut conn = Connection::open_with_flags(&path, flags)
+            .map_err(|e| LibraryError::Db(format!("open {}: {e}", path.display())))?;
+        conn.busy_timeout(std::time::Duration::from_secs(2))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 1 {
-            tx.execute_batch(SCHEMA_V1)?;
-            tx.pragma_update(None, "user_version", 1)?;
-        }
-        if version < 2 {
-            tx.execute_batch(SCHEMA_V2)?;
-            tx.pragma_update(None, "user_version", 2)?;
-        }
-        if version < 3 {
-            tx.execute_batch(SCHEMA_V3)?;
-            tx.pragma_update(None, "user_version", 3)?;
-        }
-        if version < 4 {
-            tx.execute_batch(SCHEMA_V4)?;
-            tx.pragma_update(None, "user_version", 4)?;
-        }
-        if version < 5 {
-            tx.execute_batch(SCHEMA_V5)?;
-            tx.pragma_update(None, "user_version", 5)?;
-        }
-        if version < 6 {
-            tx.execute_batch(SCHEMA_V6)?;
-            tx.pragma_update(None, "user_version", 6)?;
-        }
-        tx.commit()?;
-
-        Ok(Library {
-            conn,
-            root: root.to_path_buf(),
-        })
+        schema::migrate(&mut conn)
+            .map_err(|e| LibraryError::Db(format!("{}: {e}", path.display())))?;
+        set_wal_mode_with_retry(&conn)?;
+        Ok(Library { conn, root })
     }
 
     pub fn root(&self) -> &Path {
@@ -362,10 +330,11 @@ impl Library {
         let hash = hash_file(abs_path, meta.len())?;
         self.conn.execute(
             "INSERT INTO assets(relative_path, size, mtime_ms, content_hash)
-             VALUES (?1, ?2, ?3, ?4)",
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(relative_path) DO NOTHING",
             rusqlite::params![rel, meta.len(), mtime_ms(&meta), hash],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        self.asset_id_for(abs_path)?
+            .ok_or_else(|| LibraryError::Db("asset missing after ingest".into()))
     }
 
     fn rel_str(&self, abs_path: &Path) -> Result<String, LibraryError> {
@@ -379,7 +348,7 @@ impl Library {
         Ok(rel_to_str(rel))
     }
 
-    fn asset_uuid(&self, abs_path: &Path) -> Result<Option<String>, LibraryError> {
+    pub fn asset_uuid_for(&self, abs_path: &Path) -> Result<Option<String>, LibraryError> {
         let rel = self.rel_str(abs_path)?;
         let mut stmt = self
             .conn
@@ -396,7 +365,7 @@ impl Library {
     }
 
     pub fn load_waveform(&self, abs_path: &Path) -> Result<Option<Vec<(f32, f32)>>, LibraryError> {
-        let Some(uuid) = self.asset_uuid(abs_path)? else {
+        let Some(uuid) = self.asset_uuid_for(abs_path)? else {
             return Ok(None);
         };
         let bin = self.waveform_bin_path(&uuid);
@@ -416,7 +385,7 @@ impl Library {
     ) -> Result<(), LibraryError> {
         self.ensure_asset(abs_path)?;
         let uuid = self
-            .asset_uuid(abs_path)?
+            .asset_uuid_for(abs_path)?
             .ok_or_else(|| LibraryError::Db("asset uuid missing after ingest".into()))?;
         let bin = self.waveform_bin_path(&uuid);
         if let Some(parent) = bin.parent() {
@@ -440,7 +409,7 @@ impl Library {
                status = 'pending', pipeline_version = excluded.pipeline_version,
                error = NULL, updated_at = unixepoch()
              WHERE analysis_jobs.pipeline_version != excluded.pipeline_version
-                OR analysis_jobs.status IN ('pending', 'running')",
+                OR analysis_jobs.status = 'pending'",
             rusqlite::params![pipeline_version],
         )?;
         Ok(())
@@ -457,27 +426,20 @@ impl Library {
     }
 
     pub fn claim_next_pending(&mut self) -> Result<Option<PathBuf>, LibraryError> {
-        let row = self.conn.query_row(
-            "SELECT j.asset_id, a.relative_path
-               FROM analysis_jobs j JOIN assets a ON a.id = j.asset_id
-              WHERE j.status = 'pending' AND a.missing = 0
-              ORDER BY j.asset_id LIMIT 1",
-            [],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-        );
-        let (asset_id, rel) = match row {
-            Ok(v) => v,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row=tx.query_row("SELECT j.asset_id,a.relative_path FROM analysis_jobs j JOIN assets a ON a.id=j.asset_id WHERE j.status='pending' AND a.missing=0 ORDER BY j.asset_id LIMIT 1",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)));
+        let result = match row {
+            Ok((id, rel)) => {
+                tx.execute("UPDATE analysis_jobs SET status='running',started_at=unixepoch(),finished_at=NULL,duration_ms=NULL,error=NULL,updated_at=unixepoch() WHERE asset_id=?1 AND status='pending'",[id])?;
+                Some(self.root.join(str_to_rel(&rel)))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(e) => return Err(e.into()),
         };
-        self.conn.execute(
-            "UPDATE analysis_jobs SET status = 'running', started_at = unixepoch(),
-               finished_at = NULL, duration_ms = NULL, error = NULL,
-               updated_at = unixepoch()
-             WHERE asset_id = ?1",
-            rusqlite::params![asset_id],
-        )?;
-        Ok(Some(self.root.join(str_to_rel(&rel))))
+        tx.commit()?;
+        Ok(result)
     }
 
     pub fn claim_path(&mut self, abs_path: &Path) -> Result<Option<PathBuf>, LibraryError> {
@@ -525,7 +487,6 @@ impl Library {
         let asset_id = self.ensure_asset(abs_path)?;
         let tx = self.conn.transaction()?;
         for (metric, fact) in facts {
-
             let (real, text, blob): (Option<f64>, Option<&str>, Option<&[u8]>) = match fact {
                 Fact::Real(v) => (Some(*v), None, None),
                 Fact::Text(s) => (None, Some(s.as_str()), None),
@@ -555,7 +516,6 @@ impl Library {
         Ok(())
     }
 
-  
     pub fn fail_analysis(&mut self, abs_path: &Path, err: &str) -> Result<(), LibraryError> {
         let asset_id = self.ensure_asset(abs_path)?;
         self.conn.execute(
@@ -712,7 +672,15 @@ impl Library {
     pub fn reconcile_with_progress(
         &mut self,
         files: &[ScannedFile],
+        on_progress: impl FnMut(usize),
+    ) -> Result<ScanSummary, LibraryError> {
+        self.reconcile_cancellable(files, on_progress, || false)
+    }
+    pub fn reconcile_cancellable(
+        &mut self,
+        files: &[ScannedFile],
         mut on_progress: impl FnMut(usize),
+        cancelled: impl Fn() -> bool,
     ) -> Result<ScanSummary, LibraryError> {
         struct Row {
             id: i64,
@@ -752,6 +720,16 @@ impl Library {
         let mut seen: HashSet<i64> = HashSet::new();
 
         'files: for (fi, f) in files.iter().enumerate() {
+            if cancelled() {
+                return Err(LibraryError::Io("scan cancelled".into()));
+            }
+            if f.relative_path.is_absolute()
+                || f.relative_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(LibraryError::Io("scan path escapes library".into()));
+            }
             on_progress(fi + 1);
             let key = rel_to_str(&f.relative_path);
             let abs = self.root.join(&f.relative_path);
@@ -778,11 +756,11 @@ impl Library {
                           WHERE id=?4",
                         rusqlite::params![f.size, f.mtime_ms, hash, row.id],
                     )?;
+                    tx.execute("UPDATE analysis_jobs SET status='pending',error=NULL,updated_at=unixepoch() WHERE asset_id=?1",[row.id])?;
                     summary.modified += 1;
                 }
                 continue;
             }
-
 
             let mut file_hash: Option<String> = None;
             let mut matched: Option<i64> = None;
@@ -810,7 +788,6 @@ impl Library {
                     break;
                 }
             }
-
 
             if matched.is_none() {
                 if file_hash.is_none() {
@@ -897,15 +874,20 @@ fn row_to_override_at(r: &rusqlite::Row, base: usize) -> Result<Option<Fact>, ru
 }
 
 pub fn scan_files(root: &Path) -> Result<Vec<ScannedFile>, LibraryError> {
+    scan_files_cancellable(root, || false)
+}
+pub fn scan_files_cancellable(
+    root: &Path,
+    cancelled: impl Fn() -> bool,
+) -> Result<Vec<ScannedFile>, LibraryError> {
     if !root.is_dir() {
         return Err(LibraryError::Io(format!(
             "not a directory: {}",
             root.display()
         )));
     }
-
     let mut out = Vec::new();
-    collect_audio_files(root, root, &mut out)?;
+    collect_audio_files(root, root, &mut out, &cancelled)?;
     Ok(out)
 }
 
@@ -915,21 +897,23 @@ fn collect_audio_files(
     root: &Path,
     current: &Path,
     out: &mut Vec<ScannedFile>,
+    cancelled: &impl Fn() -> bool,
 ) -> Result<(), LibraryError> {
     let entries = std::fs::read_dir(current)?;
-    for entry in entries.flatten() {
+    for entry in entries {
+        if cancelled() {
+            return Err(LibraryError::Io("scan cancelled".into()));
+        }
+        let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') {
             continue;
         }
 
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
+        let file_type = entry.file_type()?;
         let path = entry.path();
         if file_type.is_dir() {
-            collect_audio_files(root, &path, out)?;
+            collect_audio_files(root, &path, out, cancelled)?;
             continue;
         }
         if !file_type.is_file() {
@@ -945,10 +929,7 @@ fn collect_audio_files(
             continue;
         }
 
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
+        let metadata = entry.metadata()?;
         let Ok(relative_path) = path.strip_prefix(root) else {
             continue;
         };
@@ -1031,7 +1012,6 @@ fn rel_to_str(rel: &Path) -> String {
 }
 
 fn str_to_rel(s: &str) -> PathBuf {
-
     PathBuf::from(s)
 }
 
