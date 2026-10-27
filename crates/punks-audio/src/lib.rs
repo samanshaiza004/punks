@@ -20,7 +20,10 @@ mod resample;
 pub use analysis::{
     amp_to_dbfs, pipeline_version, run_all, AnalysisContext, AnalysisReport, AudioBuffer,
 };
-pub use decode::{compute_source_peaks, decode_file, AudioMetadata, DecodedAudio};
+pub use decode::{
+    compute_source_peaks, compute_source_peaks_cancellable, decode_file, AudioMetadata,
+    DecodedAudio,
+};
 pub use metadata::{
     resolve, Backend, Capability, Field, Metadata, MetadataBackend, MetadataError, MetadataSource,
     ResolvedMetadata, Sourced,
@@ -228,6 +231,8 @@ struct PendingReq {
     file: PathBuf,
 }
 
+pub type WakeCallback = Arc<dyn Fn() + Send + Sync + 'static>;
+
 pub struct PlaybackEngine {
     shared: Arc<SharedState>,
     stream: Option<cpal::Stream>,
@@ -261,6 +266,7 @@ pub struct PlaybackEngine {
     /// it set until the next explicit `play()` retry.
     recovery_attempted: bool,
     pending_stream_error: Option<PlaybackError>,
+    decode_wake: Arc<Mutex<Option<WakeCallback>>>,
 }
 
 impl PlaybackEngine {
@@ -297,7 +303,9 @@ impl PlaybackEngine {
         });
         let (result_tx, result_rx) = mpsc::sync_channel(1);
         let decode_thread;
+        let decode_wake: Arc<Mutex<Option<WakeCallback>>> = Arc::new(Mutex::new(None));
         {
+            let decode_wake = decode_wake.clone();
             let decode_request = Arc::clone(&decode_request);
             let decode_target = Arc::clone(&decode_target);
             decode_thread = std::thread::spawn(move || loop {
@@ -314,6 +322,13 @@ impl PlaybackEngine {
                 // joining, which wakes this send during shutdown.
                 if result_tx.send((id, result)).is_err() {
                     break;
+                }
+                let wake = decode_wake
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some(wake) = wake {
+                    wake();
                 }
             });
         }
@@ -341,7 +356,13 @@ impl PlaybackEngine {
             decode_thread: Some(decode_thread),
             recovery_attempted: false,
             pending_stream_error: None,
+            decode_wake,
         })
+    }
+
+    /// Called only by the non-real-time decoder after handing off a result.
+    pub fn set_waker(&mut self, wake: WakeCallback) {
+        *self.decode_wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
     }
 
     fn alloc_id(&mut self) -> u64 {
@@ -914,4 +935,322 @@ fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct CallbackProbeAllocator;
+
+    #[derive(Clone, Copy, Default)]
+    struct ProbeCounts {
+        allocations: usize,
+        deallocations: usize,
+        reallocations: usize,
+    }
+
+    thread_local! {
+        static CALLBACK_PROBE: Cell<Option<ProbeCounts>> = const { Cell::new(None) };
+    }
+
+    #[global_allocator]
+    static TEST_ALLOCATOR: CallbackProbeAllocator = CallbackProbeAllocator;
+
+    unsafe impl std::alloc::GlobalAlloc for CallbackProbeAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let ptr = unsafe { std::alloc::System.alloc(layout) };
+            CALLBACK_PROBE.with(|probe| {
+                if let Some(mut counts) = probe.get() {
+                    counts.allocations += 1;
+                    probe.set(Some(counts));
+                }
+            });
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) };
+            CALLBACK_PROBE.with(|probe| {
+                if let Some(mut counts) = probe.get() {
+                    counts.deallocations += 1;
+                    probe.set(Some(counts));
+                }
+            });
+        }
+
+        unsafe fn realloc(
+            &self,
+            ptr: *mut u8,
+            layout: std::alloc::Layout,
+            new_size: usize,
+        ) -> *mut u8 {
+            let ptr = unsafe { std::alloc::System.realloc(ptr, layout, new_size) };
+            CALLBACK_PROBE.with(|probe| {
+                if let Some(mut counts) = probe.get() {
+                    counts.reallocations += 1;
+                    probe.set(Some(counts));
+                }
+            });
+            ptr
+        }
+    }
+
+    fn probe_callback_allocations(f: impl FnOnce()) -> ProbeCounts {
+        CALLBACK_PROBE.with(|probe| probe.set(Some(ProbeCounts::default())));
+        f();
+        CALLBACK_PROBE.with(|probe| probe.take().unwrap_or_default())
+    }
+
+    fn prepared(samples: &[f32], file: &str) -> Arc<PreparedAudio> {
+        Arc::new(PreparedAudio {
+            samples: samples.to_vec(),
+            total_frames: samples.len(),
+            file: PathBuf::from(file),
+            peaks: WaveformPeaks {
+                peaks: Vec::new(),
+                num_buckets: 0,
+            },
+            info: TrackInfo {
+                metadata: AudioMetadata::default(),
+                source_sample_rate: 48_000,
+                source_duration: Duration::from_secs(1),
+                truncated: false,
+            },
+            window_start: Duration::ZERO,
+        })
+    }
+
+    fn handoff_test_engine(shared: Arc<SharedState>) -> PlaybackEngine {
+        let (_result_tx, result_rx) = mpsc::sync_channel(1);
+        PlaybackEngine {
+            shared,
+            stream: None,
+            device_sample_rate: 48_000,
+            device_channels: 1,
+            current_file: None,
+            current_peaks: None,
+            current_full_peaks: None,
+            current_info: None,
+            current_window_start: Duration::ZERO,
+            active_buffer: None,
+            retired_buffer: None,
+            pending_buffer: None,
+            next_buffer_generation: 0,
+            pending: None,
+            next_request_id: 0,
+            cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
+            decode_request: Arc::new(RequestSlot::new()),
+            decode_target: Arc::new(DecodeTarget {
+                sample_rate: AtomicU32::new(48_000),
+                channels: AtomicUsize::new(1),
+            }),
+            decode_result_rx: Some(result_rx),
+            decode_thread: None,
+            recovery_attempted: false,
+            pending_stream_error: None,
+            decode_wake: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn published(samples: &[f32], generation: u64) -> Box<PublishedAudio> {
+        Box::new(PublishedAudio {
+            generation,
+            audio: Arc::new(PreparedAudio {
+                samples: samples.to_vec(),
+                total_frames: samples.len(),
+                file: PathBuf::from("test.wav"),
+                peaks: WaveformPeaks {
+                    peaks: Vec::new(),
+                    num_buckets: 0,
+                },
+                info: TrackInfo {
+                    metadata: AudioMetadata::default(),
+                    source_sample_rate: 48_000,
+                    source_duration: Duration::from_secs(1),
+                    truncated: false,
+                },
+                window_start: Duration::ZERO,
+            }),
+            cursor: AtomicUsize::new(0),
+            playing: AtomicBool::new(false),
+        })
+    }
+
+    fn publish_for_test(shared: &SharedState, buffer: &PublishedAudio) {
+        let ptr = buffer as *const PublishedAudio as *mut PublishedAudio;
+        shared.published.store(ptr, Ordering::Release);
+        buffer.playing.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn request_slot_coalesces_to_latest() {
+        // Several sends before anyone reads: only the last one should surface.
+        let slot = RequestSlot::new();
+        for value in 0..100 {
+            slot.send(value);
+        }
+        assert_eq!(slot.recv(), 99);
+    }
+
+    #[test]
+    fn request_slot_recv_blocks_until_send() {
+        let slot = Arc::new(RequestSlot::new());
+        let reader = Arc::clone(&slot);
+        let handle = std::thread::spawn(move || reader.recv());
+        std::thread::sleep(Duration::from_millis(20));
+        slot.send(42);
+        assert_eq!(handle.join().unwrap(), 42);
+    }
+
+    #[test]
+    fn callback_reads_immutable_buffer_applies_volume_and_acknowledges() {
+        let shared = SharedState::new();
+        let buffer = published(&[0.25, -0.5, 1.0], 7);
+        publish_for_test(&shared, &buffer);
+        shared.volume.store(0.5f32.to_bits(), Ordering::Relaxed);
+
+        let mut output = [0.0; 3];
+        audio_callback(&mut output, &shared);
+
+        assert_eq!(output, [0.125, -0.25, 0.5]);
+        assert_eq!(shared.callback_users.load(Ordering::SeqCst), 0);
+        assert_eq!(shared.acknowledged_generation.load(Ordering::Acquire), 7);
+        assert!(buffer.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn callback_does_not_allocate_or_drop_reference_counted_data() {
+        let shared = SharedState::new();
+        let buffer = published(&[0.25, -0.5, 1.0], 7);
+        publish_for_test(&shared, &buffer);
+
+        let mut output = [0.0; 3];
+        let counts = probe_callback_allocations(|| audio_callback(&mut output, &shared));
+
+        assert_eq!(counts.allocations, 0);
+        assert_eq!(counts.deallocations, 0);
+        assert_eq!(counts.reallocations, 0);
+    }
+
+    #[test]
+    fn decode_failure_does_not_create_a_prepared_buffer() {
+        let result = decode_and_prepare(Path::new("missing-preview-file.wav"), 2, 48_000, None);
+
+        assert!(matches!(result, Err(PlaybackError::DecodeError(_))));
+    }
+
+    #[test]
+    fn resampling_changes_frame_count_for_a_different_device_rate() {
+        let source = vec![0.0; 1_024];
+        let output = resample::resample(&source, 1, 8_000, 16_000).expect("resample");
+
+        assert_eq!(output.len(), 2_048);
+    }
+
+    #[test]
+    fn handoff_bounds_active_retired_and_latest_pending() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = handoff_test_engine(Arc::clone(&shared));
+        let first = prepared(&[1.0], "first.wav");
+        let second = prepared(&[2.0], "second.wav");
+        let third = prepared(&[3.0], "third.wav");
+
+        engine.publish_now(Arc::clone(&first));
+        // Simulate a callback that has loaded `first` while control publishes
+        // `second`; control must retain the old owner until that callback ends.
+        shared.callback_users.store(1, Ordering::SeqCst);
+        engine.commit(&second);
+        assert_eq!(
+            engine.active_buffer.as_ref().unwrap().audio.file,
+            Path::new("second.wav")
+        );
+        assert!(engine.retired_buffer.is_some());
+
+        // A newer result replaces the one pending behind the retired buffer.
+        engine.commit(&third);
+        assert_eq!(
+            engine.pending_buffer.as_ref().unwrap().file,
+            Path::new("third.wav")
+        );
+        assert!(engine.retired_buffer.is_some());
+
+        shared.callback_users.store(0, Ordering::SeqCst);
+        engine.advance_handoff();
+        assert_eq!(
+            engine.active_buffer.as_ref().unwrap().audio.file,
+            Path::new("third.wav")
+        );
+        assert!(engine.retired_buffer.is_none());
+        assert!(engine.pending_buffer.is_none());
+    }
+
+    #[test]
+    fn stop_during_switch_cancels_pending_audio_without_touching_the_callback() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = handoff_test_engine(Arc::clone(&shared));
+        let first = prepared(&[1.0], "first.wav");
+        let replacement = prepared(&[2.0], "replacement.wav");
+
+        engine.publish_now(first);
+        engine.pending = Some(PendingReq {
+            id: 12,
+            file: PathBuf::from("replacement.wav"),
+        });
+        engine.pending_buffer = Some(replacement);
+        engine.stop();
+
+        assert!(engine.pending.is_none());
+        assert!(engine.pending_buffer.is_none());
+        assert!(!engine
+            .active_buffer
+            .as_ref()
+            .unwrap()
+            .playing
+            .load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn callback_zero_fills_tail_and_stops_on_short_buffer() {
+        let shared = SharedState::new();
+        let buffer = published(&[1.0, 2.0], 1);
+        publish_for_test(&shared, &buffer);
+
+        let mut output = [0.0; 4];
+        audio_callback(&mut output, &shared);
+
+        assert_eq!(output, [1.0, 2.0, 0.0, 0.0]);
+        assert_eq!(buffer.cursor.load(Ordering::Relaxed), 2);
+        assert!(!buffer.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn callback_buffer_replacement_is_observed_by_next_invocation() {
+        let shared = SharedState::new();
+        let first = published(&[1.0, 1.0], 1);
+        let second = published(&[2.0, 2.0], 2);
+        publish_for_test(&shared, &first);
+
+        let mut output = [0.0; 2];
+        audio_callback(&mut output, &shared);
+        assert_eq!(output, [1.0, 1.0]);
+
+        first.cursor.store(0, Ordering::Release);
+        publish_for_test(&shared, &second);
+        audio_callback(&mut output, &shared);
+        assert_eq!(output, [2.0, 2.0]);
+        assert_eq!(shared.acknowledged_generation.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn channel_adaptation_handles_mono_stereo_and_upmix() {
+        assert_eq!(adapt_channels(&[1.0, -1.0, 0.5, 0.5], 2, 1), [0.0, 0.5]);
+        assert_eq!(
+            adapt_channels(&[1.0, 2.0, 3.0, 4.0], 2, 3),
+            [1.0, 2.0, 2.0, 3.0, 4.0, 4.0]
+        );
+    }
 }

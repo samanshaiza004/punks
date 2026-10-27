@@ -472,3 +472,154 @@ impl MetadataBackend for Backend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(
+        description: Option<&str>,
+        keywords: &[&str],
+        category: Option<&str>,
+        creator: Option<&str>,
+    ) -> Metadata {
+        Metadata {
+            description: description.map(str::to_string),
+            keywords: keywords.iter().map(|s| s.to_string()).collect(),
+            category: category.map(str::to_string),
+            creator: creator.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn override_outranks_embedded_outranks_analysis() {
+        let r = resolve(&[
+            (
+                MetadataSource::Analysis,
+                meta(Some("guess"), &[], None, None),
+            ),
+            (MetadataSource::Embedded, meta(Some("tag"), &[], None, None)),
+            (
+                MetadataSource::Override,
+                meta(Some("fixed"), &[], None, None),
+            ),
+        ]);
+        let d = r.description.expect("description resolved");
+        assert_eq!(d.value, "fixed");
+        assert_eq!(d.source, MetadataSource::Override);
+    }
+
+    #[test]
+    fn absent_high_rank_value_does_not_shadow_lower_source() {
+        // Override supplies no description, so Embedded's stands; the override's
+        // category is still picked up for its own field.
+        let r = resolve(&[
+            (MetadataSource::Embedded, meta(Some("tag"), &[], None, None)),
+            (MetadataSource::Override, meta(None, &[], Some("sfx"), None)),
+        ]);
+        let d = r.description.expect("description resolved");
+        assert_eq!(
+            (d.value.as_str(), d.source),
+            ("tag", MetadataSource::Embedded)
+        );
+        assert_eq!(
+            r.category.expect("category resolved").source,
+            MetadataSource::Override
+        );
+    }
+
+    #[test]
+    fn project_outranks_embedded() {
+        let r = resolve(&[
+            (
+                MetadataSource::Embedded,
+                meta(None, &[], None, Some("file tag")),
+            ),
+            (
+                MetadataSource::Project,
+                meta(None, &[], None, Some("pack author")),
+            ),
+        ]);
+        let c = r.creator.expect("creator resolved");
+        assert_eq!(
+            (c.value.as_str(), c.source),
+            ("pack author", MetadataSource::Project)
+        );
+    }
+
+    #[test]
+    fn keywords_resolve_whole_set_from_highest_source() {
+        let r = resolve(&[
+            (
+                MetadataSource::Embedded,
+                meta(None, &["a", "b"], None, None),
+            ),
+            (MetadataSource::Override, meta(None, &["c"], None, None)),
+        ]);
+        let k = r.keywords.expect("keywords resolved");
+        assert_eq!(k.value, vec!["c".to_string()]);
+        assert_eq!(k.source, MetadataSource::Override);
+    }
+
+    #[test]
+    fn empty_layers_resolve_to_default() {
+        assert_eq!(resolve(&[]), ResolvedMetadata::default());
+    }
+
+    struct FixedBackend(Metadata, MetadataSource);
+    impl MetadataBackend for FixedBackend {
+        fn capability(&self, _f: Field) -> Capability {
+            Capability::ReadOnly
+        }
+        fn read(&self, _p: &Path) -> Result<Metadata, MetadataError> {
+            Ok(self.0.clone())
+        }
+        fn write(&self, _p: &Path, _m: &Metadata) -> Result<(), MetadataError> {
+            Ok(())
+        }
+        fn source(&self) -> MetadataSource {
+            self.1
+        }
+    }
+
+    #[test]
+    fn read_resolved_tags_every_field_with_backend_source() {
+        let be = FixedBackend(meta(Some("hi"), &[], None, None), MetadataSource::Override);
+        let r = be.read_resolved(Path::new("unused")).expect("read");
+        assert_eq!(
+            r.description.expect("description").source,
+            MetadataSource::Override
+        );
+    }
+
+    #[test]
+    fn file_backends_default_to_embedded_source() {
+        // WaveBackend/LoftyBackend rely on the trait default.
+        assert_eq!(LoftyBackend.source(), MetadataSource::Embedded);
+    }
+
+    #[test]
+    fn wave_backend_truncates_description_to_bext_limit() {
+        let backend = WaveBackend { writable: true };
+        assert_eq!(
+            backend.max_len(Field::Description),
+            Some(decode::BEXT_DESCRIPTION_MAX)
+        );
+        let long = "x".repeat(decode::BEXT_DESCRIPTION_MAX + 50);
+        let normalized = backend.normalize(Field::Description, &long);
+        assert_eq!(normalized.len(), decode::BEXT_DESCRIPTION_MAX);
+
+        let short = "short description";
+        assert_eq!(backend.normalize(Field::Description, short), short);
+
+        // Unbounded fields pass through untouched.
+        assert_eq!(backend.max_len(Field::Keywords), None);
+    }
+
+    #[test]
+    fn lofty_backend_has_no_length_limit() {
+        assert_eq!(LoftyBackend.max_len(Field::Description), None);
+        let long = "y".repeat(10_000);
+        assert_eq!(LoftyBackend.normalize(Field::Description, &long), long);
+    }
+}

@@ -1,0 +1,14 @@
+[package]
+name = "punks-caliber"
+version = "0.3.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+punks-core = { path = "../punks-core" }
+caliber-ffi = { path = "../../vendor/caliber/crates/caliber-ffi" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

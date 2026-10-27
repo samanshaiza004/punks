@@ -482,3 +482,243 @@ pub fn pipeline_version() -> u32 {
     }
     v
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration as StdDuration;
+
+    fn sine(freq: f32, sample_rate: u32, amp: f32, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .map(|n| amp * (std::f32::consts::TAU * freq * n as f32 / sample_rate as f32).sin())
+            .collect()
+    }
+
+    /// Context whose `source_duration` matches the buffer (the whole-file case).
+    fn ctx<'a>(samples: &'a [f32], sr: u32, ch: u16) -> AnalysisContext<'a> {
+        let frames = samples.len() / ch.max(1) as usize;
+        AnalysisContext {
+            audio: AudioBuffer::new(samples, sr, ch),
+            source_duration: StdDuration::from_secs_f64(frames as f64 / sr as f64),
+            file_stem: "",
+        }
+    }
+
+    /// Parse just a file stem (no audio needed).
+    fn parse(stem: &str) -> Filename {
+        Filename::analyze(&AnalysisContext {
+            audio: AudioBuffer::new(&[], 48_000, 1),
+            source_duration: StdDuration::ZERO,
+            file_stem: stem,
+        })
+    }
+
+    #[test]
+    fn silence_is_zero_everywhere() {
+        let s = vec![0.0f32; 1000];
+        let c = ctx(&s, 48_000, 1);
+        assert_eq!(Rms::analyze(&c).value, 0.0);
+        assert_eq!(Peak::analyze(&c).value, 0.0);
+        assert_eq!(Zcr::analyze(&c).value, 0.0);
+        // Silence floors to a finite, very low dBFS (not -inf).
+        assert!(Rms::analyze(&c).dbfs < -150.0 && Rms::analyze(&c).dbfs.is_finite());
+    }
+
+    #[test]
+    fn constant_half_is_the_known_rms_fixture() {
+        // A DC signal of 0.5 has RMS exactly 0.5 and peak 0.5; no sign changes.
+        let s = vec![0.5f32; 512];
+        let c = ctx(&s, 48_000, 1);
+        assert!((Rms::analyze(&c).value - 0.5).abs() < 1e-6);
+        assert!((Rms::analyze(&c).dbfs - (20.0 * 0.5_f32.log10())).abs() < 1e-4);
+        assert_eq!(Peak::analyze(&c).value, 0.5);
+        assert_eq!(Zcr::analyze(&c).value, 0.0);
+    }
+
+    #[test]
+    fn sine_has_expected_rms_peak_and_zcr() {
+        let sr = 48_000;
+        let freq = 1000.0;
+        let amp = 0.8;
+        let s = sine(freq, sr, amp, sr as usize); // 1 second
+        let c = ctx(&s, sr, 1);
+
+        // RMS of a sine is amp / sqrt(2).
+        let expected_rms = amp / std::f32::consts::SQRT_2;
+        assert!((Rms::analyze(&c).value - expected_rms).abs() < 1e-3);
+        // Peak ≈ amp.
+        assert!((Peak::analyze(&c).value - amp).abs() < 1e-3);
+        // ZCR ≈ 2·freq/sample_rate (two crossings per cycle).
+        let expected_zcr = 2.0 * freq / sr as f32;
+        assert!((Zcr::analyze(&c).value - expected_zcr).abs() < 1e-3);
+    }
+
+    #[test]
+    fn alternating_sign_is_full_zcr() {
+        let s: Vec<f32> = (0..256)
+            .map(|n| if n % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let c = ctx(&s, 48_000, 1);
+        assert!((Zcr::analyze(&c).value - 1.0).abs() < 1e-6);
+        assert_eq!(Peak::analyze(&c).value, 1.0);
+        assert!((Rms::analyze(&c).value - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zcr_is_per_channel_not_across_interleave() {
+        // Two channels, each a constant with no sign change within the channel:
+        // L = +1, R = -1 interleaved. A naive flat walk would see a crossing on
+        // every step; the per-channel computation must see none.
+        let s = vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0];
+        let c = ctx(&s, 48_000, 2);
+        assert_eq!(Zcr::analyze(&c).value, 0.0);
+    }
+
+    #[test]
+    fn duration_is_source_not_buffer() {
+        // The analyzer must report the *source* length even when the buffer is a
+        // short preview window of a much longer file (the truncated-decode case).
+        let s = vec![0.0f32; 4]; // tiny buffer
+        let long = StdDuration::from_secs(3600);
+        let c = AnalysisContext {
+            audio: AudioBuffer::new(&s, 48_000, 1),
+            source_duration: long,
+            file_stem: "",
+        };
+        assert_eq!(Duration::analyze(&c).value, long);
+        assert_eq!(run_all(&c).duration, long);
+    }
+
+    #[test]
+    fn amp_to_dbfs_floors_silence_finite() {
+        assert!(amp_to_dbfs(0.0) < -150.0 && amp_to_dbfs(0.0).is_finite());
+        assert!((amp_to_dbfs(1.0) - 0.0).abs() < 1e-4); // full scale = 0 dBFS
+        assert!((amp_to_dbfs(0.5) - (20.0 * 0.5_f32.log10())).abs() < 1e-4);
+    }
+
+    #[test]
+    fn version_is_readable() {
+        assert_eq!(Rms::VERSION, 1);
+        assert_eq!(Peak::VERSION, 1);
+        assert_eq!(Zcr::VERSION, 1);
+        assert_eq!(Duration::VERSION, 1);
+        assert_eq!(Filename::VERSION, 1);
+    }
+
+    #[test]
+    fn run_all_fills_the_whole_report() {
+        let s = sine(1000.0, 48_000, 0.8, 48_000);
+        let mut c = ctx(&s, 48_000, 1);
+        c.file_stem = "Kick_128";
+        let r = run_all(&c);
+        assert!((r.rms - 0.8 / std::f32::consts::SQRT_2).abs() < 1e-3);
+        assert!((r.peak - 0.8).abs() < 1e-3);
+        assert!((r.zcr - 2.0 * 1000.0 / 48_000.0).abs() < 1e-3);
+        assert!(r.rms_dbfs < 0.0 && r.rms_dbfs.is_finite());
+        assert!((r.duration.as_secs_f64() - 1.0).abs() < 1e-6); // 1s buffer
+        assert_eq!(r.instrument.as_deref(), Some("kick"));
+        assert_eq!(r.bpm, Some(128.0));
+    }
+
+    // --- Filename parser (each rule named; negatives are the point) ---
+
+    #[test]
+    fn instrument_alias_rule() {
+        assert_eq!(parse("Kick").instrument, Some("kick"));
+        assert_eq!(parse("vocal_loop").instrument, Some("vocal"));
+        assert_eq!(parse("hihat_closed").instrument, Some("hihat"));
+        assert_eq!(parse("Kick128").instrument, Some("kick")); // glued trailing digits
+        assert_eq!(parse("mysound").instrument, None);
+    }
+
+    #[test]
+    fn bpm_keyword_rule() {
+        assert_eq!(parse("loop_128bpm").bpm, Some(128.0)); // glued
+        assert_eq!(parse("loop_90_bpm").bpm, Some(90.0)); // adjacent
+                                                          // Keyword wins even when a decoy standalone is present.
+        assert_eq!(parse("vocal_150_128bpm").bpm, Some(128.0));
+    }
+
+    #[test]
+    fn bpm_standalone_rule_and_guards() {
+        assert_eq!(parse("Kick_128").bpm, Some(128.0));
+        assert_eq!(parse("Snare_04").bpm, None); // leading-zero index
+        assert_eq!(parse("808_Bass").bpm, None); // DrumMachineGuard
+        assert_eq!(parse("track_44100_24_128").bpm, Some(128.0)); // rate/bits out of range
+        assert_eq!(parse("loop_120_140").bpm, None); // ambiguous → None
+    }
+
+    #[test]
+    fn musical_and_camelot_key_rules() {
+        assert_eq!(parse("Lead_Am").key.as_deref(), Some("Amin"));
+        assert_eq!(parse("pad_Cmaj").key.as_deref(), Some("Cmaj"));
+        assert_eq!(parse("vox_F#min").key.as_deref(), Some("F#min"));
+        assert_eq!(parse("bass_Bb").key.as_deref(), Some("Bb"));
+        assert_eq!(parse("loop_9B").key.as_deref(), Some("9B")); // Camelot
+        assert_eq!(parse("take_C").key, None); // bare letter rejected
+        assert_eq!(parse("mysound").key, None);
+    }
+
+    #[test]
+    fn combined_facts() {
+        let f = parse("808_Bass_Cmin");
+        assert_eq!(f.instrument, Some("bass"));
+        assert_eq!(f.bpm, None); // 808 guarded
+        assert_eq!(f.key.as_deref(), Some("Cmin"));
+
+        let f = parse("vocal_loop_90bpm_F#min");
+        assert_eq!(f.instrument, Some("vocal"));
+        assert_eq!(f.bpm, Some(90.0));
+        assert_eq!(f.key.as_deref(), Some("F#min"));
+    }
+
+    #[test]
+    fn facts_round_trip() {
+        let r = AnalysisReport {
+            rms: 0.5,
+            rms_dbfs: -6.02,
+            peak: 0.9,
+            zcr: 0.1,
+            duration: StdDuration::from_secs_f64(3.482),
+            bpm: Some(128.0),
+            instrument: Some("kick".into()),
+            key: Some("F#min".into()),
+        };
+        let numeric: Vec<(String, f64)> = r
+            .numeric_facts()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let text: Vec<(String, String)> = r
+            .text_facts()
+            .into_iter()
+            .map(|(k, v)| (k.into(), v))
+            .collect();
+        assert_eq!(AnalysisReport::from_facts(&numeric, &text), r);
+
+        // Optionals absent from storage → None; always-present numeric defaults.
+        let partial = AnalysisReport::from_facts(&[("peak".to_string(), 0.7)], &[]);
+        assert_eq!(partial.peak, 0.7);
+        assert_eq!(partial.rms, 0.0);
+        assert_eq!(partial.duration, StdDuration::ZERO);
+        assert_eq!(partial.bpm, None);
+        assert_eq!(partial.instrument, None);
+        assert_eq!(partial.key, None);
+    }
+
+    #[test]
+    fn pipeline_version_is_stable_and_sensitive() {
+        // Deterministic across calls, and non-trivial (every analyzer folded in).
+        assert_eq!(pipeline_version(), pipeline_version());
+        assert_ne!(pipeline_version(), 0);
+        // Sanity: hand-fold the current PIPELINE and match.
+        let mut v: u32 = 0;
+        for (id, ver) in PIPELINE {
+            for b in id.bytes() {
+                v = v.wrapping_mul(31).wrapping_add(b as u32);
+            }
+            v = v.wrapping_mul(31).wrapping_add(*ver);
+        }
+        assert_eq!(pipeline_version(), v);
+    }
+}
