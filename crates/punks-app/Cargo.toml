@@ -1,0 +1,44 @@
+[package]
+name = "punks-app"
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+punks-audio = { path = "../punks-audio" }
+punks-library = { path = "../punks-library" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+rfd = "0.15"
+log = "0.4"
+
+# Keep GPUI crates pinned to one revision so they use a compatible API.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "8b1497dbd22fb06f5838a7c0b84a1e54fafa71bc", package = "gpui" }
+# Font and Linux window-system support are not enabled by default.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "8b1497dbd22fb06f5838a7c0b84a1e54fafa71bc", package = "gpui_platform", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
+# Use a fork whose GPUI dependencies point to the same pinned revision.
+gpui-component = { git = "https://github.com/samanshaiza004/gpui-component", rev = "4cf3cddc0609a220aed0323678fe5241fdbfd7d6", package = "gpui-component" }
+
+# GPUI's promoted-drag path covers external file drag-out on macOS and
+# Wayland. Windows and X11 use the two small private source bridges under
+# `src/platform`; neither is a general drag framework.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_Shell",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11 = { version = "2.21.0", features = ["xlib"] }
+

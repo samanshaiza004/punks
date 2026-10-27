@@ -1,0 +1,10 @@
+[package]
+name = "punks-library"
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+log = "0.4"

@@ -1,0 +1,10 @@
+[package]
+name = "punks-standalone"
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+punks-app = { path = "../crates/punks-app" }
+env_logger = "0.11"
+log = "0.4"
