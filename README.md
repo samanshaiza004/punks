@@ -32,11 +32,20 @@ SDL3 is installed outside Homebrew's default location. The build creates
 `target/debug/punks-package/Punks.app`. Add `--release` to build optimized
 artifacts.
 
-On Linux, install SDL3 development files and the system audio dependencies
-required by CPAL, then run `./tools/build.sh`. The Windows and Linux builds
-have not been validated in this development environment. This repository does
-not currently provide a Windows build script.
+On Windows x64, install a complete Odin distribution, Rust MSVC toolchain, and
+Visual Studio Build Tools with the x64 C++ workload and Windows SDK. Build with:
 
+    .\tools\build.ps1
+
+Add `-Release` to build optimized artifacts. The helper builds the Caliber DLL and
+Odin frontend, then stages a runnable folder at
+`target/windows-x86_64/debug` (or `release`). Keep `punks.exe`, `SDL3.dll`, and
+`punks_caliber.dll` together when running the application. Pass `-Odin` if the
+compiler is not available on PATH.
+
+On macOS, install SDL3 3.4.18 and use `./tools/build.sh`. On Linux, install SDL3
+development files and the system audio dependencies required by CPAL, then use
+tools/build.sh. Linux remains unvalidated in this development environment.
 ## Run
 
 Open the macOS app bundle, or launch the executable directly:

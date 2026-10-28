@@ -5,7 +5,8 @@ Audit date: 2026-10-27. Starting Punks commit: `8e03643`.
 ## Sources and baseline
 
 - Punks was inspected in this checkout. Its earlier cleanup removed the Rust
-  tests. The GPUI executable still depends on the domain code in `punks-app`.
+  tests. The legacy desktop executable still depended on the domain code in
+  `punks-app`.
 - Caliber was inspected at `4814a5161809f37d07f8456b81988013f038867a`.
   Its two crates passed all 27 tests using a temporary target directory.
 - Alicorn was inspected at `9062358a68f324dc3250d4c6420faf95c6fc568c`.
@@ -13,7 +14,7 @@ Audit date: 2026-10-27. Starting Punks commit: `8e03643`.
   with the installed Odin compiler and the existing AccessKit archive.
 - Development platform: macOS arm64, Rust 1.97.1, Odin
   `dev-2026-09-nightly:a2fb372`.
-- The original workspace test invocation could not resolve GPUI because Cargo
+- The original workspace test invocation could not resolve the desktop dependency because Cargo
   could not create its cached Zed checkout under the initial filesystem policy.
   An isolated copy of the unchanged library crate then failed compilation on
   the five undefined constants `SCHEMA_V2` through `SCHEMA_V6`.
@@ -39,14 +40,14 @@ and updates in separate statements, allowing competing connections to claim
 the same pending work.
 
 Most of `punks-app/src/lib.rs`, plus `command`, `config`, `filesystem` and
-`health`, is already independent of GPUI. The crate couples that code to GPUI
+`health`, is already independent of a desktop UI toolkit. The old shell coupled that code to its toolkit
 only through its module declarations and dependencies. Worker handles are
 mostly detached, asynchronous completion has no native wake path, directory
 and database operations run on the caller, and construction currently fails
 when no audio device is available. Those are the lifecycle changes needed for
 a frontend that can sleep when idle.
 
-GPUI composition, actions, theme, platform drag bridges, focus, selection
+Widget composition, actions, theme, platform drag bridges, focus, selection
 gestures and viewport geometry belong to presentation. They do not belong in
 the extracted core.
 
@@ -88,14 +89,13 @@ only while playback/loading is active; completed worker results supply wakes.
    workers explicit wake and shutdown ownership.
 3. Add the Punks Caliber adapter with bounded publications and contract tests.
 4. Build the native Odin window and validate an end-to-end vertical slice.
-5. Remove the obsolete GPUI implementation after that validation and update
+5. Remove the obsolete desktop implementation after that validation and update
    build instructions, architecture, protocol and validation records.
 
 ## Result
 
 The validated standalone frontend is now Alicorn/Odin. After the vertical slice
-passed native smoke checks, the old `punks-app` GPUI crate and Rust standalone
-shell were removed. The retained Rust domain code is in `punks-core`, which
+passed native smoke checks, the old `punks-app` crate and Rust standalone shell were removed. The retained Rust domain code is in `punks-core`, which
 depends on `punks-audio` and `punks-library` but no GUI toolkit. The adapter is
 `punks-caliber`; the Odin application and build script are in
 `punks-standalone/odin` and `tools/build.sh`. No changes were required in the

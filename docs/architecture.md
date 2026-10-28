@@ -22,8 +22,8 @@ waker, and host lifecycle.
 
 Punks Core is a headless Rust library. It owns filesystem navigation, search,
 selection, playback commands and state, configuration, and background work.
-It does not depend on GPUI, Alicorn, or window handles. The Caliber adapter
-translates versioned commands and publishes a compact state summary with a
+It does not depend on a GUI toolkit, Alicorn, or native window handles. The
+Caliber adapter translates versioned commands and publishes a compact state summary with a
 bounded entry window. It does not implement audio playback.
 
 `punks-audio` retains the existing decoders, resampling, preview cache,
@@ -64,6 +64,8 @@ joins the Odin-owned waiter, then destroys the Caliber context.
 
 ## Build and platform coverage
 
-The validated native build and frontend smoke runs were performed on macOS
-arm64. Windows and Linux have not been built in this environment. See the
-README for local prerequisites and commands.
+The macOS arm64 build and frontend smoke runs are validated. The Windows x64
+release executable also built and passed the no-audio end-to-end smoke on
+2026-10-28 using SDL 3.4.2 on D3D12 and the pinned MSVC toolchain. Linux
+remains unverified.
+See the README for local prerequisites and commands.

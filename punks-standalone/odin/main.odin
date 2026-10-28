@@ -18,7 +18,7 @@ App :: struct {
 	worker: ^thread.Thread,
 	waker: host.Application_Waker,
 	services: host.Application_Services,
-	search: alicorn.Text_Field_Buffer,
+	search: ui.Text_Buffer,
 	search_node: alicorn.Node_ID,
 	list_node: alicorn.Node_ID,
 	state: State,
@@ -272,7 +272,7 @@ dialog :: proc(data: rawptr, rt: ^alicorn.Runtime, result: ^host.File_Dialog_Res
 	app := cast(^App)data
 	if result.status == .Accepted && len(result.paths) > 0 {
 		send(app, Command{op="open", path=result.paths[0]})
-		_ = alicorn.text_field_buffer_set(&app.search, "")
+		_ = ui.text_buffer_set(&app.search, "")
 	}
 	if result.status == .Error {
 		app.error = "Folder dialog failed"
@@ -407,7 +407,7 @@ keys :: proc(data: rawptr, rt: ^alicorn.Runtime, key: host.Application_Key) -> b
 		open_folder(app)
 		return true
 	case .Escape:
-		_ = alicorn.text_field_buffer_set(&app.search, "")
+		_ = ui.text_buffer_set(&app.search, "")
 		send(app, Command{op="search"})
 		alicorn.invalidate_root(rt, "search cleared")
 		return true
@@ -429,7 +429,7 @@ build :: proc(
 	}
 	app.builds += 1
 
-	root := alicorn.container_begin(&ctx, .Root, label="punks", style=alicorn.layout_style(grow=1))
+	root := alicorn.container_begin(&ctx, .Root, label="punks", style=ui.layout_style(grow=1))
 	if ui.panel(
 		&ctx,
 		grow=1,
@@ -440,19 +440,19 @@ build :: proc(
 		label="punks-content",
 	) {
 		if ui.row(&ctx, height=40, gap=12, align=.Center, label="header") {
-			ui.text(&ctx, "Punks", size=26, style=alicorn.layout_style(width=120))
+			ui.text(&ctx, "Punks", size=26, style=ui.layout_style(width=120))
 			if ui.button(&ctx, "Open Folder", key="open-folder", width=130, height=36) {
 				open_folder(app)
 			}
-			ui.text(&ctx, "Search", style=alicorn.layout_style(width=55))
-			field := alicorn.text_field_controlled(
+			field := ui.text_field(
 				&ctx,
+				"Search",
 				&app.search,
 				key="search",
-				style=alicorn.layout_style(grow=1, height=36),
+				style=ui.layout_style(grow=1, height=36),
 			)
 			app.search_node = field.node
-			_ = alicorn.semantic_description(&ctx, .Text_Field, "Search filenames")
+
 			if field.changed {
 				app.pending_search = true
 				_ = host.application_schedule_after(app.services.scheduler, .Frequent, 150_000_000)
@@ -471,62 +471,64 @@ build :: proc(
 			ui.text(
 				&ctx,
 				app.state.directory if len(app.state.directory) > 0 else "Open a folder to begin",
-				style=alicorn.layout_style(grow=1),
+				style=ui.layout_style(grow=1),
 			)
 		}
 
-		list := alicorn.virtual_list_begin(
+		list_first, list_last := 0, 0
+		if list, opened := ui.virtual_list(
 			&ctx,
 			app.state.total,
 			ROW_HEIGHT,
 			key="audio-list",
-			style=alicorn.layout_style(grow=1, clip=true),
+			grow=1,
 			label="Audio files",
 			focusable=true,
-		)
-		app.list_node = list.scroll.id
-		for position := list.first; position < list.last; position += 1 {
-			local := position - app.window.offset
-			if local >= 0 &&
-				local < len(app.window.entries) &&
-				app.window.listing_revision == app.state.listing_revision {
-				row := app.window.entries[local]
-				label := fmt.tprintf("%s%s", "▸  " if row.directory else "", row.name)
-				if ui.button(
-					&ctx,
-					label,
-					key=alicorn.key_string(row.id),
-					height=ROW_HEIGHT,
-					width=-1,
-					state=alicorn.Button_State{selected=i64(position) == app.state.selected_index},
-				) {
-					op := "enter" if row.directory else "select"
-					send(
-						app,
-						Command{
-							op=op,
-							id=row.id,
-							index=row.index,
-							listing_revision=app.state.listing_revision,
-							audition=true,
-						},
+		); opened {
+			app.list_node = list.scroll.id
+			list_first, list_last = list.first, list.last
+			for position := list.first; position < list.last; position += 1 {
+				local := position - app.window.offset
+				if local >= 0 &&
+					local < len(app.window.entries) &&
+					app.window.listing_revision == app.state.listing_revision {
+					row := app.window.entries[local]
+					label := fmt.tprintf("%s%s", "▸  " if row.directory else "", row.name)
+					if ui.button(
+						&ctx,
+						label,
+						key=row.id,
+						height=ROW_HEIGHT,
+						width=-1,
+						state=ui.Button_State{selected=i64(position) == app.state.selected_index},
+					) {
+						op := "enter" if row.directory else "select"
+						send(
+							app,
+							Command{
+								op=op,
+								id=row.id,
+								index=row.index,
+								listing_revision=app.state.listing_revision,
+								audition=true,
+							},
+						)
+					}
+				} else {
+					ui.text(
+						&ctx,
+						"Loading…",
+						key=ui.key_u64(u64(position)),
+						style=ui.layout_style(height=ROW_HEIGHT),
 					)
 				}
-			} else {
-				ui.text(
-					&ctx,
-					"Loading…",
-					key=alicorn.key_u64(u64(position)),
-					style=alicorn.layout_style(height=ROW_HEIGHT),
-				)
 			}
 		}
-		alicorn.virtual_list_end(&ctx, list)
 
-		outside_window := list.first < app.window.offset ||
-			list.last > app.window.offset+len(app.window.entries)
-		if app.state.ready && list.last > list.first && outside_window {
-			offset := max(0, list.first-8)
+		outside_window := list_first < app.window.offset ||
+			list_last > app.window.offset+len(app.window.entries)
+		if app.state.ready && list_last > list_first && outside_window {
+			offset := max(0, list_first-8)
 			if app.requested_revision != app.state.listing_revision || app.requested_offset != offset {
 				send(
 					app,
@@ -554,7 +556,7 @@ build :: proc(
 					key="play-stop",
 					width=90,
 					height=32,
-					state=alicorn.Button_State{disabled=disabled},
+					state=ui.Button_State{disabled=disabled},
 				) {
 					playback_op := "play" if !playing else "stop"
 					send(app, Command{op=playback_op})
@@ -570,18 +572,17 @@ build :: proc(
 				)
 			}
 			if app.state.playback.duration > 0 {
-				seek := alicorn.slider_f32(
+				seek_position := f32(app.state.playback.position)
+				if ui.slider_f32(
 					&ctx,
 					"Position",
-					f32(app.state.playback.position),
+					&seek_position,
 					0,
 					f32(app.state.playback.duration),
-					0,
 					key="seek",
-					style=alicorn.layout_style(height=40),
-				)
-				if seek.changed {
-					send(app, Command{op="seek", seconds=f64(seek.value)})
+					style=ui.layout_style(height=40),
+				) {
+					send(app, Command{op="seek", seconds=f64(seek_position)})
 				}
 			}
 		}
@@ -605,7 +606,7 @@ build :: proc(
 		if len(app.error) > 0 {
 			message = app.error
 		}
-		ui.text(&ctx, message, style=alicorn.layout_style(height=26))
+		ui.text(&ctx, message, style=ui.layout_style(height=26))
 	}
 	alicorn.container_end(&ctx)
 	alicorn.end_frame(&ctx)
@@ -630,8 +631,8 @@ main :: proc() {
 		}
 	}
 
-	app.search, _ = alicorn.text_field_buffer_init("", context.allocator)
-	defer alicorn.text_field_buffer_destroy(&app.search)
+	app.search, _ = ui.text_buffer("", context.allocator)
+	defer ui.text_buffer_destroy(&app.search)
 	for index in 0..<2 {
 		_ = arena.arena_init_growing(&app.state_memory[index])
 		_ = arena.arena_init_growing(&app.entry_memory[index])
