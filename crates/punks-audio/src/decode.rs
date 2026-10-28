@@ -1139,6 +1139,13 @@ pub fn compute_source_peaks(
     path: &Path,
     num_buckets: usize,
 ) -> Result<WaveformPeaks, PlaybackError> {
+    compute_source_peaks_cancellable(path, num_buckets, || false)
+}
+pub fn compute_source_peaks_cancellable(
+    path: &Path,
+    num_buckets: usize,
+    cancelled: impl Fn() -> bool,
+) -> Result<WaveformPeaks, PlaybackError> {
     let num_buckets = num_buckets.max(1);
     let prefix = read_header_prefix(path, HEADER_PREFIX_MAX)?;
     let (mss, hint, sfo) = full_source_stream(path, &prefix)?;
@@ -1159,6 +1166,11 @@ pub fn compute_source_peaks(
     let mut frame_idx: u64 = 0;
 
     loop {
+        if cancelled() {
+            return Err(PlaybackError::DecodeError(
+                "waveform computation cancelled".into(),
+            ));
+        }
         let packet = match probed.format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(ref e))
@@ -1219,4 +1231,439 @@ pub fn compute_source_peaks(
         })
         .collect();
     Ok(WaveformPeaks { peaks, num_buckets })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal RIFF/WAVE with the given fmt tag and data-chunk body.
+    fn wav(fmt_tag: u16, data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&fmt_tag.to_le_bytes());
+        v.extend_from_slice(&[0u8; 14]);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(data);
+        v
+    }
+
+    /// A 16-bit PCM fmt chunk body (16 bytes).
+    fn pcm_fmt(channels: u16, sample_rate: u32) -> Vec<u8> {
+        let bits = 16u16;
+        let block_align = channels * bits / 8;
+        let byte_rate = sample_rate * block_align as u32;
+        let mut f = Vec::new();
+        f.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        f.extend_from_slice(&channels.to_le_bytes());
+        f.extend_from_slice(&sample_rate.to_le_bytes());
+        f.extend_from_slice(&byte_rate.to_le_bytes());
+        f.extend_from_slice(&block_align.to_le_bytes());
+        f.extend_from_slice(&bits.to_le_bytes());
+        f
+    }
+
+    /// A full 16-bit PCM WAV with `frames` mono samples of value 0.
+    fn pcm_wav(sample_rate: u32, frames: usize) -> Vec<u8> {
+        let fmt = pcm_fmt(1, sample_rate);
+        let data = vec![0u8; frames * 2];
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&((4 + 8 + fmt.len() + 8 + data.len()) as u32).to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        v.extend_from_slice(&fmt);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(&data);
+        v
+    }
+
+    /// A bext chunk body with the standard fixed layout.
+    fn bext_body(desc: &str, originator: &str, time_ref: u64) -> Vec<u8> {
+        let mut b = vec![0u8; 602];
+        b[..desc.len()].copy_from_slice(desc.as_bytes());
+        b[256..256 + originator.len()].copy_from_slice(originator.as_bytes());
+        b[320..330].copy_from_slice(b"2026-06-22");
+        b[330..338].copy_from_slice(b"14:30:00");
+        b[338..346].copy_from_slice(&time_ref.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn extracts_inner_ogg_stream() {
+        let ogg = b"OggS\x00\x02 fake vorbis bitstream";
+        let file = wav(WAVE_FORMAT_OGG_VORBIS, ogg);
+        assert_eq!(extract_ogg_in_wav(&file).as_deref(), Some(&ogg[..]));
+    }
+
+    #[test]
+    fn ignores_normal_pcm_wav() {
+        let file = wav(0x0001, b"\x00\x01\x02\x03");
+        assert_eq!(extract_ogg_in_wav(&file), None);
+    }
+
+    #[test]
+    fn ignores_ogg_tag_without_ogg_magic() {
+        let file = wav(WAVE_FORMAT_OGG_VORBIS, b"not ogg data");
+        assert_eq!(extract_ogg_in_wav(&file), None);
+    }
+
+    #[test]
+    fn ignores_non_riff() {
+        assert_eq!(extract_ogg_in_wav(b"OggS at the very start, no RIFF"), None);
+    }
+
+    #[test]
+    fn parse_bext_reads_fields_and_trims_nuls() {
+        let m = parse_bext(&bext_body("Scene 5 Take 2", "ZOOM F8", 48_000 * 3600));
+        assert_eq!(m.description.as_deref(), Some("Scene 5 Take 2"));
+        assert_eq!(m.originator.as_deref(), Some("ZOOM F8"));
+        assert_eq!(m.origination_date.as_deref(), Some("2026-06-22"));
+        assert_eq!(m.origination_time.as_deref(), Some("14:30:00"));
+        assert_eq!(m.time_reference, Some(48_000 * 3600));
+    }
+
+    #[test]
+    fn parse_riff_metadata_finds_bext() {
+        // RIFF/WAVE with fmt + bext + data.
+        let fmt = pcm_fmt(2, 48_000);
+        let bext = bext_body("Boom mic", "Sound Devices", 0);
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        v.extend_from_slice(&fmt);
+        v.extend_from_slice(b"bext");
+        v.extend_from_slice(&(bext.len() as u32).to_le_bytes());
+        v.extend_from_slice(&bext);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&4u32.to_le_bytes());
+        v.extend_from_slice(&[0u8; 4]);
+
+        let m = parse_riff_metadata(&v);
+        assert_eq!(m.description.as_deref(), Some("Boom mic"));
+        assert_eq!(m.originator.as_deref(), Some("Sound Devices"));
+    }
+
+    #[test]
+    fn parse_riff_metadata_empty_without_bext() {
+        assert_eq!(
+            parse_riff_metadata(&pcm_wav(48_000, 4)),
+            AudioMetadata::default()
+        );
+    }
+
+    #[test]
+    fn preview_budget_thresholds() {
+        let thr = Duration::from_secs(120);
+        let win = Duration::from_secs(120);
+        // 130 s at 48k -> preview of 120 s.
+        assert_eq!(
+            preview_budget_frames(48_000 * 130, 48_000, thr, win),
+            Some(48_000 * 120)
+        );
+        // 60 s -> decode whole.
+        assert_eq!(preview_budget_frames(48_000 * 60, 48_000, thr, win), None);
+        // Unknown length / rate -> no budget.
+        assert_eq!(preview_budget_frames(0, 48_000, thr, win), None);
+        assert_eq!(preview_budget_frames(48_000, 0, thr, win), None);
+    }
+
+    #[test]
+    fn decode_truncates_long_stream() {
+        // 1 s mono @ 8 kHz, but decode with a 100 ms threshold / 200 ms window.
+        let bytes = pcm_wav(8_000, 8_000);
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension("wav");
+        let out = decode_from_stream(
+            mss,
+            &hint,
+            AudioMetadata::default(),
+            None,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .expect("decode");
+
+        assert!(out.truncated);
+        let frames = out.interleaved.len() / out.channels as usize;
+        // ~200 ms @ 8k = 1600 frames, within a packet of slop.
+        assert!((1600..8_000).contains(&frames), "frames = {frames}");
+        // True duration reflects the whole 1 s source.
+        assert!((out.source_duration.as_secs_f64() - 1.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn decode_rf64_end_to_end() {
+        // Build a tiny RF64: RF64 + ds64 + fmt (PCM mono 8k) + data (4 frames).
+        let frames: [i16; 4] = [0, 1000, -1000, 500];
+        let mut data = Vec::new();
+        for s in frames {
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+        let fmt = pcm_fmt(1, 8_000);
+
+        let mut ds64 = Vec::new();
+        ds64.extend_from_slice(&0u64.to_le_bytes()); // riffSize (unused here)
+        ds64.extend_from_slice(&(data.len() as u64).to_le_bytes()); // dataSize
+        ds64.extend_from_slice(&(frames.len() as u64).to_le_bytes()); // sampleCount
+        ds64.extend_from_slice(&0u32.to_le_bytes()); // table length
+
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RF64");
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"ds64");
+        v.extend_from_slice(&(ds64.len() as u32).to_le_bytes());
+        v.extend_from_slice(&ds64);
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        v.extend_from_slice(&fmt);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // RF64 data sentinel
+        v.extend_from_slice(&data);
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("punks_rf64_{}.wav", std::process::id()));
+        std::fs::write(&path, &v).expect("write temp rf64");
+        let out = decode_file(&path);
+        let _ = std::fs::remove_file(&path);
+        let out = out.expect("decode rf64");
+
+        assert_eq!(out.channels, 1);
+        assert_eq!(out.sample_rate, 8_000);
+        assert_eq!(out.interleaved.len(), frames.len());
+        assert!(!out.truncated);
+    }
+
+    /// Write bytes to a unique temp file; caller removes it.
+    fn temp_wav(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "punks_{tag}_{}_{}.wav",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn compute_source_peaks_bucket_count() {
+        // 1 s mono @ 8 kHz of silence.
+        let path = temp_wav("peaks", &pcm_wav(8_000, 8_000));
+        let peaks = compute_source_peaks(&path, 64);
+        let _ = std::fs::remove_file(&path);
+        let peaks = peaks.expect("peaks");
+        assert_eq!(peaks.num_buckets, 64);
+        assert_eq!(peaks.peaks.len(), 64);
+        // Silence -> every bucket flat at zero.
+        assert!(peaks.peaks.iter().all(|&(lo, hi)| lo == 0.0 && hi == 0.0));
+    }
+
+    #[test]
+    fn decode_window_lands_near_offset() {
+        // 1 s mono @ 8 kHz; grab a 200 ms window starting at 500 ms.
+        let path = temp_wav("window", &pcm_wav(8_000, 8_000));
+        let out = decode_window(
+            &path,
+            Duration::from_millis(500),
+            Duration::from_millis(200),
+        );
+        let _ = std::fs::remove_file(&path);
+        let out = out.expect("window");
+
+        // Seeks snap to a PCM packet boundary at or just before the request
+        // (symphonia's 1152-frame packets = 144 ms at this 8 kHz test rate;
+        // ~24 ms at 48 kHz), so 0.5 s lands at 0.432 s.
+        let ws = out.window_start.as_secs_f64();
+        assert!((0.35..=0.5).contains(&ws), "window_start = {ws}");
+        // True source length is still the whole 1 s.
+        assert!((out.source_duration.as_secs_f64() - 1.0).abs() < 0.02);
+        // At least the requested ~1600 frames, rounded up to a packet boundary.
+        let frames = out.interleaved.len() / out.channels as usize;
+        assert!((1600..3000).contains(&frames), "frames = {frames}");
+        assert!(out.truncated);
+    }
+
+    /// A full RIFF/WAVE: `fmt ` + any extra chunks (e.g. `bext`, `cue `) + `data`,
+    /// with the RIFF size header patched to match.
+    fn build_wav(fmt: &[u8], extra_chunks: &[(&[u8; 4], &[u8])], data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&0u32.to_le_bytes()); // patched below
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        v.extend_from_slice(fmt);
+        if fmt.len() % 2 == 1 {
+            v.push(0);
+        }
+        for (id, body) in extra_chunks {
+            v.extend_from_slice(*id);
+            v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            v.extend_from_slice(body);
+            if body.len() % 2 == 1 {
+                v.push(0);
+            }
+        }
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            v.push(0);
+        }
+        let total = (v.len() - 8) as u32;
+        v[4..8].copy_from_slice(&total.to_le_bytes());
+        v
+    }
+
+    /// The `data` chunk's payload bytes, by walking chunks like the reader does.
+    fn data_bytes(raw: &[u8]) -> &[u8] {
+        let mut pos = 12;
+        loop {
+            let id = &raw[pos..pos + 4];
+            let size = u32::from_le_bytes(raw[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            let body = pos + 8;
+            if id == b"data" {
+                return &raw[body..body + size];
+            }
+            pos = body + size + (size & 1);
+        }
+    }
+
+    #[test]
+    fn write_description_inserts_bext_when_absent() {
+        let data = vec![7u8; 200];
+        let raw = build_wav(&pcm_fmt(1, 8_000), &[], &data);
+        let path = temp_wav("bext_insert", &raw);
+
+        write_bext_description(&path, "Footsteps, gravel, take 3").unwrap();
+
+        let out = decode_file(&path).expect("decode after write");
+        assert_eq!(
+            out.metadata.description.as_deref(),
+            Some("Footsteps, gravel, take 3")
+        );
+        let rewritten = std::fs::read(&path).unwrap();
+        assert_eq!(data_bytes(&rewritten), &data[..]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_description_replaces_and_preserves_other_fields_and_chunks() {
+        let data = vec![9u8; 500];
+        let bext = bext_body("Old description", "Studio A", 123_456_789);
+        let cue: &[u8] = b"CUE-CHUNK-PAYLOAD-not-touched";
+        let raw = build_wav(
+            &pcm_fmt(2, 44_100),
+            &[(b"bext", &bext), (b"cue ", cue)],
+            &data,
+        );
+        let path = temp_wav("bext_replace", &raw);
+
+        write_bext_description(&path, "New description").unwrap();
+
+        let out = decode_file(&path).expect("decode after write");
+        assert_eq!(out.metadata.description.as_deref(), Some("New description"));
+        // Fields the write must not disturb.
+        assert_eq!(out.metadata.originator.as_deref(), Some("Studio A"));
+        assert_eq!(out.metadata.time_reference, Some(123_456_789));
+
+        let rewritten = std::fs::read(&path).unwrap();
+        // The unrelated `cue ` chunk and the audio data are untouched.
+        let cue_pos = rewritten
+            .windows(cue.len())
+            .position(|w| w == cue)
+            .expect("cue payload preserved verbatim");
+        assert!(cue_pos > 0);
+        assert_eq!(data_bytes(&rewritten), &data[..]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_description_truncates_long_unicode_safely() {
+        // A multi-byte character (3 bytes each) repeated past the 255-byte
+        // budget; truncation must land on a char boundary and stay valid UTF-8.
+        let long = "\u{2603}".repeat(120); // 360 bytes
+        let raw = build_wav(&pcm_fmt(1, 8_000), &[], &[0u8; 10]);
+        let path = temp_wav("bext_truncate", &raw);
+
+        write_bext_description(&path, &long).unwrap();
+
+        let out = decode_file(&path).expect("decode after write");
+        let desc = out.metadata.description.expect("description present");
+        assert!(desc.len() <= 255);
+        assert!(long.starts_with(&desc));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cannot_write_bext_for_rf64() {
+        let fmt = pcm_fmt(1, 8_000);
+        let data = vec![0u8; 16];
+        let mut ds64 = Vec::new();
+        ds64.extend_from_slice(&0u64.to_le_bytes()); // riff size (unused by us)
+        ds64.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        ds64.extend_from_slice(&0u64.to_le_bytes()); // sample count
+        ds64.extend_from_slice(&0u32.to_le_bytes()); // table length
+
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RF64");
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"ds64");
+        v.extend_from_slice(&(ds64.len() as u32).to_le_bytes());
+        v.extend_from_slice(&ds64);
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        v.extend_from_slice(&fmt);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        v.extend_from_slice(&data);
+        let path = temp_wav("bext_rf64", &v);
+
+        assert!(!can_write_bext(&path));
+        assert!(write_bext_description(&path, "nope").is_err());
+        // Refusing to write must never touch the original file.
+        assert_eq!(std::fs::read(&path).unwrap(), v);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_atomically_leaves_original_untouched_on_error() {
+        let original = b"the original bytes".to_vec();
+        let path = temp_wav("atomic_err", &original);
+
+        // A closure that writes a partial temp then fails must roll back cleanly:
+        // original intact, no temp left behind.
+        let result = write_atomically(&path, |tmp| {
+            std::fs::write(tmp, b"half-written garbage").unwrap();
+            Err(PlaybackError::DecodeError("boom".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        // The sibling temp for *this* file must be gone (exact name, so parallel
+        // tests writing their own temps can't make this flaky).
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        let tmp = path
+            .parent()
+            .unwrap()
+            .join(format!(".{stem}.punks-tmp.wav"));
+        assert!(!tmp.exists(), "temp file leaked: {tmp:?}");
+        let _ = std::fs::remove_file(&path);
+    }
 }

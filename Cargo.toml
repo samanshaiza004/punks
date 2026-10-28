@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/punks-audio",
     "crates/punks-library",
-    "crates/punks-app",
-    "punks-standalone",
+    "crates/punks-core",
+    "crates/punks-caliber",
 ]
+exclude = ["punks-standalone", "vendor/caliber", "vendor/alicorn"]

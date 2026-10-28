@@ -49,3 +49,46 @@ pub fn compute_peaks(samples: &[f32], channels: usize, num_buckets: usize) -> Wa
 
     WaveformPeaks { peaks, num_buckets }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_samples_returns_zeroed_peaks() {
+        let peaks = compute_peaks(&[], 1, 8);
+        assert_eq!(peaks.num_buckets, 8);
+        assert!(peaks.peaks.iter().all(|&(lo, hi)| lo == 0.0 && hi == 0.0));
+    }
+
+    #[test]
+    fn mono_sine_has_expected_range() {
+        let n = 1024;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (i as f32 / n as f32 * std::f32::consts::TAU).sin())
+            .collect();
+        let peaks = compute_peaks(&samples, 1, 16);
+        assert_eq!(peaks.peaks.len(), 16);
+        let global_min = peaks.peaks.iter().map(|p| p.0).fold(f32::MAX, f32::min);
+        let global_max = peaks.peaks.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+        assert!(global_min < -0.9);
+        assert!(global_max > 0.9);
+    }
+
+    #[test]
+    fn stereo_averages_channels() {
+        let samples = vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+        let peaks = compute_peaks(&samples, 2, 2);
+        for &(lo, hi) in &peaks.peaks {
+            assert!((lo - 0.0).abs() < 1e-6);
+            assert!((hi - 0.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn hot_samples_are_clamped() {
+        let samples = vec![2.0f32, -3.0, 0.5, 0.5];
+        let peaks = compute_peaks(&samples, 1, 2);
+        assert_eq!(peaks.peaks[0], (-1.0, 1.0));
+    }
+}

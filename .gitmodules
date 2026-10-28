@@ -1,0 +1,6 @@
+[submodule "vendor/caliber"]
+	path = vendor/caliber
+	url = https://github.com/samanshaiza004/caliber.git
+[submodule "vendor/alicorn"]
+	path = vendor/alicorn
+	url = https://github.com/samanshaiza004/alicorn.git
