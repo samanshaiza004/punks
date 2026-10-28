@@ -2,6 +2,7 @@ use caliber_ffi::*;
 use punks_core::{FileEntry, PlaybackStatus, PunksConfig, SampleBrowser};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
     sync::{Arc, Condvar, Mutex},
@@ -278,6 +279,12 @@ struct Command {
     audition: bool,
     #[serde(default)]
     request_id: u64,
+    #[serde(default)]
+    tab_id: u64,
+    #[serde(default)]
+    tab_target_id: u64,
+    #[serde(default)]
+    after: bool,
 }
 #[derive(Clone, Copy, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Resource {
@@ -296,6 +303,14 @@ pub struct Entry {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EntryWindow {
+    pub v: u32,
+    pub listing_revision: u64,
+    pub offset: usize,
+    pub total: usize,
+    pub entries: Vec<Entry>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FolderWindow {
     pub v: u32,
     pub listing_revision: u64,
     pub offset: usize,
@@ -333,6 +348,29 @@ fn encode_window(
         }
     }
 }
+fn encode_folder_window(
+    revision: u64,
+    offset: usize,
+    total: usize,
+    rows: &mut Vec<Entry>,
+) -> Result<Vec<u8>, CaliberStatus> {
+    loop {
+        let bytes = serde_json::to_vec(&EntryWindowBytes {
+            v: PROTOCOL,
+            listing_revision: revision,
+            offset,
+            total,
+            entries: rows,
+        })
+        .map_err(|_| CaliberStatus::Internal)?;
+        if bytes.len() <= MAX_RESOURCE {
+            return Ok(bytes);
+        }
+        if rows.pop().is_none() {
+            return Err(CaliberStatus::LimitExceeded);
+        }
+    }
+}
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Playback {
     pub status: String,
@@ -345,6 +383,7 @@ pub struct State {
     pub v: u32,
     pub ready: bool,
     pub directory: String,
+    pub can_navigate_up: bool,
     pub query: String,
     pub searching: bool,
     pub listing_revision: u64,
@@ -352,6 +391,12 @@ pub struct State {
     pub offset: usize,
     pub count: usize,
     pub entries: Resource,
+    pub folders: Resource,
+    pub folder_count: usize,
+    pub folder_offset: usize,
+    pub breadcrumbs: Vec<String>,
+    pub tabs: Vec<TabView>,
+    pub active_tab: u64,
     pub selected_index: i64,
     pub selected: Entry,
     pub playback: Playback,
@@ -363,6 +408,15 @@ pub struct State {
     pub scan_total: usize,
     pub command_sequence: u64,
     pub last_request_id: u64,
+    pub waveform_file: String,
+    pub waveform_start: f64,
+    pub waveform_duration: f64,
+    pub waveform_peaks: Vec<[i16; 2]>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TabView {
+    pub id: u64,
+    pub title: String,
 }
 fn text(s: &str, max: usize) -> String {
     let mut n = s.len().min(max);
@@ -409,11 +463,38 @@ struct Publication {
     sequence: u64,
     request: u64,
     error: String,
+    folder_window_key: String,
+    folder_offset: usize,
+    folder_resource: Resource,
+    folder_count: usize,
+    tab_ids: Vec<u64>,
+    tab_offsets: HashMap<u64, usize>,
+    next_tab_id: u64,
+    active_tab_id: u64,
 }
 impl Publication {
-    fn key(b: &SampleBrowser) -> String {
+    fn active_tab(&self, b: &SampleBrowser) -> u64 {
+        self.tab_ids.get(b.active_tab()).copied().unwrap_or(0)
+    }
+    fn sync_tabs(&mut self, b: &SampleBrowser) {
+        if self.next_tab_id == 0 {
+            self.next_tab_id = 1;
+        }
+        while self.tab_ids.len() < b.tab_count() {
+            let id = self.next_tab_id;
+            self.next_tab_id = self.next_tab_id.wrapping_add(1).max(1);
+            self.tab_ids.push(id);
+        }
+        while self.tab_ids.len() > b.tab_count() {
+            if let Some(id) = self.tab_ids.pop() {
+                self.tab_offsets.remove(&id);
+            }
+        }
+    }
+    fn key(&self, b: &SampleBrowser) -> String {
         format!(
-            "{:?}:{}:{}:{}:{}:{}",
+            "{}:{:?}:{}:{}:{}:{}:{}",
+            self.active_tab(b),
             b.current_directory(),
             b.browse_revision(),
             b.search_revision(),
@@ -423,11 +504,19 @@ impl Publication {
         )
     }
     fn refresh(&mut self, b: &SampleBrowser) {
-        let key = Self::key(b);
+        self.sync_tabs(b);
+        let active_tab = self.active_tab(b);
+        let key = self.key(b);
         if key != self.key {
+            if active_tab != self.active_tab_id {
+                self.offset = self.tab_offsets.get(&active_tab).copied().unwrap_or(0);
+            } else {
+                self.offset = 0;
+            }
+            self.folder_offset = 0;
+            self.active_tab_id = active_tab;
             self.key = key;
             self.epoch = self.epoch.wrapping_add(1);
-            self.offset = 0;
             self.last.clear();
         }
     }
@@ -435,6 +524,7 @@ impl Publication {
         self.refresh(b);
         let data = entries(b);
         self.offset = self.offset.min(data.len().saturating_sub(1));
+        self.tab_offsets.insert(self.active_tab(b), self.offset);
         let window_key = format!("{}:{}", self.epoch, self.offset);
         // The resource is replaced only when the listing or requested window changes.
         let needs_resource = self.resource.id == 0 || self.old_window_key() != window_key;
@@ -450,6 +540,32 @@ impl Publication {
             let bytes = encode_window(self.epoch, self.offset, data.len(), &mut rows)?;
             self.count = rows.len();
             fresh = Some(t.resource(&bytes)?);
+        }
+        // The sidebar remains a navigation surface while a recursive search
+        // is active, so derive child folders from the underlying directory
+        // listing rather than the current search projection.
+        let all_folders = b
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.is_directory)
+            .collect::<Vec<_>>();
+        self.folder_count = all_folders.len();
+        self.folder_offset = self.folder_offset.min(self.folder_count.saturating_sub(1));
+        let folder_window_key = format!("{}:{}", self.epoch, self.folder_offset);
+        let needs_folder_resource =
+            self.folder_resource.id == 0 || self.folder_window_key != folder_window_key;
+        let mut fresh_folders = None;
+        if needs_folder_resource {
+            let mut rows = all_folders
+                .iter()
+                .skip(self.folder_offset)
+                .take(WINDOW)
+                .map(|(index, item)| entry(b, item, *index))
+                .collect::<Vec<_>>();
+            let bytes =
+                encode_folder_window(self.epoch, self.folder_offset, self.folder_count, &mut rows)?;
+            fresh_folders = Some(t.resource(&bytes)?);
         }
         let mut playback = Playback {
             status: "idle".into(),
@@ -482,6 +598,33 @@ impl Publication {
         let current = sel
             .and_then(|i| data.get(i).map(|e| entry(b, e, i)))
             .unwrap_or_default();
+        let active_tab = self.active_tab(b);
+        let tabs = self
+            .tab_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| TabView {
+                id: *id,
+                title: text(&b.tab_title(index), 128),
+            })
+            .collect();
+        let waveform_peaks = b
+            .waveform_peaks()
+            .map(|peaks| {
+                peaks
+                    .peaks
+                    .iter()
+                    .take(512)
+                    .map(|(low, high)| {
+                        [
+                            (low.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16,
+                            (high.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16,
+                        ]
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (waveform_start, waveform_duration) = b.waveform_axis().unwrap_or((0.0, 0.0));
         let progress = b.scan_progress();
         let state = State {
             v: PROTOCOL,
@@ -490,6 +633,7 @@ impl Publication {
                 .current_directory()
                 .map(|p| text(&p.to_string_lossy(), 4096))
                 .unwrap_or_default(),
+            can_navigate_up: b.can_navigate_up(),
             query: text(b.search_query(), 1024),
             searching: b.is_searching(),
             listing_revision: self.epoch,
@@ -497,6 +641,12 @@ impl Publication {
             offset: self.offset,
             count: self.count,
             entries: fresh.unwrap_or(self.resource),
+            folders: fresh_folders.unwrap_or(self.folder_resource),
+            folder_count: self.folder_count,
+            folder_offset: self.folder_offset,
+            breadcrumbs: b.breadcrumbs().into_iter().map(|s| text(&s, 128)).collect(),
+            tabs,
+            active_tab,
             selected_index: sel.map(|i| i as i64).unwrap_or(-1),
             selected: current,
             playback,
@@ -515,11 +665,21 @@ impl Publication {
             scan_total: progress.map(|p| p.1).unwrap_or(0),
             command_sequence: self.sequence,
             last_request_id: self.request,
+            waveform_file: b
+                .current_file()
+                .map(|path| text(&path.to_string_lossy(), 4096))
+                .unwrap_or_default(),
+            waveform_start,
+            waveform_duration,
+            waveform_peaks,
         };
         let bytes = serde_json::to_vec(&state).map_err(|_| CaliberStatus::Internal)?;
         if bytes != self.last {
             if let Err(e) = t.state(&bytes) {
                 if let Some(r) = fresh {
+                    t.retire(r);
+                }
+                if let Some(r) = fresh_folders {
                     t.retire(r);
                 }
                 return Err(e);
@@ -532,9 +692,16 @@ impl Publication {
             }
             self.resource = r;
             self.window_key = window_key;
-            while self.old.len() > 2 {
-                t.retire(self.old.remove(0));
+        }
+        if let Some(r) = fresh_folders {
+            if self.folder_resource.id != 0 {
+                self.old.push(self.folder_resource);
             }
+            self.folder_resource = r;
+            self.folder_window_key = folder_window_key;
+        }
+        while self.old.len() > 4 {
+            t.retire(self.old.remove(0));
         }
         Ok(())
     }
@@ -550,6 +717,13 @@ impl Publication {
             return Err("Command field exceeds protocol limit".into());
         }
         self.refresh(b);
+        let tab_management = matches!(
+            c.op.as_str(),
+            "tab_new" | "tab_close" | "tab_switch" | "tab_reorder"
+        );
+        if !tab_management && c.tab_id != 0 && c.tab_id != self.active_tab(b) {
+            return Err("Command belongs to an inactive tab".into());
+        }
         match c.op.as_str() {
             "open" => {
                 let path = Path::new(&c.path)
@@ -559,6 +733,26 @@ impl Publication {
             }
             "up" => {
                 b.navigate_up().map_err(|e| e.to_string())?;
+            }
+            "breadcrumb" => {
+                b.navigate_to_breadcrumb(c.index)
+                    .map_err(|e| e.to_string())?;
+            }
+            "enter_folder" => {
+                if c.listing_revision != self.epoch {
+                    return Err(format!(
+                        "Stale folder listing revision {} (current {})",
+                        c.listing_revision, self.epoch
+                    ));
+                }
+                let item = b
+                    .entries()
+                    .get(c.index)
+                    .ok_or("Folder selection is out of bounds")?;
+                if !item.is_directory || b.asset_identity(&item.path) != c.id {
+                    return Err("Folder identity changed".into());
+                }
+                b.navigate_into(c.index).map_err(|e| e.to_string())?;
             }
             "select" | "enter" => {
                 if c.listing_revision != self.epoch {
@@ -602,6 +796,7 @@ impl Publication {
                         b.select(index);
                     }
                     self.offset = index.saturating_sub(WINDOW / 2);
+                    self.tab_offsets.insert(self.active_tab(b), self.offset);
                     if c.audition {
                         b.play_selected();
                     }
@@ -630,6 +825,78 @@ impl Publication {
                     ));
                 }
                 self.offset = c.offset.min(entries(b).len().saturating_sub(1));
+                self.tab_offsets.insert(self.active_tab(b), self.offset);
+            }
+            "folder_window" => {
+                if c.listing_revision != self.epoch {
+                    return Err(format!(
+                        "Stale folder window revision {} (current {})",
+                        c.listing_revision, self.epoch
+                    ));
+                }
+                self.folder_offset = c.offset.min(
+                    b.entries()
+                        .iter()
+                        .filter(|item| item.is_directory)
+                        .count()
+                        .saturating_sub(1),
+                );
+            }
+            "tab_new" => {
+                let start = b.current_directory().map(|path| path.to_path_buf());
+                b.new_tab(start.as_deref());
+                self.sync_tabs(b);
+                self.offset = 0;
+            }
+            "tab_close" => {
+                let index = self
+                    .tab_ids
+                    .iter()
+                    .position(|id| *id == c.tab_id)
+                    .ok_or("Unknown tab identity")?;
+                if b.tab_count() <= 1 {
+                    return Err("Punks must keep at least one tab open".into());
+                }
+                b.close_tab(index);
+                self.tab_ids.remove(index);
+                self.tab_offsets.remove(&c.tab_id);
+                self.offset = self
+                    .tab_offsets
+                    .get(&self.active_tab(b))
+                    .copied()
+                    .unwrap_or(0);
+            }
+            "tab_switch" => {
+                let index = self
+                    .tab_ids
+                    .iter()
+                    .position(|id| *id == c.tab_id)
+                    .ok_or("Unknown tab identity")?;
+                self.tab_offsets.insert(self.active_tab(b), self.offset);
+                b.switch_tab(index);
+                self.offset = self.tab_offsets.get(&c.tab_id).copied().unwrap_or(0);
+            }
+            "tab_reorder" => {
+                let from = self
+                    .tab_ids
+                    .iter()
+                    .position(|id| *id == c.tab_id)
+                    .ok_or("Unknown source tab identity")?;
+                let target = self
+                    .tab_ids
+                    .iter()
+                    .position(|id| *id == c.tab_target_id)
+                    .ok_or("Unknown target tab identity")?;
+                let mut to = target + if c.after { 1 } else { 0 };
+                if from < to {
+                    to -= 1;
+                }
+                to = to.min(self.tab_ids.len().saturating_sub(1));
+                if from != to {
+                    b.reorder_tab(from, to);
+                    let id = self.tab_ids.remove(from);
+                    self.tab_ids.insert(to, id);
+                }
             }
             "create_library" => b.init_library(),
             _ => return Err(format!("Unknown command {}", c.op)),
@@ -676,7 +943,17 @@ fn run(t: Transport, signal: Arc<Signal>, flags: u32) {
             p.sequence += 1;
             p.error = match serde_json::from_slice::<Command>(&bytes[..len]) {
                 Ok(c) => {
-                    let update_config = matches!(c.op.as_str(), "open" | "up" | "enter");
+                    let update_config = matches!(
+                        c.op.as_str(),
+                        "open"
+                            | "up"
+                            | "enter"
+                            | "breadcrumb"
+                            | "tab_new"
+                            | "tab_close"
+                            | "tab_switch"
+                            | "tab_reorder"
+                    );
                     let result = p.apply(&mut browser, c);
                     if result.is_ok() && update_config && flags & 2 == 0 {
                         browser.update_config(&mut cfg);
@@ -696,7 +973,7 @@ fn run(t: Transport, signal: Arc<Signal>, flags: u32) {
         }
     }
     drop(browser);
-    for r in p.old.into_iter().chain(std::iter::once(p.resource)) {
+    for r in p.old.into_iter().chain([p.resource, p.folder_resource]) {
         t.retire(r);
     }
 }

@@ -10,6 +10,9 @@ import ui "alicorn:ui"
 import host "alicorn:native/sdl_gpu"
 
 ROW_HEIGHT :: 32
+FOLDER_ROW_HEIGHT :: 30
+PUNKS_TAB_SEMANTIC_NAMESPACE :: u64(0x50554E4B53544142)
+PUNKS_TAB_DRAG_TYPE :: alicorn.Drag_Type(0x50554E4B)
 
 App :: struct {
 	session: rawptr,
@@ -21,8 +24,10 @@ App :: struct {
 	search: ui.Text_Buffer,
 	search_node: alicorn.Node_ID,
 	list_node: alicorn.Node_ID,
+	folder_node: alicorn.Node_ID,
 	state: State,
 	window: Entry_Window,
+	folders: Folder_Window,
 	revision: u64,
 	state_memory: [2]arena.Arena,
 	entry_memory: [2]arena.Arena,
@@ -35,6 +40,8 @@ App :: struct {
 	keyboard_selection: bool,
 	requested_revision: u64,
 	requested_offset: int,
+	requested_folder_revision: u64,
+	requested_folder_offset: int,
 	builds: u64,
 	smoke: bool,
 	smoke_audio: bool,
@@ -51,6 +58,9 @@ send :: proc(app: ^App, command: Command) {
 
 	c := command
 	c.v = 1
+	if c.tab_id == 0 {
+		c.tab_id = app.state.active_tab
+	}
 	bytes, err := json.marshal(c, allocator=context.temp_allocator)
 	if err != nil {
 		app.error = "Could not encode command"
@@ -90,8 +100,10 @@ read_state :: proc(app: ^App) -> bool {
 			return false
 		}
 
-		changed_resource := next_state.entries != app.state.entries
+		changed_resource := next_state.entries != app.state.entries ||
+			next_state.folders != app.state.folders
 		next_window := app.window
+		next_folders := app.folders
 		entry_slot := app.entry_slot
 		if changed_resource {
 			view: Resource_View
@@ -126,12 +138,53 @@ read_state :: proc(app: ^App) -> bool {
 				app.error = "Entry window failed revision validation"
 				return false
 			}
+
+			folder_view: Resource_View
+			status = app.api.map_resource(
+				app.transport,
+				next_state.folders.id,
+				next_state.folders.generation,
+				&folder_view,
+			)
+			if status != OK {
+				app.api.release_state(&publication)
+				continue
+			}
+			if folder_view.len > 1024*1024 {
+				app.api.release_resource_view(&folder_view)
+				app.api.release_state(&publication)
+				app.error = "Folder resource exceeds protocol limit"
+				return false
+			}
+			err = json.unmarshal(
+				folder_view.data[:int(folder_view.len)],
+				&next_folders,
+				allocator=entry_allocator,
+			)
+			app.api.release_resource_view(&folder_view)
+			if err != nil ||
+				next_folders.v != 1 ||
+				next_folders.listing_revision != next_state.listing_revision ||
+				next_folders.offset != next_state.folder_offset ||
+				len(next_folders.entries) > 128 {
+				app.api.release_state(&publication)
+				app.error = "Folder window failed revision validation"
+				return false
+			}
 		}
 
+		if next_state.active_tab != app.state.active_tab ||
+			(next_state.query != app.state.query && !app.pending_search) {
+			_ = ui.text_buffer_set(&app.search, next_state.query)
+			app.pending_search = false
+			app.requested_revision = 0
+			app.requested_folder_revision = 0
+		}
 		app.revision = publication.revision
 		app.api.release_state(&publication)
 		app.state = next_state
 		app.window = next_window
+		app.folders = next_folders
 		app.state_slot = state_slot
 		app.entry_slot = entry_slot
 		return true
@@ -419,8 +472,8 @@ keys :: proc(data: rawptr, rt: ^alicorn.Runtime, key: host.Application_Key) -> b
 build :: proc(
 	data: rawptr,
 	rt: ^alicorn.Runtime,
-	width, height: int,
-	dpi: f32,
+	_width, _height: int,
+	_dpi: f32,
 ) -> alicorn.Node_ID {
 	app := cast(^App)data
 	ctx, needed := alicorn.begin_frame(rt)
@@ -430,184 +483,11 @@ build :: proc(
 	app.builds += 1
 
 	root := alicorn.container_begin(&ctx, .Root, label="punks", style=ui.layout_style(grow=1))
-	if ui.panel(
-		&ctx,
-		grow=1,
-		padding=18,
-		gap=10,
-		clip=true,
-		fill=ui.Color{0.055, 0.065, 0.09, 1},
-		label="punks-content",
-	) {
-		if ui.row(&ctx, height=40, gap=12, align=.Center, label="header") {
-			ui.text(&ctx, "Punks", size=26, style=ui.layout_style(width=120))
-			if ui.button(&ctx, "Open Folder", key="open-folder", width=130, height=36) {
-				open_folder(app)
-			}
-			field := ui.text_field(
-				&ctx,
-				"Search",
-				&app.search,
-				key="search",
-				style=ui.layout_style(grow=1, height=36),
-			)
-			app.search_node = field.node
-
-			if field.changed {
-				app.pending_search = true
-				_ = host.application_schedule_after(app.services.scheduler, .Frequent, 150_000_000)
-			}
-			if field.submitted {
-				app.pending_search = false
-				_ = host.application_cancel_scheduled_wake(app.services.scheduler, .Frequent)
-				send(app, Command{op="search", query=app.search.text})
-			}
-		}
-
-		if ui.row(&ctx, height=32, gap=10, align=.Center, label="navigation") {
-			if ui.button(&ctx, "Up", key="up", width=64, height=30) {
-				send(app, Command{op="up"})
-			}
-			ui.text(
-				&ctx,
-				app.state.directory if len(app.state.directory) > 0 else "Open a folder to begin",
-				style=ui.layout_style(grow=1),
-			)
-		}
-
-		list_first, list_last := 0, 0
-		if list, opened := ui.virtual_list(
-			&ctx,
-			app.state.total,
-			ROW_HEIGHT,
-			key="audio-list",
-			grow=1,
-			label="Audio files",
-			focusable=true,
-		); opened {
-			app.list_node = list.scroll.id
-			list_first, list_last = list.first, list.last
-			for position := list.first; position < list.last; position += 1 {
-				local := position - app.window.offset
-				if local >= 0 &&
-					local < len(app.window.entries) &&
-					app.window.listing_revision == app.state.listing_revision {
-					row := app.window.entries[local]
-					label := fmt.tprintf("%s%s", "▸  " if row.directory else "", row.name)
-					if ui.button(
-						&ctx,
-						label,
-						key=row.id,
-						height=ROW_HEIGHT,
-						width=-1,
-						state=ui.Button_State{selected=i64(position) == app.state.selected_index},
-					) {
-						op := "enter" if row.directory else "select"
-						send(
-							app,
-							Command{
-								op=op,
-								id=row.id,
-								index=row.index,
-								listing_revision=app.state.listing_revision,
-								audition=true,
-							},
-						)
-					}
-				} else {
-					ui.text(
-						&ctx,
-						"Loading…",
-						key=ui.key_u64(u64(position)),
-						style=ui.layout_style(height=ROW_HEIGHT),
-					)
-				}
-			}
-		}
-
-		outside_window := list_first < app.window.offset ||
-			list_last > app.window.offset+len(app.window.entries)
-		if app.state.ready && list_last > list_first && outside_window {
-			offset := max(0, list_first-8)
-			if app.requested_revision != app.state.listing_revision || app.requested_offset != offset {
-				send(
-					app,
-					Command{
-						op="window",
-						offset=offset,
-						listing_revision=app.state.listing_revision,
-					},
-				)
-				app.requested_revision = app.state.listing_revision
-				app.requested_offset = offset
-			}
-		}
-
-		if ui.column(&ctx, height=130, gap=6, label="preview") {
-			filename := app.state.selected.name if len(app.state.selected.name) > 0 else "Select an audio file"
-			ui.text(&ctx, filename, size=18)
-			if ui.row(&ctx, height=34, gap=12, align=.Center, label="transport") {
-				playing := app.state.playback.status == "playing" || app.state.playback.status == "loading"
-				play_label := "Stop" if playing else "Play"
-				disabled := len(app.state.selected.id) == 0 || app.state.selected.directory
-				if ui.button(
-					&ctx,
-					play_label,
-					key="play-stop",
-					width=90,
-					height=32,
-					state=ui.Button_State{disabled=disabled},
-				) {
-					playback_op := "play" if !playing else "stop"
-					send(app, Command{op=playback_op})
-				}
-				ui.text(
-					&ctx,
-					fmt.tprintf(
-						"%s  %.1f / %.1f s",
-						app.state.playback.status,
-						app.state.playback.position,
-						app.state.playback.duration,
-					),
-				)
-			}
-			if app.state.playback.duration > 0 {
-				seek_position := f32(app.state.playback.position)
-				if ui.slider_f32(
-					&ctx,
-					"Position",
-					&seek_position,
-					0,
-					f32(app.state.playback.duration),
-					key="seek",
-					style=ui.layout_style(height=40),
-				) {
-					send(app, Command{op="seek", seconds=f64(seek_position)})
-				}
-			}
-		}
-
-		message := fmt.tprintf("%d entries", app.state.total)
-		if !app.state.ready {
-			message = "Starting backend…"
-		}
-		if app.state.searching {
-			message = "Searching filenames…"
-		}
-		if app.state.scanning {
-			message = fmt.tprintf("Indexing %d / %d", app.state.scan_done, app.state.scan_total)
-		}
-		if len(app.state.audio_error) > 0 {
-			message = app.state.audio_error
-		}
-		if len(app.state.error) > 0 {
-			message = app.state.error
-		}
-		if len(app.error) > 0 {
-			message = app.error
-		}
-		ui.text(&ctx, message, style=ui.layout_style(height=26))
+	if root == 0 {
+		alicorn.end_frame(&ctx)
+		return 0
 	}
+	render_workspace(app, rt, &ctx)
 	alicorn.container_end(&ctx)
 	alicorn.end_frame(&ctx)
 	return root

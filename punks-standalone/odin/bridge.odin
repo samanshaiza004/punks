@@ -70,6 +70,11 @@ Resource :: struct {
 	generation: u64,
 }
 
+Tab_View :: struct {
+	id: u64,
+	title: string,
+}
+
 Entry :: struct {
 	id: string,
 	index: int,
@@ -88,6 +93,14 @@ Entry_Window :: struct {
 	entries: []Entry,
 }
 
+Folder_Window :: struct {
+	v: u32,
+	listing_revision: u64,
+	offset: int,
+	total: int,
+	entries: []Entry,
+}
+
 Playback :: struct {
 	status: string,
 	file: string,
@@ -99,6 +112,7 @@ State :: struct {
 	v: u32,
 	ready: bool,
 	directory: string,
+	can_navigate_up: bool,
 	query: string,
 	searching: bool,
 	listing_revision: u64,
@@ -106,6 +120,12 @@ State :: struct {
 	offset: int,
 	count: int,
 	entries: Resource,
+	folders: Resource,
+	folder_count: int,
+	folder_offset: int,
+	breadcrumbs: []string,
+	tabs: []Tab_View,
+	active_tab: u64,
 	selected_index: i64,
 	selected: Entry,
 	playback: Playback,
@@ -117,6 +137,10 @@ State :: struct {
 	scan_total: int,
 	command_sequence: u64,
 	last_request_id: u64,
+	waveform_file: string,
+	waveform_start: f64,
+	waveform_duration: f64,
+	waveform_peaks: [][2]i16,
 }
 
 Command :: struct {
@@ -132,4 +156,7 @@ Command :: struct {
 	seconds: f64,
 	audition: bool,
 	request_id: u64,
+	tab_id: u64,
+	tab_target_id: u64,
+	after: bool,
 }

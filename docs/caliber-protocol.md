@@ -33,14 +33,26 @@ rejected.
 | --- | --- | --- |
 | `open` | `path` | Open a directory. |
 | `up` | — | Navigate to the parent directory. |
+| `breadcrumb` | `index` | Navigate to a visible ancestor in the active tab's breadcrumb history. |
 | `select` | `id`, `index`, `listing_revision`, `audition` | Select an entry and optionally preview it. |
-| `enter` | `id`, `index`, `listing_revision`, `audition` | Enter a directory, or select a file. |
+| `enter` | `id`, `index`, `listing_revision`, `audition` | Enter a result row directory, or select a file. |
+| `enter_folder` | `id`, `index`, `listing_revision` | Enter a direct child folder from the navigation sidebar, including during search. |
 | `step` | `delta`, `audition` | Move selection by one or more rows. |
 | `play` / `stop` | — | Start or stop the selected preview. |
 | `seek` | `seconds` | Seek to a finite, non-negative position. |
 | `search` | `query` | Search filenames; an empty query clears search. |
 | `window` | `offset`, `listing_revision` | Request a bounded window for the current listing revision. |
+| `folder_window` | `offset`, `listing_revision` | Request a bounded window of direct child folders for the active directory. |
+| `tab_new` | — | Open a tab at the current directory. |
+| `tab_close` | `tab_id` | Close a tab by its session-stable identity. One tab always remains open. |
+| `tab_switch` | `tab_id` | Activate a tab by its session-stable identity. |
+| `tab_reorder` | `tab_id`, `tab_target_id`, `after` | Move a tab before or after another tab without changing its identity. |
 | `create_library` | — | Initialize the library at the current location. |
+
+Every command may include `tab_id`. Commands targeting the active browsing view
+are rejected when that ID no longer names the active tab. This prevents delayed
+frontend actions from applying to another tab after a switch. Tab IDs are
+session-local and are not persisted.
 
 Selection and window requests include the listing revision. The adapter checks
 the revision and asset identity before using an index; stale or mismatched
@@ -48,12 +60,21 @@ requests become visible state errors and do not select a different file.
 
 ## State and resources
 
-The state publication has `v: 1`, `ready`, `directory`, `query`, `searching`,
+The state publication has `v: 1`, `ready`, `directory`, `can_navigate_up`, `query`, `searching`,
 `listing_revision`, `total`, `offset`, `count`, `selected_index`, and `selected`
 entry fields. `entries` contains a Caliber `{id, generation}` resource handle.
+`folders` is a second bounded resource containing only the active directory's
+direct child folders. Its entries retain their index in the current listing so
+navigation is checked against the same revision and asset identity. `tabs`,
+`active_tab`, and `breadcrumbs` provide the current tab strip and location
+navigation. Tab ordering, search text, selection, and directory state remain
+owned by `punks-core`.
 The state also reports playback (`idle`, `loading`, or `playing`), selected
 filename, position and duration, audio availability and errors, the most recent
 operation error, scan progress, `command_sequence`, and `last_request_id`.
+It also includes a bounded 512-bucket signed waveform snapshot for the loaded
+playback file. Peak values are quantized to signed 16-bit values; the waveform
+axis start and duration identify the source interval represented by the peaks.
 
 The immutable entry resource contains `v`, `listing_revision`, `offset`,
 `total`, and a bounded array of entries. Each entry includes its stable asset
@@ -61,7 +82,8 @@ identity, index, display name, path, format, size, and directory flag. The
 frontend verifies the resource's version, revision, offset, and row count
 against the state before using it.
 
-The adapter retains the current resource and up to two prior resources while
+The adapter retains the current entry and folder resources and up to four prior
+resources while
 publishing replacements. It retires older resources through Caliber. A mapped
 view lease remains valid until released even after retirement or context
 destruction; the frontend releases every view immediately after copying it into
