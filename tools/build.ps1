@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Odin,
-    [switch]$Release
+    [switch]$Release,
+    [switch]$TestUi
 )
 
 $ErrorActionPreference = 'Stop'
@@ -68,6 +69,12 @@ try {
         & $Odin @BuildArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Odin failed to build the Punks native frontend (exit $LASTEXITCODE)."
+        }
+        if ($TestUi) {
+            Copy-Item -LiteralPath $SDLRuntime -Destination (Join-Path $OutputDirectory 'SDL3.dll') -Force
+            Copy-Item -LiteralPath $CaliberRuntime -Destination (Join-Path $OutputDirectory 'punks_caliber.dll') -Force
+            & $Odin test punks-standalone/odin "-collection:alicorn=$AlicornRoot" "-extra-linker-flags:$LinkerFlags" "-out:$(Join-Path $OutputDirectory 'punks-ui-tests.exe')"
+            if ($LASTEXITCODE -ne 0) { throw "Punks UI regression tests failed (exit $LASTEXITCODE)." }
         }
     } finally {
         if ([string]::IsNullOrWhiteSpace($PreviousLib)) {

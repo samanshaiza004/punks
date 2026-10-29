@@ -7,6 +7,8 @@ the frontend to the headless Rust application.
 The current interface opens a folder, navigates audio files, searches names,
 selects files, and previews or stops playback. It reads WAV (including RF64 and
 Broadcast Wave), FLAC, MP3, and OGG through the existing Rust audio engine.
+The workbench has folder navigation, per-tab browsing and search, a virtualized
+file table, and a persistent waveform and listening deck.
 Long-file previews remain bounded. The new interface does not yet expose
 waveform gestures, library tagging controls, settings, or drag-out.
 
@@ -62,6 +64,10 @@ to enter a selected folder, and Space to toggle preview playback. Search is
 debounced while typing. Escape clears it.
 
 ## Validate
+
+On Windows, `./tools/build.ps1 -Release -TestUi` also runs the headless frontend
+regressions for viewport filling, compact and expanded layouts, resizing, and
+single-label result rows with accessible names.
 
 ```sh
 cargo fmt --all -- --check

@@ -5,7 +5,7 @@ import alicorn "alicorn:runtime"
 import ui "alicorn:ui"
 import host "alicorn:native/sdl_gpu"
 
-TAB_BAR_HEIGHT :: 42
+TAB_BAR_HEIGHT :: 36
 WAVEFORM_HEIGHT :: 56
 WAVEFORM_BARS :: 64
 
@@ -39,10 +39,10 @@ punks_entry_button :: proc(
 	columns: bool,
 	row_height: f32,
 ) -> bool {
-	style := ui.layout_style(.Row, width=-1, height=row_height, gap=10, align=.Center, clip=true)
+	style := ui.layout_style(.Row, width=-1, height=row_height, padding=6, gap=10, align=.Center, clip=true)
 	id, activated := alicorn.button_begin(
 		ctx,
-		item.name,
+		"",
 		key=alicorn.key_string(item.id),
 		style=style,
 		state=alicorn.Button_State{selected=selected},
@@ -52,12 +52,19 @@ punks_entry_button :: proc(
 	if id == 0 {
 		return false
 	}
+	states: alicorn.Semantic_States
+	if selected { states = alicorn.semantic_states_add(states, .Selected) }
+	_ = alicorn.semantic_description(ctx, .Button, item.name,
+		states=states, actions=alicorn.semantic_actions_add({}, .Press))
+	_ = alicorn.tooltip(ctx, item.name)
 	icon_id := alicorn.Icon_ID.File
 	if item.directory {
 		icon_id = .Folder_Closed
 	}
 	_ = ui.icon(ctx, icon_id, size=16)
-	_ = ui.text(ctx, item.name, style=ui.layout_style(width=-1, grow=1))
+	_ = ui.text(ctx, item.name, key="entry-name", size=14,
+		style=ui.layout_style(width=-1, height=20, grow=1),
+		text_style=alicorn.Text_Style{overflow=.Ellipsis})
 	if columns && !item.directory {
 		_ = ui.text(
 			ctx,
@@ -96,7 +103,7 @@ render_tab_strip :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
 	options.max_tab_width = 210
 	options.height = TAB_BAR_HEIGHT
 	options.presentation = .Compact
-	options.appearance = .Connected
+	options.appearance = .Standard
 	options.drag_type = PUNKS_TAB_DRAG_TYPE
 	result := alicorn.tab_bar(
 		ctx,
@@ -122,25 +129,17 @@ render_tab_strip :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
 			after=event.position == .After,
 		})
 	}
-	if id, clicked := alicorn.button_begin(
-		ctx,
-		"New tab",
-		key=alicorn.key_string("punks-new-tab"),
-		style=ui.layout_style(.Row, width=36, height=36, align=.Center),
-		content_style=alicorn.button_content_style(.Center, .Center, padding_x=0, padding_y=0),
-		variant=.Quiet,
-	); id != 0 {
-		_ = ui.text(ctx, "+")
-		alicorn.button_end(ctx)
-		if clicked {
-			send(app, Command{op="tab_new"})
-		}
+	if ui.button(ctx, "+", key="punks-new-tab", width=32, height=32, variant=.Toolbar) {
+		send(app, Command{op="tab_new"})
 	}
+	_ = alicorn.semantic_description(ctx, .Button, "New tab", actions=alicorn.semantic_actions_add({}, .Press))
+	_ = alicorn.tooltip(ctx, "New tab")
 }
 
 render_title_row :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
-	if ui.row(ctx, height=TAB_BAR_HEIGHT, gap=12, align=.Center, label="application-tabs") {
-		_ = ui.text(ctx, "Punks", size=22, style=ui.layout_style(width=92))
+	if ui.row(ctx, key="application-tabs", height=42, gap=12, align=.Center, label="application-tabs") {
+		_ = ui.text(ctx, "punks.", size=24, style=ui.layout_style(width=92),
+			text_style=alicorn.Text_Style{font_weight=600})
 		render_tab_strip(app, rt, ctx)
 	}
 }
@@ -224,7 +223,9 @@ render_location_toolbar :: proc(app: ^App, ctx: ^ui.UI) {
 		) {
 			send(app, Command{op="up"})
 		}
-		render_breadcrumbs(app, ctx)
+		if ui.row(ctx, grow=1, height=32, gap=4, align=.Center, clip=true, label="location-breadcrumbs") {
+			render_breadcrumbs(app, ctx)
+		}
 		if ui.button(ctx, "Open folder", key=alicorn.key_string("open-folder"), width=104, height=32, variant=.Toolbar) {
 			open_folder(app)
 		}
@@ -256,10 +257,12 @@ render_sidebar :: proc(app: ^App, ctx: ^ui.UI) {
 	if ui.panel(
 		ctx,
 		key=alicorn.key_string("library-sidebar-surface"),
+		height=-1,
 		grow=1,
 		padding=12,
 		gap=10,
 		clip=true,
+		radius=5,
 		label="Library",
 	) {
 		_ = ui.text(ctx, "LIBRARY", size=12, color=alicorn.style_color(ctx, .Muted_Text))
@@ -319,20 +322,27 @@ render_sidebar :: proc(app: ^App, ctx: ^ui.UI) {
 }
 
 render_results :: proc(app: ^App, ctx: ^ui.UI) {
+	columns := app.viewport_width >= 900
 	if ui.panel(
 		ctx,
 		key=alicorn.key_string("results-surface"),
+		height=-1,
 		grow=1,
 		padding=10,
 		gap=4,
 		clip=true,
+		fill=alicorn.style_color(ctx, .Editor_Background),
+		radius=5,
+		stroke=ui.border(1, alicorn.style_color(ctx, .Border)),
 		label="Audio files",
 	) {
-		if ui.row(ctx, height=28, gap=10, align=.Center, label="results-column-headings") {
+		if ui.row(ctx, height=30, padding=6, gap=10, align=.Center, label="results-column-headings") {
 			_ = ui.icon(ctx, .File, size=16)
 			_ = ui.text(ctx, "Name", style=ui.layout_style(grow=1), color=alicorn.style_color(ctx, .Muted_Text))
-			_ = ui.text(ctx, "Format", style=ui.layout_style(width=76), color=alicorn.style_color(ctx, .Muted_Text))
-			_ = ui.text(ctx, "Size", style=ui.layout_style(width=88), color=alicorn.style_color(ctx, .Muted_Text))
+			if columns {
+				_ = ui.text(ctx, "Format", style=ui.layout_style(width=76), color=alicorn.style_color(ctx, .Muted_Text))
+				_ = ui.text(ctx, "Size", style=ui.layout_style(width=88), color=alicorn.style_color(ctx, .Muted_Text))
+			}
 		}
 		if app.state.total == 0 && !app.state.searching {
 			message := "Open a folder to browse audio"
@@ -356,7 +366,7 @@ render_results :: proc(app: ^App, ctx: ^ui.UI) {
 				if local >= 0 && local < len(app.window.entries) &&
 					app.window.listing_revision == app.state.listing_revision {
 					row := app.window.entries[local]
-					if punks_entry_button(ctx, row, i64(position) == app.state.selected_index, true, ROW_HEIGHT) {
+					if punks_entry_button(ctx, row, i64(position) == app.state.selected_index, columns, ROW_HEIGHT) {
 						op := "select"
 						if row.directory {
 							op = "enter"
@@ -416,10 +426,12 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 	if ui.panel(
 		ctx,
 		key=alicorn.key_string("audition-deck"),
-		height=174,
+		height=186,
 		padding=12,
 		gap=8,
 		clip=true,
+		radius=5,
+		stroke=ui.border(1, alicorn.style_color(ctx, .Border)),
 		label="Audition",
 	) {
 		if ui.row(ctx, height=24, gap=10, align=.Center, label="audition-track-info") {
@@ -431,10 +443,11 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				name = "Select an audio file"
 			}
 			_ = ui.text(ctx, name, size=17, style=ui.layout_style(grow=1))
-			if len(app.state.selected.format) > 0 {
+			selected_is_loaded := app.state.waveform_file == "" || app.state.selected.path == app.state.waveform_file
+			if selected_is_loaded && len(app.state.selected.format) > 0 {
 				_ = ui.text(ctx, app.state.selected.format, color=alicorn.style_color(ctx, .Muted_Text))
 			}
-			if app.state.selected.size > 0 {
+			if selected_is_loaded && app.state.selected.size > 0 {
 				_ = ui.text(ctx, format_bytes(app.state.selected.size), color=alicorn.style_color(ctx, .Muted_Text))
 			}
 		}
@@ -535,50 +548,38 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 }
 
 render_workspace :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
-	if !ui.column(ctx, key=alicorn.key_string("punks-workspace"), grow=1, padding=10, gap=8, clip=true) {
-		return
+	// A scoped UI helper must enclose its children in its positive if block.
+	// Filling panes use height=-1; the helper default is content-sized.
+	if ui.panel(ctx, key="punks-workspace", height=-1, grow=1,
+		padding=10, gap=8, clip=true, fill=alicorn.style_color(ctx, .Window_Background)) {
+		render_title_row(app, rt, ctx)
+		split := alicorn.split_begin(
+			ctx, alicorn.key_string("punks-library-split"), .Horizontal, 216,
+			min_first=170, min_second=360,
+			style=ui.layout_style(.Row, grow=1, gap=8, clip=true),
+			label="Punks library workspace",
+		)
+		alicorn.split_first_begin(ctx, split)
+		render_sidebar(app, ctx)
+		alicorn.split_first_end(ctx, split)
+		alicorn.split_divider(ctx, split, thickness=2, hit_size=10)
+		alicorn.split_second_begin(ctx, split)
+		if ui.column(ctx, height=-1, grow=1, gap=8, clip=true, label="audio-browser-main") {
+			render_location_toolbar(app, ctx)
+			render_results(app, ctx)
+			render_audio_deck(app, ctx)
+		}
+		alicorn.split_second_end(ctx, split)
+		alicorn.split_end(ctx, split)
+		message := fmt.tprintf("%d items", app.state.total)
+		if !app.state.ready { message = "Starting backend…" }
+		if app.state.searching { message = "Searching audio…" }
+		if app.state.scanning && app.state.scan_total > 0 {
+			message = fmt.tprintf("Indexing %d / %d", app.state.scan_done, app.state.scan_total)
+		}
+		if len(app.state.audio_error) > 0 { message = app.state.audio_error }
+		if len(app.state.error) > 0 { message = app.state.error }
+		if len(app.error) > 0 { message = app.error }
+		_ = ui.text(ctx, message, size=12, style=ui.layout_style(height=18), color=alicorn.style_color(ctx, .Muted_Text))
 	}
-	render_title_row(app, rt, ctx)
-	split := alicorn.split_begin(
-		ctx,
-		alicorn.key_string("punks-library-split"),
-		.Horizontal,
-		236,
-		min_first=170,
-		min_second=360,
-		style=ui.layout_style(.Row, grow=1, gap=0, clip=true),
-		label="Punks library workspace",
-	)
-	alicorn.split_first_begin(ctx, split)
-	render_sidebar(app, ctx)
-	alicorn.split_first_end(ctx, split)
-	alicorn.split_divider(ctx, split, thickness=2, hit_size=10)
-	alicorn.split_second_begin(ctx, split)
-	if ui.column(ctx, grow=1, gap=8, clip=true, label="audio-browser-main") {
-		render_location_toolbar(app, ctx)
-		render_results(app, ctx)
-		render_audio_deck(app, ctx)
-	}
-	alicorn.split_second_end(ctx, split)
-	alicorn.split_end(ctx, split)
-	message := fmt.tprintf("%d results", app.state.total)
-	if !app.state.ready {
-		message = "Starting backend…"
-	}
-	if app.state.searching {
-		message = "Searching audio…"
-	}
-	if app.state.scanning {
-		message = fmt.tprintf("Indexing %d / %d", app.state.scan_done, app.state.scan_total)
-	}
-	if len(app.state.audio_error) > 0 {
-		message = app.state.audio_error
-	}
-	if len(app.state.error) > 0 {
-		message = app.state.error
-	}
-	if len(app.error) > 0 {
-		message = app.error
-	}
-	_ = ui.text(ctx, message, style=ui.layout_style(height=20), color=alicorn.style_color(ctx, .Muted_Text))
 }

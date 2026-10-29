@@ -22,6 +22,8 @@ App :: struct {
 	waker: host.Application_Waker,
 	services: host.Application_Services,
 	search: ui.Text_Buffer,
+	theme: alicorn.Style_Theme_ID,
+	viewport_width: int,
 	search_node: alicorn.Node_ID,
 	list_node: alicorn.Node_ID,
 	folder_node: alicorn.Node_ID,
@@ -472,7 +474,7 @@ keys :: proc(data: rawptr, rt: ^alicorn.Runtime, key: host.Application_Key) -> b
 build :: proc(
 	data: rawptr,
 	rt: ^alicorn.Runtime,
-	_width, _height: int,
+	width, _height: int,
 	_dpi: f32,
 ) -> alicorn.Node_ID {
 	app := cast(^App)data
@@ -481,13 +483,19 @@ build :: proc(
 		return 0
 	}
 	app.builds += 1
+	app.viewport_width = width
+	if app.theme == 0 {
+		app.theme = alicorn.style_theme_register(rt, punks_theme())
+	}
 
-	root := alicorn.container_begin(&ctx, .Root, label="punks", style=ui.layout_style(grow=1))
+	root := alicorn.container_begin(&ctx, .Root, label="punks", style=ui.layout_style(grow=1), color=ui.rgb(0x181B1D))
 	if root == 0 {
 		alicorn.end_frame(&ctx)
 		return 0
 	}
+	scope := alicorn.style_environment_push(&ctx, alicorn.Style_Environment{theme=app.theme})
 	render_workspace(app, rt, &ctx)
+	alicorn.style_environment_pop(&ctx, scope)
 	alicorn.container_end(&ctx)
 	alicorn.end_frame(&ctx)
 	return root
