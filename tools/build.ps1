@@ -64,7 +64,11 @@ try {
         "-extra-linker-flags:$LinkerFlags",
         "-out:$Executable"
     )
-    if ($Release) { $BuildArgs += '-o:speed' }
+    if ($Release) {
+        $BuildArgs += '-o:speed'
+    } else {
+        $BuildArgs += @('-debug', "-pdb-name:$(Join-Path $OutputDirectory 'punks.pdb')")
+    }
     try {
         & $Odin @BuildArgs
         if ($LASTEXITCODE -ne 0) {

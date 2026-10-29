@@ -3,6 +3,7 @@ package main
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:thread"
 import arena "core:mem/virtual"
 import alicorn "alicorn:runtime"
@@ -37,6 +38,10 @@ App :: struct {
 	entry_slot: int,
 	error: string,
 	initial_path: string,
+	dialog_initial_mode: string,
+	next_diagnostic_request_id: u64,
+	directory_request_id: u64,
+	directory_request_reported: bool,
 	no_audio: bool,
 	pending_search: bool,
 	keyboard_selection: bool,
@@ -63,15 +68,38 @@ send :: proc(app: ^App, command: Command) {
 	if c.tab_id == 0 {
 		c.tab_id = app.state.active_tab
 	}
+	is_directory_open := c.op == "open"
+	if is_directory_open {
+		if c.request_id == 0 {
+			app.next_diagnostic_request_id += 1
+			c.request_id = app.next_diagnostic_request_id
+		} else if c.request_id > app.next_diagnostic_request_id {
+			app.next_diagnostic_request_id = c.request_id
+		}
+		app.directory_request_id = c.request_id
+		app.directory_request_reported = false
+	}
 	bytes, err := json.marshal(c, allocator=context.temp_allocator)
 	if err != nil {
 		app.error = "Could not encode command"
+		if is_directory_open {
+			host.application_diagnostic_event(app.services.diagnostics, "directory.open.command.encode_failed", c.request_id)
+		}
 		return
 	}
 
+	if is_directory_open {
+		host.application_diagnostic_event(app.services.diagnostics, "directory.open.command.begin", c.request_id)
+		host.application_diagnostic_event(app.services.diagnostics, "directory.enumeration.started", c.request_id)
+	}
 	status := punks_dispatch(app.session, raw_data(bytes), uintptr(len(bytes)))
 	if status != OK {
 		app.error = "Backend command was rejected; try again"
+		if is_directory_open {
+			host.application_diagnostic_event(app.services.diagnostics, "directory.open.command.rejected", c.request_id)
+		}
+	} else if is_directory_open {
+		host.application_diagnostic_event(app.services.diagnostics, "directory.open.command.submitted", c.request_id)
 	}
 }
 
@@ -184,6 +212,17 @@ read_state :: proc(app: ^App) -> bool {
 		}
 		app.revision = publication.revision
 		app.api.release_state(&publication)
+		if app.directory_request_id != 0 &&
+			next_state.last_request_id == app.directory_request_id &&
+			!app.directory_request_reported {
+			if len(next_state.error) > 0 {
+				host.application_diagnostic_event(app.services.diagnostics, "directory.enumeration.failed", app.directory_request_id)
+				app.directory_request_reported = true
+			} else if !next_state.scanning {
+				host.application_diagnostic_event(app.services.diagnostics, "directory.enumeration.completed", app.directory_request_id)
+				app.directory_request_reported = true
+			}
+		}
 		app.state = next_state
 		app.window = next_window
 		app.folders = next_folders
@@ -310,23 +349,51 @@ services :: proc(data: rawptr, value: host.Application_Services) {
 }
 
 open_folder :: proc(app: ^App) {
+	app.next_diagnostic_request_id += 1
+	request_id := app.next_diagnostic_request_id
+	host.application_diagnostic_event(app.services.diagnostics, "directory.open.requested", request_id)
+	initial_location := dialog_initial_location_for_mode(app.dialog_initial_mode, app.state.directory)
 	if !host.ShowFileDialog(
 		app.services.dialogs,
 		host.File_Dialog_Request{
-			id=1,
+			id=host.Dialog_ID(request_id),
 			kind=.Open_Folder,
 			title="Open samples folder",
-			initial_location=app.state.directory,
+			initial_location=initial_location,
 		},
 	) {
 		app.error = "Folder dialog is unavailable"
+		host.application_diagnostic_event(app.services.diagnostics, "directory.open.dialog_rejected", request_id)
 	}
+}
+
+dialog_initial_location_for_mode :: proc(mode, current_directory: string) -> string {
+	switch mode {
+	case "none":
+		return ""
+	case "extended":
+		if len(current_directory) >= 2 && current_directory[1] == ':' && !strings.has_prefix(current_directory, `\\?\`) {
+			return fmt.tprintf(`\\?\%s`, current_directory)
+		}
+		if len(current_directory) >= 2 && current_directory[0] == '\\' && current_directory[1] == '\\' && !strings.has_prefix(current_directory, `\\?\`) {
+			return fmt.tprintf(`\\?\UNC\%s`, current_directory[2:])
+		}
+	}
+	return current_directory
 }
 
 dialog :: proc(data: rawptr, rt: ^alicorn.Runtime, result: ^host.File_Dialog_Result) {
 	app := cast(^App)data
+	switch result.status {
+	case .Accepted:
+		host.application_diagnostic_event(app.services.diagnostics, "directory.open.dialog_accepted", u64(result.id))
+	case .Cancelled:
+		host.application_diagnostic_event(app.services.diagnostics, "directory.open.dialog_cancelled", u64(result.id))
+	case .Error:
+		host.application_diagnostic_event(app.services.diagnostics, "directory.open.dialog_error", u64(result.id))
+	}
 	if result.status == .Accepted && len(result.paths) > 0 {
-		send(app, Command{op="open", path=result.paths[0]})
+		send(app, Command{op="open", path=result.paths[0], request_id=u64(result.id)})
 		_ = ui.text_buffer_set(&app.search, "")
 	}
 	if result.status == .Error {
@@ -502,7 +569,7 @@ build :: proc(
 }
 
 main :: proc() {
-	app := App{requested_offset=-1}
+	app := App{requested_offset=-1, dialog_initial_mode="ordinary"}
 	for arg, index in os.args {
 		if arg == "--smoke" {
 			app.smoke = true
@@ -516,6 +583,16 @@ main :: proc() {
 		}
 		if arg == "--folder" && index+1 < len(os.args) {
 			app.initial_path = os.args[index+1]
+		}
+		initial_prefix := "--dialog-initial="
+		if strings.has_prefix(arg, initial_prefix) {
+			mode := arg[len(initial_prefix):]
+			if mode == "none" || mode == "ordinary" || mode == "extended" {
+				app.dialog_initial_mode = mode
+			} else {
+				fmt.eprintln("Punks: --dialog-initial expects none, ordinary, or extended")
+				os.exit(2)
+			}
 		}
 	}
 
