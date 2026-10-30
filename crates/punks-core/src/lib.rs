@@ -32,9 +32,9 @@ use punks_audio::{decode_file, MetadataBackend, PlaybackEngine, RequestSlot};
 use punks_audio::{AnalysisContext, AudioBuffer};
 use punks_library::Library;
 
-/// How many buckets a full-source waveform is computed at (matches the preview
-/// waveform's resolution).
-const WAVEFORM_BUCKETS: usize = 512;
+/// Full-source detail retained for waveform zooming. Prepared playback windows
+/// remain at the cheaper 512-bucket resolution.
+const WAVEFORM_BUCKETS: usize = 65_536;
 
 /// Load cached full-source waveform peaks or compute and store them if absent.
 fn ensure_waveform_cached(path: &Path, cancel: &AtomicBool) -> Option<WaveformPeaks> {
@@ -43,11 +43,15 @@ fn ensure_waveform_cached(path: &Path, cancel: &AtomicBool) -> Option<WaveformPe
 
     if let Some(lib) = &lib {
         if let Ok(Some(pairs)) = lib.load_waveform(path) {
-            let num_buckets = pairs.len();
-            return Some(WaveformPeaks {
-                peaks: pairs,
-                num_buckets,
-            });
+            if pairs.len() == WAVEFORM_BUCKETS {
+                let num_buckets = pairs.len();
+                return Some(WaveformPeaks {
+                    peaks: pairs,
+                    num_buckets,
+                });
+            }
+            // Older cache entries contain only overview peaks. Regenerate at
+            // the current detail level before accepting them.
         }
     }
     match punks_audio::compute_source_peaks_cancellable(path, WAVEFORM_BUCKETS, || {

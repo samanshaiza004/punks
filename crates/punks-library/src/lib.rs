@@ -955,9 +955,9 @@ fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
 //   source_size u64 LE | source_mtime_ms i64 LE |    <- validity stamp
 //   num_buckets * (lo f32 LE, hi f32 LE)
 const WAVEFORM_MAGIC: &[u8; 4] = b"PKWF";
-// Version 2 uses an envelope across channels instead of an averaged mono mix.
-// Recompute version-1 caches so phase-inverted stereo cannot appear silent.
-const WAVEFORM_VERSION: u8 = 2;
+// Version 3 keeps the combined-channel envelope and 65,536 full-source buckets
+// for zoom detail. Older 512-bucket overview caches are recomputed.
+const WAVEFORM_VERSION: u8 = 3;
 const WAVEFORM_HEADER_LEN: usize = 4 + 1 + 4 + 8 + 8;
 
 fn encode_waveform_bin(peaks: &[(f32, f32)], source_size: u64, source_mtime_ms: i64) -> Vec<u8> {

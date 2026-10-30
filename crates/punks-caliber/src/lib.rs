@@ -14,6 +14,7 @@ pub const PROTOCOL: u32 = 1;
 pub const MAX_COMMAND: usize = 16 * 1024;
 pub const MAX_RESOURCE: usize = 1024 * 1024;
 pub const WINDOW: usize = 128;
+const MAX_WAVEFORM_PEAKS: usize = 65_536;
 #[derive(Default)]
 struct Signal {
     state: Mutex<(bool, bool)>,
@@ -427,6 +428,7 @@ pub struct WaveformWindow {
     pub file: String,
     pub start: f64,
     pub duration: f64,
+    pub peak_resolution: u32,
     pub peaks: Vec<[i16; 2]>,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -488,7 +490,7 @@ struct Publication {
     next_tab_id: u64,
     active_tab_id: u64,
     waveform_resource: Resource,
-    waveform_bytes: Vec<u8>,
+    waveform_key: Option<(String, u64, u64, usize, usize)>,
 }
 impl Publication {
     fn active_tab(&self, b: &SampleBrowser) -> u64 {
@@ -636,38 +638,54 @@ impl Publication {
                 title: text(&b.tab_title(index), 128),
             })
             .collect();
-        let waveform_peaks = b
-            .waveform_peaks()
-            .map(|peaks| {
-                peaks
-                    .peaks
-                    .iter()
-                    .take(512)
-                    .map(|(low, high)| {
-                        [
-                            (low.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16,
-                            (high.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16,
-                        ]
-                    })
-                    .collect()
-            })
+        let source_peaks = b.waveform_peaks();
+        let peak_resolution = source_peaks
+            .map(|peaks| peaks.peaks.len().min(MAX_WAVEFORM_PEAKS))
             .unwrap_or_default();
         let (waveform_start, waveform_duration) = b.waveform_axis().unwrap_or((0.0, 0.0));
         let waveform_file = b
             .current_file()
             .map(|path| text(&path.to_string_lossy(), 4096))
             .unwrap_or_default();
-        let waveform_bytes = serde_json::to_vec(&WaveformWindow {
-            v: PROTOCOL,
-            analysis_version: 2,
-            channel_policy: "combined_envelope".into(),
-            file: waveform_file.clone(),
-            start: waveform_start,
-            duration: waveform_duration,
-            peaks: waveform_peaks,
-        })
-        .map_err(|_| CaliberStatus::Internal)?;
-        let fresh_waveform = if waveform_bytes != self.waveform_bytes {
+        let waveform_key = (
+            waveform_file.clone(),
+            waveform_start.to_bits(),
+            waveform_duration.to_bits(),
+            peak_resolution,
+            source_peaks
+                .map(|peaks| peaks.peaks.as_ptr() as usize)
+                .unwrap_or(0),
+        );
+        let fresh_waveform = if self.waveform_key.as_ref() != Some(&waveform_key) {
+            let waveform_peaks = source_peaks
+                .map(|peaks| {
+                    peaks
+                        .peaks
+                        .iter()
+                        .take(MAX_WAVEFORM_PEAKS)
+                        .map(|(low, high)| {
+                            [
+                                (low.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16,
+                                (high.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16,
+                            ]
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let waveform_bytes = serde_json::to_vec(&WaveformWindow {
+                v: PROTOCOL,
+                analysis_version: 3,
+                channel_policy: "combined_envelope".into(),
+                file: waveform_file.clone(),
+                start: waveform_start,
+                duration: waveform_duration,
+                peak_resolution: peak_resolution as u32,
+                peaks: waveform_peaks,
+            })
+            .map_err(|_| CaliberStatus::Internal)?;
+            if waveform_bytes.len() > MAX_RESOURCE {
+                return Err(CaliberStatus::Internal);
+            }
             Some(t.resource(&waveform_bytes)?)
         } else {
             None
@@ -753,7 +771,7 @@ impl Publication {
                 self.old.push(self.waveform_resource);
             }
             self.waveform_resource = r;
-            self.waveform_bytes = waveform_bytes;
+            self.waveform_key = Some(waveform_key);
         }
         while self.old.len() > 4 {
             t.retire(self.old.remove(0));

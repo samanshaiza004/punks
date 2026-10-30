@@ -151,6 +151,7 @@ Waveform_Window :: struct {
 	file: string,
 	start: f64,
 	duration: f64,
+	peak_resolution: u32,
 	peaks: [][2]i16,
 }
 

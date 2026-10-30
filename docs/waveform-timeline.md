@@ -1,11 +1,23 @@
 # Waveform timeline
 
-The listening deck uses the existing 512 signed min/max peak pairs instead of
-reducing them to 64 symmetric layout bars. A bounded GPU geometry surface draws
-one envelope column per roughly 1.5 logical units, capped at 512. Positive-only
-samples stay above the center; negative excursions stay below it. The combined
-channel envelope preserves opposite-polarity stereo rather than averaging it
-away. Version-1 disk caches are recomputed under the version-2 channel policy.
+The listening deck uses signed min/max peaks rather than symmetric magnitude
+bars. Prepared playback windows provide a 512-pair overview. The background
+full-source analyzer retains 65,536 pairs in its versioned cache, giving the
+waveform more detail as the visible time range narrows. Older 512-pair cache
+entries are recomputed. A bounded GPU geometry surface draws up to 512 visible
+envelope columns (roughly one per 1.5 logical units), aggregating only the
+source buckets inside the current view. Positive-only samples stay above the
+center; negative excursions stay below it. The combined channel envelope
+preserves opposite-polarity stereo rather than averaging it away.
+
+Zoom is bounded from 1x to 128x. The `-`, `Fit`, and `+` controls sit in the
+waveform's reserved control band. Ctrl+wheel zooms around the pointer; wheel or
+Shift+wheel pans horizontally. Click and drag seek within the visible interval,
+and the footer's start/end labels track that interval. Zoom and pan rebuild only
+the static visible peak geometry; moving the playhead continues to update its
+small independent surface. Caliber publishes a changed waveform resource only
+when source identity, axis, or peak resolution changes, not on ordinary
+position or volume publications.
 
 A second GPU surface draws progress and the playhead. Peak geometry changes only
 when the waveform resource, allocated size, or theme changes. Ordinary playback
@@ -39,7 +51,7 @@ remain valid until released.
 ## Stable listening-deck slots
 
 Playback state changes the contents of reserved bands. Desktop bands use a
-100-unit waveform; the compact profile uses 64. Track information, the time
+100-unit waveform; the compact profile uses 72. Track information, the time
 footer, transport, and volume reserve explicit heights derived from the active
 text scale and theme control metrics. The deck's height is their sum plus
 padding and gaps. Window/profile, text-scale, and theme-metric changes can
@@ -88,5 +100,6 @@ The Windows candidate is built with:
 For native acceptance, try paused and playing seeks on short one-shots and long
 recordings, drag beyond either edge, scrub rapidly then select another file,
 and use Tab/arrows/Home/End/Space on the waveform. Resize at fractional DPI and
-confirm the painted waveform still matches its hit region. Multiresolution
-peaks, waveform zoom/pan, and region selection are a later stage.
+confirm the painted waveform still matches its hit region. The coarse/fine peak
+levels remain bounded and do not yet request arbitrary source subranges.
+Region selection remains a later stage.

@@ -8,7 +8,7 @@ import ui "alicorn:ui"
 Audition_Layout :: struct {
 	compact: bool,
 	text_scale: f32,
-	header, waveform, footer, transport, volume, height: f32,
+	header, waveform, waveform_controls, footer, transport, volume, height: f32,
 }
 
 audition_layout :: proc(app: ^App, ctx: ^ui.UI) -> Audition_Layout {
@@ -21,13 +21,14 @@ audition_layout :: proc(app: ^App, ctx: ^ui.UI) -> Audition_Layout {
 		text_scale=scale,
 		header=max(28, 25.5*scale),
 		waveform=WAVEFORM_HEIGHT,
+		waveform_controls=max(32, max(metrics.button.minimum_hit_height, 20*scale+2*metrics.button.content_padding_y)),
 		footer=max(22, 18*scale+4),
 		transport=max(36, max(metrics.button.preferred_height,
 			max(metrics.button.minimum_hit_height, 24*scale+2*metrics.button.content_padding_y))),
 		volume=max(44, max(metrics.slider.preferred_height,
 			max(metrics.slider.minimum_hit_height, 20*scale+2*metrics.slider.content_padding_y))),
 	}
-	if layout.compact { layout.waveform = 64 }
+	if layout.compact { layout.waveform = 72 }
 	layout.height = layout.header+layout.waveform+layout.footer+layout.transport+layout.volume+24+4*8
 	return layout
 }

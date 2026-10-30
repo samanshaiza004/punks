@@ -280,8 +280,9 @@ fn waveform_resources_are_stable_across_transport_updates_and_reject_stale_seeks
     let waveform: WaveformWindow =
         serde_json::from_slice(unsafe { std::slice::from_raw_parts(lease.data, lease.len) })
             .unwrap();
-    assert_eq!(waveform.analysis_version, 2);
+    assert_eq!(waveform.analysis_version, 3);
     assert_eq!(waveform.channel_policy, "combined_envelope");
+    assert_eq!(waveform.peak_resolution as usize, waveform.peaks.len());
     for i in 1..=8 {
         c.send(json!({"v":1,"op":"volume","value": i as f32/10.0, "request_id":i}));
         let state = c.wait(|s| s.last_request_id == i).1;

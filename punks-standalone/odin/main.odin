@@ -143,6 +143,7 @@ read_state :: proc(app: ^App) -> bool {
 		next_window := app.window
 		next_waveform := app.waveform
 		waveform_slot := app.waveform_slot
+		waveform_axis_changed := false
 		if next_state.waveform != app.state.waveform {
 			view: Resource_View
 			if app.api.map_resource(app.transport, next_state.waveform.id, next_state.waveform.generation, &view) != OK {
@@ -151,12 +152,14 @@ read_state :: proc(app: ^App) -> bool {
 			}
 			waveform_slot = 1-app.waveform_slot
 			arena.arena_free_all(&app.waveform_memory[waveform_slot])
-			valid := view.len <= 64*1024
+			valid := view.len <= 1024*1024
 			if valid {
 				err = json.unmarshal(view.data[:int(view.len)], &next_waveform,
 					allocator=arena.arena_allocator(&app.waveform_memory[waveform_slot]))
-				valid = err == nil && next_waveform.v == 1 && next_waveform.analysis_version == 2 &&
-					next_waveform.channel_policy == "combined_envelope" && len(next_waveform.peaks) <= 512 &&
+				valid = err == nil && next_waveform.v == 1 && next_waveform.analysis_version == 3 &&
+					next_waveform.channel_policy == "combined_envelope" && len(next_waveform.peaks) <= 65_536 &&
+					next_waveform.peak_resolution == u32(len(next_waveform.peaks)) &&
+					(next_waveform.peak_resolution == 0 || next_waveform.peak_resolution == 512 || next_waveform.peak_resolution == 65_536) &&
 					next_waveform.file == next_state.waveform_file && next_waveform.start == next_state.waveform_start &&
 					next_waveform.duration == next_state.waveform_duration && next_waveform.duration >= 0
 			}
@@ -166,6 +169,8 @@ read_state :: proc(app: ^App) -> bool {
 				app.error = "Waveform resource failed validation"
 				return false
 			}
+			waveform_axis_changed = next_waveform.file != app.waveform.file ||
+				next_waveform.start != app.waveform.start || next_waveform.duration != app.waveform.duration
 		}
 		next_folders := app.folders
 		entry_slot := app.entry_slot
@@ -264,6 +269,10 @@ read_state :: proc(app: ^App) -> bool {
 		} else if next_state.last_request_id >= app.waveform_view.request_id &&
 			next_state.playback.status != "loading" && !app.waveform_view.dragging {
 			app.waveform_view.pending = false
+		}
+		if waveform_axis_changed {
+			app.waveform_view.zoom = 1
+			app.waveform_view.center_fraction = 0.5
 		}
 		app.state = next_state
 		app.waveform = next_waveform
@@ -667,6 +676,7 @@ main :: proc() {
 		on_dialog=dialog,
 		on_key=keys,
 		on_pointer=waveform_pointer,
+		on_scroll=waveform_scroll,
 		on_scheduled_wake=scheduled,
 		interaction_update_policy=.Correct_After_Interaction,
 	})
