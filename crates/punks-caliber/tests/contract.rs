@@ -263,3 +263,41 @@ fn repeated_open_close_and_shutdown_during_search_are_clean() {
         drop(c);
     }
 }
+
+#[test]
+fn waveform_resources_are_stable_across_transport_updates_and_reject_stale_seeks() {
+    let c = Client::new();
+    let first = c.wait(|s| s.ready).1;
+    let reference = first.waveform;
+    assert_ne!(reference.id, 0);
+    let mut lease = CaliberResourceView::default();
+    assert_eq!(
+        unsafe {
+            caliber_context_map_resource(c.context, reference.id, reference.generation, &mut lease)
+        },
+        CaliberStatus::Ok
+    );
+    let waveform: WaveformWindow =
+        serde_json::from_slice(unsafe { std::slice::from_raw_parts(lease.data, lease.len) })
+            .unwrap();
+    assert_eq!(waveform.analysis_version, 2);
+    assert_eq!(waveform.channel_policy, "combined_envelope");
+    for i in 1..=8 {
+        c.send(json!({"v":1,"op":"volume","value": i as f32/10.0, "request_id":i}));
+        let state = c.wait(|s| s.last_request_id == i).1;
+        assert_eq!(state.waveform, reference);
+        let serialized = serde_json::to_value(&state).unwrap();
+        assert!(serialized.get("waveform_peaks").is_none());
+    }
+    c.send(json!({"v":1,"op":"seek","seconds":1, "waveform":{"id":reference.id,"generation":reference.generation+1}, "request_id":99}));
+    let rejected = c.wait(|s| s.last_request_id == 99).1;
+    assert_eq!(rejected.error, "Stale waveform seek");
+    assert_eq!(rejected.waveform, reference);
+    // A lease survives owner shutdown and is released by its reader.
+    drop(c);
+    let after: WaveformWindow =
+        serde_json::from_slice(unsafe { std::slice::from_raw_parts(lease.data, lease.len) })
+            .unwrap();
+    assert_eq!(after.channel_policy, waveform.channel_policy);
+    unsafe { caliber_resource_release(&mut lease) };
+}

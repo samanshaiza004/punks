@@ -82,8 +82,10 @@ test_audition_deck_and_results_negotiate_in_same_update :: proc(t: ^testing.T) {
 	initial_builds := app.builds
 
 	app.state.waveform_file = app.state.selected.path
-	app.state.waveform_peaks = make([][2]i16, WAVEFORM_BARS, allocator=context.temp_allocator)
-	for &peak, index in app.state.waveform_peaks {
+	app.waveform.file = app.state.selected.path
+	app.waveform.duration = 1.25
+	app.waveform.peaks = make([][2]i16, WAVEFORM_BARS, allocator=context.temp_allocator)
+	for &peak, index in app.waveform.peaks {
 		peak = [2]i16{i16(5000+index*200), i16(-4000-index*150)}
 	}
 	app.state.playback = Playback{status="ready", duration=1.25}
@@ -97,7 +99,7 @@ test_audition_deck_and_results_negotiate_in_same_update :: proc(t: ^testing.T) {
 	testing.expect(t, app.builds == initial_builds+1,
 		"preview adoption should complete through one new application description")
 	testing.expect(t, has_seek_control,
-		"a loaded duration should add the seek control in that same description")
+		"a loaded waveform should add its seek interaction in that same description")
 	testing.expect(t, loaded_deck.h > initial_deck.h,
 		"the content-sized deck should grow when the seek control appears")
 	testing.expect(t, loaded_results.h < initial_results.h && loaded_list.h < initial_list.h,
@@ -113,7 +115,9 @@ test_audition_controls_fit_narrow_large_text_and_retain_focus :: proc(t: ^testin
 	app.search, _ = ui.text_buffer("", context.allocator)
 	defer ui.text_buffer_destroy(&app.search)
 	app.state.waveform_file = app.state.selected.path
-	app.state.waveform_peaks = make([][2]i16, WAVEFORM_BARS, allocator=context.temp_allocator)
+	app.waveform.file = app.state.selected.path
+	app.waveform.duration = 1.25
+	app.waveform.peaks = make([][2]i16, WAVEFORM_BARS, allocator=context.temp_allocator)
 	app.state.playback = Playback{
 		status="playing", file=app.state.selected.path, position=0.4, duration=2,
 	}
@@ -144,7 +148,7 @@ test_audition_controls_fit_narrow_large_text_and_retain_focus :: proc(t: ^testin
 	testing.expect(t, stop_found && rt.nodes[stop_id].label == "Stop",
 		"Stop should remain a separate action")
 	testing.expect(t, has_seek && has_volume,
-		"loaded playback should expose both seek and volume sliders")
+		"loaded playback should expose waveform seek semantics and the volume slider")
 	testing.expect(t, button_ordered && controls_inside,
 		"transport buttons should remain ordered and inside the audition deck at narrow width and 140% text scale")
 	if !has_seek || !has_volume { return }
@@ -162,14 +166,14 @@ test_audition_controls_fit_narrow_large_text_and_retain_focus :: proc(t: ^testin
 		alicorn.focused_node(&rt) == volume_id,
 		"updating playback state should retain volume-slider identity and focus")
 
-	testing.expect(t, alicorn.focus(&rt, seek_id), "the seek slider should accept keyboard focus")
+	testing.expect(t, alicorn.focus(&rt, seek_id), "the waveform should accept keyboard focus")
 	app.state.playback.position = 0.8
 	alicorn.invalidate_root(&rt, "playhead position updated")
 	_ = build(&app, &rt, 620, 720, 1)
 	updated_seek_id, updated_seek_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-seek"), .Slider)
 	testing.expect(t, updated_seek_found && updated_seek_id == seek_id &&
 		alicorn.focused_node(&rt) == seek_id,
-		"playhead updates should retain seek-slider identity and focus")
+		"playhead updates should retain waveform identity and focus")
 	testing.expect(t, rt.diagnostic == "", "narrow high-text transport layout should have no runtime diagnostic")
 }
 
@@ -196,4 +200,85 @@ test_result_buttons_render_one_filename_and_keep_accessible_names :: proc(t: ^te
 	testing.expect(t, exported && semantic.label == filename &&
 		alicorn.semantic_actions_has(semantic.actions, .Press),
 		"custom row content must preserve its accessible name and Press action")
+}
+
+@(test)
+test_waveform_retains_signed_geometry_and_updates_only_the_playhead :: proc(t: ^testing.T) {
+	app := layout_test_app()
+	app.search, _ = ui.text_buffer("", context.allocator)
+	defer ui.text_buffer_destroy(&app.search)
+	app.waveform = Waveform_Window{duration=89.3, peaks=make([][2]i16, 512, allocator=context.temp_allocator)}
+	for &peak in app.waveform.peaks { peak = {8192, 24576} }
+	app.state.playback = Playback{status="playing", position=12, duration=89.3}
+	rt := alicorn.new_runtime({0, 0, 1200, 800})
+	defer alicorn.destroy_runtime(&rt)
+	_ = build(&app, &rt, 1200, 800, 1.5)
+	v := &app.waveform_view
+	peak_info, peak_ok := alicorn.node_info(&rt, v.peaks_node)
+	head_info, head_ok := alicorn.node_info(&rt, v.head_node)
+	seek_info, seek_ok := alicorn.node_info(&rt, v.seek_node)
+	testing.expect(t, peak_ok && head_ok && seek_ok && peak_info.bounds == head_info.bounds &&
+		peak_info.bounds == seek_info.bounds, "the painted waveform, playhead and seek hit region must coincide")
+	if !peak_ok || !head_ok { return }
+	segments := rt.nodes[v.peaks_node].surface_segments
+	testing.expect(t, len(segments) > 64 && len(segments) <= 514,
+		"detail should adapt to width, using the bounded 512-peak envelope instead of 64 widgets")
+	testing.expect(t, segments[2].start.y < peak_info.bounds.h/2 && segments[2].end.y < peak_info.bounds.h/2,
+		"a positive-only source must stay above the center, preserving its signed envelope")
+	peaks, _ := alicorn.gpu_surface_context(&rt, v.peaks_node)
+	head, _ := alicorn.gpu_surface_context(&rt, v.head_node)
+	builds := app.builds
+	invalidated_before := rt.invalidated
+	app.state.playback.position = 42
+	waveform_update(&app, &rt)
+	updated_peaks, _ := alicorn.gpu_surface_context(&rt, v.peaks_node)
+	updated_head, _ := alicorn.gpu_surface_context(&rt, v.head_node)
+	testing.expect(t, peaks.payload_revision == updated_peaks.payload_revision &&
+		head.payload_revision < updated_head.payload_revision && app.builds == builds && rt.invalidated == invalidated_before,
+		fmt.tprintf("playhead-only update: peaks %d/%d, head %d/%d, builds %d/%d, invalidation %v/%v",
+		peaks.payload_revision, updated_peaks.payload_revision, head.payload_revision, updated_head.payload_revision,
+		builds, app.builds, invalidated_before, rt.invalidated))
+	semantic, ok := alicorn.semantic_node_lookup(&rt, alicorn.semantic_visual_id(v.seek_node))
+	testing.expect(t, ok && semantic.role == .Slider && semantic.has_numeric_value &&
+		alicorn.semantic_actions_has(semantic.actions, .Set_Value), "waveform seeking must expose a real accessible range control")
+}
+
+@(test)
+test_waveform_drag_uses_source_axis_coalesces_and_commits_final_target :: proc(t: ^testing.T) {
+	app := layout_test_app()
+	app.search, _ = ui.text_buffer("", context.allocator)
+	defer ui.text_buffer_destroy(&app.search)
+	app.waveform = Waveform_Window{start=20, duration=5, peaks=make([][2]i16, 512, allocator=context.temp_allocator)}
+	app.state.playback = Playback{status="paused", position=21, duration=120}
+	rt := alicorn.new_runtime({0, 0, 960, 720})
+	defer alicorn.destroy_runtime(&rt)
+	_ = build(&app, &rt, 960, 720, 1)
+	bounds := layout_test_bounds(t, &rt, "audition-seek", .Slider)
+	event := alicorn.Pointer_Event{kind=.Down, x=bounds.x+8+(bounds.w-16)*0.25,
+		y=bounds.y+bounds.h/2, button=alicorn.POINTER_BUTTON_PRIMARY}
+	target := alicorn.process_pointer(&rt, event)
+	testing.expect(t, target == app.waveform_view.seek_node, "inert graphics must pass clicks to their seek interaction owner")
+	waveform_pointer(&app, &rt, event, target)
+	testing.expect(t, app.waveform_view.pending && abs(app.waveform_view.fraction-0.25) < 0.001 &&
+		abs(app.waveform.start+f64(app.waveform_view.fraction)*app.waveform.duration-21.25) < 0.001,
+		"seeking must use the visible source interval, including a nonzero window origin")
+	for index in 0..<100 {
+		event.kind = .Move
+		event.x = bounds.x+f32(index)*bounds.w/100
+		target = alicorn.process_pointer(&rt, event)
+		waveform_pointer(&app, &rt, event, target)
+	}
+	before_release := app.next_diagnostic_request_id
+	event.kind = .Up
+	event.x = bounds.x+bounds.w+200
+	target = alicorn.process_pointer(&rt, event)
+	waveform_pointer(&app, &rt, event, target)
+	testing.expect(t, app.next_diagnostic_request_id == before_release+1 && before_release < 100 &&
+		app.waveform_view.fraction == 1 && !app.waveform_view.dragging,
+		"scrubbing must coalesce moves, retain capture outside the waveform, and always submit the clamped release target")
+	testing.expect(t, app.state.playback.status == "paused", "a seek must not optimistically change transport state")
+	testing.expect(t, alicorn.focus(&rt, app.waveform_view.seek_node), "waveform should be keyboard focusable")
+	_ = alicorn.set_focused_slider_bound(&rt, .Minimum)
+	_ = build(&app, &rt, 960, 720, 1)
+	testing.expect(t, app.waveform_view.fraction == 0, "Home should seek to the beginning of the displayed source interval")
 }

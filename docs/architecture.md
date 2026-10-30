@@ -43,9 +43,10 @@ explicit handling of historical analysis results are documented in
 The first native window supports opening a folder, navigating into and out of
 directories, a bounded scrollable audio list, stable selection, filename
 search, preview, stop, and seeking. It reports scan progress, playback state,
-audio-device availability, and operation errors. Waveform display and
-interactions, tags and metadata editing, settings UI, and external drag-out are
-not part of this first frontend.
+audio-device availability, and operation errors. The listening deck uses two
+retained GPU layers for signed min/max peaks and the playhead, with direct
+waveform seeking, pause/resume, Stop, and volume. Tags and metadata editing,
+settings UI, waveform zoom/pan, and external drag-out remain future work.
 
 The list uses 32 logical-pixel rows and the backend returns at most 128 entries
 per immutable resource. The UI requests another window only when scrolling

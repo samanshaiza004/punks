@@ -141,7 +141,17 @@ State :: struct {
 	waveform_file: string,
 	waveform_start: f64,
 	waveform_duration: f64,
-	waveform_peaks: [][2]i16,
+	waveform: Resource,
+}
+
+Waveform_Window :: struct {
+	v: u32,
+	analysis_version: u32,
+	channel_policy: string,
+	file: string,
+	start: f64,
+	duration: f64,
+	peaks: [][2]i16,
 }
 
 Command :: struct {
@@ -155,6 +165,7 @@ Command :: struct {
 	offset: int,
 	delta: i32,
 	seconds: f64,
+	waveform: Resource,
 	value: f32,
 	audition: bool,
 	request_id: u64,

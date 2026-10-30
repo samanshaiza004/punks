@@ -772,34 +772,54 @@ impl PlaybackEngine {
         }
     }
 
-    /// Seek to `target` seconds into the SOURCE and play from there. If the
+    /// Seek to `target` seconds into the SOURCE, preserving transport state. If the
     /// loaded buffer already covers `target`, this just moves the cursor
     /// (instant). Otherwise it requests an on-demand window decode at `target`
-    /// (scrubbing a long file past its loaded region) — playback resumes when
-    /// that window commits via [`poll`].
+    /// (scrubbing a long file past its loaded region). The replacement window
+    /// commits via [`poll`] and remains paused if the user was inspecting it.
     ///
     /// `&mut self` because the out-of-window case enqueues a decode. The
     /// in-window fast path is atomics only; its cursor store is published by
     /// the `Release` store of that buffer's playing flag, which the callback
     /// loads with `Acquire`, so a seek never reads a stale position.
     pub fn seek_to(&mut self, target: Duration) {
-        self.paused = false;
         let total = self.loaded_total_frames();
         if total == 0 {
             return;
         }
         let rate = self.device_sample_rate as f64;
+        let playing = !self.paused
+            && (self.pending.is_some()
+                || self
+                    .active_buffer
+                    .as_ref()
+                    .is_some_and(|buffer| buffer.playing.load(Ordering::Acquire)));
+        self.paused = !playing;
+        let target = self
+            .current_info
+            .as_ref()
+            .map(|info| {
+                target.min(
+                    info.source_duration
+                        .saturating_sub(Duration::from_secs_f64(1.0 / rate)),
+                )
+            })
+            .unwrap_or(target);
         let loaded = total as f64 / rate;
         let ws = self.current_window_start.as_secs_f64();
         let t = target.as_secs_f64();
 
         if t >= ws && t < ws + loaded {
+            // A scrub back into the prepared window supersedes an outstanding
+            // out-of-window decode, just as a newer decode request does.
+            self.pending = None;
+            self.pending_buffer = None;
             let within = t - ws;
             let frame = ((within * rate) as usize).min(total - 1);
             let channels = self.device_channels.max(1) as usize;
             if let Some(active) = self.active_buffer.as_ref() {
                 active.cursor.store(frame * channels, Ordering::SeqCst);
-                active.playing.store(true, Ordering::Release);
+                active.playing.store(playing, Ordering::Release);
             }
             return;
         }
@@ -1152,10 +1172,57 @@ mod tests {
 
         engine.stop();
         assert_eq!(
-            engine.active_buffer.as_ref().unwrap().cursor.load(Ordering::SeqCst),
+            engine
+                .active_buffer
+                .as_ref()
+                .unwrap()
+                .cursor
+                .load(Ordering::SeqCst),
             0
         );
         assert!(matches!(engine.status(), PlaybackStatus::Idle));
+    }
+
+    #[test]
+    fn seeking_preserves_pause_and_supersedes_pending_window() {
+        let mut engine = handoff_test_engine(Arc::new(SharedState::new()));
+        let buffer = published(&vec![0.0; 48_000], 1);
+        engine.current_file = Some(buffer.audio.file.clone());
+        engine.current_info = Some(buffer.audio.info.clone());
+        engine.current_info.as_mut().unwrap().source_duration = Duration::from_secs(10);
+        engine.active_buffer = Some(buffer);
+        engine.pause();
+        engine.seek_to(Duration::from_millis(750));
+        assert!(
+            matches!(engine.status(), PlaybackStatus::Paused { position, .. }
+            if position == Duration::from_millis(750))
+        );
+        engine.seek_to(Duration::from_secs(5));
+        assert!(engine.pending.is_some());
+        assert!(engine.paused);
+        // A newer seek inside the old window cancels the slow decode.
+        engine.seek_to(Duration::from_millis(250));
+        assert!(engine.pending.is_none());
+        assert!(
+            matches!(engine.status(), PlaybackStatus::Paused { position, .. }
+            if position == Duration::from_millis(250))
+        );
+        engine.seek_to(Duration::from_secs(5));
+        let mut replacement = (*engine.active_buffer.as_ref().unwrap().audio).clone();
+        replacement.window_start = Duration::from_secs(5);
+        replacement.info.source_duration = Duration::from_secs(10);
+        engine.pending = None;
+        engine.publish_now(Arc::new(replacement));
+        assert!(
+            matches!(engine.status(), PlaybackStatus::Paused { position, .. }
+            if position == Duration::from_secs(5))
+        );
+        engine.resume();
+        engine.seek_to(Duration::from_millis(5500));
+        assert!(
+            matches!(engine.status(), PlaybackStatus::Playing { position, .. }
+            if position == Duration::from_millis(5500))
+        );
     }
 
     #[test]

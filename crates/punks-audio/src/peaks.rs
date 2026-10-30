@@ -17,26 +17,22 @@ pub fn compute_peaks(samples: &[f32], channels: usize, num_buckets: usize) -> Wa
         };
     }
 
-    let frames_per_bucket = (num_frames as f64 / num_buckets as f64).max(1.0);
-    let inv_channels = 1.0 / channels as f32;
     let mut peaks = Vec::with_capacity(num_buckets);
 
     for bucket in 0..num_buckets {
-        let start = (bucket as f64 * frames_per_bucket) as usize;
-        let end = (((bucket + 1) as f64 * frames_per_bucket) as usize).min(num_frames);
+        let start = bucket * num_frames / num_buckets;
+        let end = (((bucket + 1) * num_frames / num_buckets).max(start + 1)).min(num_frames);
 
         let mut min = f32::MAX;
         let mut max = f32::MIN;
 
         for frame in start..end {
             let base = frame * channels;
-            let mut mono = 0.0f32;
             for ch in 0..channels {
-                mono += samples[base + ch];
+                let sample = samples[base + ch];
+                min = min.min(sample);
+                max = max.max(sample);
             }
-            mono *= inv_channels;
-            min = min.min(mono);
-            max = max.max(mono);
         }
 
         if min == f32::MAX {
@@ -76,13 +72,20 @@ mod tests {
     }
 
     #[test]
-    fn stereo_averages_channels() {
+    fn opposite_polarity_stereo_preserves_both_excursions() {
         let samples = vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
         let peaks = compute_peaks(&samples, 2, 2);
         for &(lo, hi) in &peaks.peaks {
-            assert!((lo - 0.0).abs() < 1e-6);
-            assert!((hi - 0.0).abs() < 1e-6);
+            assert_eq!((lo, hi), (-1.0, 1.0));
         }
+    }
+
+    #[test]
+    fn very_short_sources_fill_the_timeline_without_a_silent_tail() {
+        let peaks = compute_peaks(&[0.25, 0.75], 1, 512);
+        assert_eq!(peaks.peaks[0], (0.25, 0.25));
+        assert_eq!(peaks.peaks[511], (0.75, 0.75));
+        assert!(peaks.peaks.iter().all(|&(lo, hi)| lo > 0.0 && hi >= lo));
     }
 
     #[test]

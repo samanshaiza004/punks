@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Odin,
+    [string]$OutputDirectory,
     [switch]$Release,
     [switch]$TestUi
 )
@@ -47,7 +48,11 @@ try {
         throw "SDL3.dll at '$SDLRuntime' appears to be a Git LFS pointer, not a runtime."
     }
 
-    $OutputDirectory = Join-Path $RepoRoot "target/windows-x86_64/$Profile"
+    if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+        $OutputDirectory = Join-Path $RepoRoot "target/windows-x86_64/$Profile"
+    } elseif (-not [IO.Path]::IsPathRooted($OutputDirectory)) {
+        $OutputDirectory = Join-Path $RepoRoot $OutputDirectory
+    }
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
     $Executable = Join-Path $OutputDirectory 'punks.exe'
     $LinkerFlags = $AccessKit.LinkerFlags

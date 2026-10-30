@@ -6,8 +6,8 @@ import ui "alicorn:ui"
 import host "alicorn:native/sdl_gpu"
 
 TAB_BAR_HEIGHT :: 36
-WAVEFORM_HEIGHT :: 56
-WAVEFORM_BARS :: 64
+WAVEFORM_HEIGHT :: 100
+WAVEFORM_BARS :: 512
 
 format_bytes :: proc(size: u64) -> string {
 	if size >= 1024*1024*1024 {
@@ -408,28 +408,6 @@ render_results :: proc(app: ^App, ctx: ^ui.UI) {
 	}
 }
 
-waveform_bar_height :: proc(app: ^App, bar: int) -> f32 {
-	if len(app.state.waveform_peaks) == 0 {
-		return 0
-	}
-	start := bar*len(app.state.waveform_peaks)/WAVEFORM_BARS
-	end := (bar+1)*len(app.state.waveform_peaks)/WAVEFORM_BARS
-	if end <= start {
-		end = min(start+1, len(app.state.waveform_peaks))
-	}
-	peak: i32 = 0
-	for index := start; index < end; index += 1 {
-		for value in app.state.waveform_peaks[index] {
-			magnitude := i32(value)
-			if magnitude < 0 {
-				magnitude = -magnitude
-			}
-			peak = max(peak, magnitude)
-		}
-	}
-	return max(3, f32(peak)/f32(32767)*48)
-}
-
 render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 	if ui.panel(
 		ctx,
@@ -461,35 +439,7 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				_ = ui.text(ctx, format_bytes(app.state.selected.size), color=alicorn.style_color(ctx, .Muted_Text))
 			}
 		}
-		if len(app.state.waveform_peaks) > 0 {
-			if ui.row(ctx, height=WAVEFORM_HEIGHT, gap=1, align=.Center, clip=true, label="waveform") {
-				accent := alicorn.style_color(ctx, .Accent)
-				for bar := 0; bar < WAVEFORM_BARS; bar += 1 {
-					if ui.layout(
-						ctx,
-						ui.layout_style(.Column, height=WAVEFORM_HEIGHT, grow=1, align=.Center, justify=.Center),
-						key=alicorn.key_u64(u64(bar)),
-						label="waveform-column",
-					) {
-						_ = ui.box(
-							ctx,
-							key=alicorn.key_u64(u64(bar)+1),
-							width=3,
-							height=waveform_bar_height(app, bar),
-							fill=accent,
-							radius=1,
-						)
-					}
-				}
-			}
-		} else {
-			_ = ui.text(
-				ctx,
-				"Waveform appears when a preview is loaded",
-				style=ui.layout_style(height=WAVEFORM_HEIGHT),
-				color=alicorn.style_color(ctx, .Muted_Text),
-			)
-		}
+		render_waveform(app, ctx)
 		if ui.row(ctx, gap=8, align=.Center, label="audition-transport") {
 			if ui.button(
 				ctx,
@@ -554,19 +504,6 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				style=ui.layout_style(grow=1),
 				color=alicorn.style_color(ctx, .Muted_Text),
 			)
-		}
-		if app.state.playback.duration > 0 {
-			seek_position := f32(app.state.playback.position)
-			if ui.slider_f32(
-				ctx,
-				"Position",
-				&seek_position,
-				0,
-				f32(app.state.playback.duration),
-				key=alicorn.key_string("audition-seek"),
-			) {
-				send(app, Command{op="seek", seconds=f64(seek_position)})
-			}
 		}
 		if ui.row(ctx, gap=8, align=.Center, label="audition-volume-row") {
 			volume := app.state.volume

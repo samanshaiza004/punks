@@ -955,7 +955,9 @@ fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
 //   source_size u64 LE | source_mtime_ms i64 LE |    <- validity stamp
 //   num_buckets * (lo f32 LE, hi f32 LE)
 const WAVEFORM_MAGIC: &[u8; 4] = b"PKWF";
-const WAVEFORM_VERSION: u8 = 1;
+// Version 2 uses an envelope across channels instead of an averaged mono mix.
+// Recompute version-1 caches so phase-inverted stereo cannot appear silent.
+const WAVEFORM_VERSION: u8 = 2;
 const WAVEFORM_HEADER_LEN: usize = 4 + 1 + 4 + 8 + 8;
 
 fn encode_waveform_bin(peaks: &[(f32, f32)], source_size: u64, source_mtime_ms: i64) -> Vec<u8> {
@@ -1034,4 +1036,19 @@ fn hash_file(abs: &Path, size: u64) -> Result<String, LibraryError> {
         hasher.update(&buf);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(test)]
+mod waveform_cache_tests {
+    use super::*;
+    #[test]
+    fn version_two_rejects_old_channel_averaged_and_changed_source_caches() {
+        let peaks = vec![(-1.0, 1.0), (0.25, 0.75)];
+        let mut bytes = encode_waveform_bin(&peaks, 128, 42);
+        assert_eq!(decode_waveform_bin(&bytes, 128, 42), Some(peaks));
+        assert!(decode_waveform_bin(&bytes, 129, 42).is_none());
+        assert!(decode_waveform_bin(&bytes, 128, 43).is_none());
+        bytes[4] = 1;
+        assert!(decode_waveform_bin(&bytes, 128, 42).is_none());
+    }
 }

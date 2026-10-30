@@ -30,6 +30,11 @@ App :: struct {
 	list_node: alicorn.Node_ID,
 	folder_node: alicorn.Node_ID,
 	state: State,
+	waveform: Waveform_Window,
+	waveform_view: Waveform_View,
+	waveform_memory: [2]arena.Arena,
+	waveform_slot: int,
+	dpi_scale: f32,
 	window: Entry_Window,
 	folders: Folder_Window,
 	revision: u64,
@@ -69,14 +74,16 @@ send :: proc(app: ^App, command: Command) {
 	if c.tab_id == 0 {
 		c.tab_id = app.state.active_tab
 	}
+	// All UI commands use one monotonic request sequence so a later command
+	// cannot hide a pending seek acknowledgement with the default ID zero.
+	if c.request_id == 0 {
+		app.next_diagnostic_request_id += 1
+		c.request_id = app.next_diagnostic_request_id
+	} else if c.request_id > app.next_diagnostic_request_id {
+		app.next_diagnostic_request_id = c.request_id
+	}
 	is_directory_open := c.op == "open"
 	if is_directory_open {
-		if c.request_id == 0 {
-			app.next_diagnostic_request_id += 1
-			c.request_id = app.next_diagnostic_request_id
-		} else if c.request_id > app.next_diagnostic_request_id {
-			app.next_diagnostic_request_id = c.request_id
-		}
 		app.directory_request_id = c.request_id
 		app.directory_request_reported = false
 	}
@@ -134,6 +141,32 @@ read_state :: proc(app: ^App) -> bool {
 		changed_resource := next_state.entries != app.state.entries ||
 			next_state.folders != app.state.folders
 		next_window := app.window
+		next_waveform := app.waveform
+		waveform_slot := app.waveform_slot
+		if next_state.waveform != app.state.waveform {
+			view: Resource_View
+			if app.api.map_resource(app.transport, next_state.waveform.id, next_state.waveform.generation, &view) != OK {
+				app.api.release_state(&publication)
+				continue
+			}
+			waveform_slot = 1-app.waveform_slot
+			arena.arena_free_all(&app.waveform_memory[waveform_slot])
+			valid := view.len <= 64*1024
+			if valid {
+				err = json.unmarshal(view.data[:int(view.len)], &next_waveform,
+					allocator=arena.arena_allocator(&app.waveform_memory[waveform_slot]))
+				valid = err == nil && next_waveform.v == 1 && next_waveform.analysis_version == 2 &&
+					next_waveform.channel_policy == "combined_envelope" && len(next_waveform.peaks) <= 512 &&
+					next_waveform.file == next_state.waveform_file && next_waveform.start == next_state.waveform_start &&
+					next_waveform.duration == next_state.waveform_duration && next_waveform.duration >= 0
+			}
+			app.api.release_resource_view(&view)
+			if !valid {
+				app.api.release_state(&publication)
+				app.error = "Waveform resource failed validation"
+				return false
+			}
+		}
 		next_folders := app.folders
 		entry_slot := app.entry_slot
 		if changed_resource {
@@ -224,7 +257,17 @@ read_state :: proc(app: ^App) -> bool {
 				app.directory_request_reported = true
 			}
 		}
+		if next_state.waveform != app.state.waveform {
+			app.waveform_view.pending = false
+			app.waveform_view.dragging = false
+			app.waveform_view.sent = false
+		} else if next_state.last_request_id >= app.waveform_view.request_id &&
+			next_state.playback.status != "loading" && !app.waveform_view.dragging {
+			app.waveform_view.pending = false
+		}
 		app.state = next_state
+		app.waveform = next_waveform
+		app.waveform_slot = waveform_slot
 		app.window = next_window
 		app.folders = next_folders
 		app.state_slot = state_slot
@@ -523,8 +566,7 @@ keys :: proc(data: rawptr, rt: ^alicorn.Runtime, key: host.Application_Key) -> b
 		if rt.focused == app.search_node {
 			return false
 		}
-		playback_op := "play" if app.state.playback.status == "idle" else "stop"
-		send(app, Command{op=playback_op})
+		toggle_playback(app)
 		return true
 	case .Open_Repository:
 		open_folder(app)
@@ -552,6 +594,7 @@ build :: proc(
 	}
 	app.builds += 1
 	app.viewport_width = width
+	app.dpi_scale = _dpi
 	punks_styles_ensure(app, rt)
 
 	root := alicorn.container_begin(&ctx, .Root, label="punks", style=ui.layout_style(grow=1), color=ui.rgb(0x181B1D))
@@ -564,6 +607,7 @@ build :: proc(
 	alicorn.style_environment_pop(&ctx, scope)
 	alicorn.container_end(&ctx)
 	alicorn.end_frame(&ctx)
+	waveform_update(app, rt)
 	return root
 }
 
@@ -600,11 +644,13 @@ main :: proc() {
 	for index in 0..<2 {
 		_ = arena.arena_init_growing(&app.state_memory[index])
 		_ = arena.arena_init_growing(&app.entry_memory[index])
+		_ = arena.arena_init_growing(&app.waveform_memory[index])
 	}
 	defer {
 		for index in 0..<2 {
 			arena.arena_destroy(&app.state_memory[index])
 			arena.arena_destroy(&app.entry_memory[index])
+			arena.arena_destroy(&app.waveform_memory[index])
 		}
 	}
 
@@ -620,6 +666,7 @@ main :: proc() {
 		on_services=services,
 		on_dialog=dialog,
 		on_key=keys,
+		on_pointer=waveform_pointer,
 		on_scheduled_wake=scheduled,
 		interaction_update_policy=.Correct_After_Interaction,
 	})

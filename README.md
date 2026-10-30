@@ -9,8 +9,10 @@ selects files, and previews or stops playback. It reads WAV (including RF64 and
 Broadcast Wave), FLAC, MP3, and OGG through the existing Rust audio engine.
 The workbench has folder navigation, per-tab browsing and search, a virtualized
 file table, and a persistent waveform and listening deck.
-Long-file previews remain bounded. The new interface does not yet expose
-waveform gestures, library tagging controls, settings, or drag-out.
+Long-file previews remain bounded. Click or drag the signed waveform to seek;
+Tab focuses it for arrow-key and Home/End seeking. Space pauses or resumes,
+and Stop resets the position. Library tagging controls, settings, waveform
+zoom/pan, and drag-out remain future work.
 
 ## Build
 

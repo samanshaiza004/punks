@@ -1201,21 +1201,14 @@ pub fn compute_source_peaks_cancellable(
         let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
         sample_buf.copy_interleaved_ref(decoded);
         let samples = sample_buf.samples();
-        let inv_ch = 1.0 / ch as f32;
         for f in 0..num_frames {
             let base = f * ch;
-            let mut mono = 0.0f32;
-            for c in 0..ch {
-                mono += samples[base + c];
-            }
-            mono *= inv_ch;
             let bucket = ((frame_idx.saturating_mul(num_buckets as u64) / source_frames) as usize)
                 .min(num_buckets - 1);
-            if mono < mins[bucket] {
-                mins[bucket] = mono;
-            }
-            if mono > maxs[bucket] {
-                maxs[bucket] = mono;
+            for c in 0..ch {
+                let sample = samples[base + c];
+                mins[bucket] = mins[bucket].min(sample);
+                maxs[bucket] = maxs[bucket].max(sample);
             }
             frame_idx += 1;
         }
@@ -1458,6 +1451,23 @@ mod tests {
         ));
         std::fs::write(&p, bytes).unwrap();
         p
+    }
+
+    #[test]
+    fn source_peaks_preserve_opposite_polarity_stereo() {
+        let mut file = pcm_wav(8_000, 16_000);
+        file[22..24].copy_from_slice(&2u16.to_le_bytes());
+        file[28..32].copy_from_slice(&32_000u32.to_le_bytes());
+        file[32..34].copy_from_slice(&4u16.to_le_bytes());
+        for frame in file[44..].chunks_exact_mut(4) {
+            frame[..2].copy_from_slice(&32_767i16.to_le_bytes());
+            frame[2..].copy_from_slice(&(-32_768i16).to_le_bytes());
+        }
+        let path = temp_wav("stereo-envelope", &file);
+        let peaks = compute_source_peaks(&path, 512);
+        let _ = std::fs::remove_file(&path);
+        let peaks = peaks.unwrap();
+        assert!(peaks.peaks.iter().all(|&(lo, hi)| lo < -0.99 && hi > 0.99));
     }
 
     #[test]

@@ -141,7 +141,7 @@ pub unsafe extern "C" fn punks_create(
             max_command_bytes: MAX_COMMAND,
             max_publication_bytes: 64 * 1024,
             max_resource_bytes: 1024 * 1024,
-            max_resources: 8,
+            max_resources: 12,
             max_pending_commands: 64,
             ..Default::default()
         };
@@ -275,6 +275,8 @@ struct Command {
     delta: i32,
     #[serde(default)]
     seconds: f64,
+    #[serde(default)]
+    waveform: Resource,
     #[serde(default)]
     value: f32,
     #[serde(default)]
@@ -414,7 +416,18 @@ pub struct State {
     pub waveform_file: String,
     pub waveform_start: f64,
     pub waveform_duration: f64,
-    pub waveform_peaks: Vec<[i16; 2]>,
+    pub waveform: Resource,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WaveformWindow {
+    pub v: u32,
+    pub analysis_version: u32,
+    pub channel_policy: String,
+    pub file: String,
+    pub start: f64,
+    pub duration: f64,
+    pub peaks: Vec<[i16; 2]>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TabView {
@@ -474,6 +487,8 @@ struct Publication {
     tab_offsets: HashMap<u64, usize>,
     next_tab_id: u64,
     active_tab_id: u64,
+    waveform_resource: Resource,
+    waveform_bytes: Vec<u8>,
 }
 impl Publication {
     fn active_tab(&self, b: &SampleBrowser) -> u64 {
@@ -638,6 +653,25 @@ impl Publication {
             })
             .unwrap_or_default();
         let (waveform_start, waveform_duration) = b.waveform_axis().unwrap_or((0.0, 0.0));
+        let waveform_file = b
+            .current_file()
+            .map(|path| text(&path.to_string_lossy(), 4096))
+            .unwrap_or_default();
+        let waveform_bytes = serde_json::to_vec(&WaveformWindow {
+            v: PROTOCOL,
+            analysis_version: 2,
+            channel_policy: "combined_envelope".into(),
+            file: waveform_file.clone(),
+            start: waveform_start,
+            duration: waveform_duration,
+            peaks: waveform_peaks,
+        })
+        .map_err(|_| CaliberStatus::Internal)?;
+        let fresh_waveform = if waveform_bytes != self.waveform_bytes {
+            Some(t.resource(&waveform_bytes)?)
+        } else {
+            None
+        };
         let progress = b.scan_progress();
         let state = State {
             v: PROTOCOL,
@@ -679,13 +713,10 @@ impl Publication {
             scan_total: progress.map(|p| p.1).unwrap_or(0),
             command_sequence: self.sequence,
             last_request_id: self.request,
-            waveform_file: b
-                .current_file()
-                .map(|path| text(&path.to_string_lossy(), 4096))
-                .unwrap_or_default(),
+            waveform_file,
             waveform_start,
             waveform_duration,
-            waveform_peaks,
+            waveform: fresh_waveform.unwrap_or(self.waveform_resource),
         };
         let bytes = serde_json::to_vec(&state).map_err(|_| CaliberStatus::Internal)?;
         if bytes != self.last {
@@ -694,6 +725,9 @@ impl Publication {
                     t.retire(r);
                 }
                 if let Some(r) = fresh_folders {
+                    t.retire(r);
+                }
+                if let Some(r) = fresh_waveform {
                     t.retire(r);
                 }
                 return Err(e);
@@ -713,6 +747,13 @@ impl Publication {
             }
             self.folder_resource = r;
             self.folder_window_key = folder_window_key;
+        }
+        if let Some(r) = fresh_waveform {
+            if self.waveform_resource.id != 0 {
+                self.old.push(self.waveform_resource);
+            }
+            self.waveform_resource = r;
+            self.waveform_bytes = waveform_bytes;
         }
         while self.old.len() > 4 {
             t.retire(self.old.remove(0));
@@ -827,6 +868,14 @@ impl Publication {
                 b.set_volume(c.value);
             }
             "seek" => {
+                if c.waveform.id != 0
+                    && (c.waveform != self.waveform_resource
+                        || b.waveform_axis().is_none()
+                        || b.current_file()
+                            .is_none_or(|p| p.to_string_lossy() != c.path))
+                {
+                    return Err("Stale waveform seek".into());
+                }
                 if !c.seconds.is_finite() || !(0.0..=1e9).contains(&c.seconds) {
                     return Err("Invalid seek position".into());
                 }
@@ -1014,7 +1063,11 @@ fn run(t: Transport, signal: Arc<Signal>, flags: u32) {
         punks_core::config::save(&cfg);
     }
     drop(browser);
-    for r in p.old.into_iter().chain([p.resource, p.folder_resource]) {
+    for r in p
+        .old
+        .into_iter()
+        .chain([p.resource, p.folder_resource, p.waveform_resource])
+    {
         t.retire(r);
     }
 }
