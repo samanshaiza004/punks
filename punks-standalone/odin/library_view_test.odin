@@ -108,6 +108,72 @@ test_audition_deck_and_results_negotiate_in_same_update :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_audition_controls_fit_narrow_large_text_and_retain_focus :: proc(t: ^testing.T) {
+	app := layout_test_app()
+	app.search, _ = ui.text_buffer("", context.allocator)
+	defer ui.text_buffer_destroy(&app.search)
+	app.state.waveform_file = app.state.selected.path
+	app.state.waveform_peaks = make([][2]i16, WAVEFORM_BARS, allocator=context.temp_allocator)
+	app.state.playback = Playback{
+		status="playing", file=app.state.selected.path, position=0.4, duration=2,
+	}
+	app.state.volume = 0.7
+	rt := alicorn.new_runtime({0, 0, 620, 720})
+	defer alicorn.destroy_runtime(&rt)
+	_ = alicorn.style_root_accessibility_observation_set(
+		&rt,
+		alicorn.Accessibility_Appearance_Observation{text_scale=1.4, text_scale_known=true},
+	)
+	_ = build(&app, &rt, 620, 720, 1)
+
+	deck := layout_test_bounds(t, &rt, "audition-deck", .Container)
+	previous := layout_test_bounds(t, &rt, "audition-previous", .Button)
+	start_pause := layout_test_bounds(t, &rt, "audition-start-pause", .Button)
+	stop := layout_test_bounds(t, &rt, "audition-stop", .Button)
+	next := layout_test_bounds(t, &rt, "audition-next", .Button)
+	start_id, start_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-start-pause"), .Button)
+	stop_id, stop_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-stop"), .Button)
+	seek_id, has_seek := alicorn.node_by_key(&rt, alicorn.key_string("audition-seek"), .Slider)
+	volume_id, has_volume := alicorn.node_by_key(&rt, alicorn.key_string("audition-volume"), .Slider)
+	button_ordered := previous.x+previous.w <= start_pause.x &&
+		start_pause.x+start_pause.w <= stop.x && stop.x+stop.w <= next.x
+	controls_inside := previous.x >= deck.x && next.x+next.w <= deck.x+deck.w &&
+		previous.y >= deck.y && next.y+next.h <= deck.y+deck.h
+	testing.expect(t, start_found && rt.nodes[start_id].label == "Pause",
+		"playing state should expose the Pause action")
+	testing.expect(t, stop_found && rt.nodes[stop_id].label == "Stop",
+		"Stop should remain a separate action")
+	testing.expect(t, has_seek && has_volume,
+		"loaded playback should expose both seek and volume sliders")
+	testing.expect(t, button_ordered && controls_inside,
+		"transport buttons should remain ordered and inside the audition deck at narrow width and 140% text scale")
+	if !has_seek || !has_volume { return }
+
+	testing.expect(t, alicorn.focus(&rt, volume_id), "the volume slider should accept keyboard focus")
+	app.state.playback.status = "paused"
+	app.state.volume = 0.55
+	alicorn.invalidate_root(&rt, "paused playback and volume state adopted")
+	_ = build(&app, &rt, 620, 720, 1)
+	updated_start_id, updated_start_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-start-pause"), .Button)
+	updated_volume_id, updated_volume_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-volume"), .Slider)
+	testing.expect(t, updated_start_found && rt.nodes[updated_start_id].label == "Start",
+		"paused playback should offer Start to resume")
+	testing.expect(t, updated_volume_found && updated_volume_id == volume_id &&
+		alicorn.focused_node(&rt) == volume_id,
+		"updating playback state should retain volume-slider identity and focus")
+
+	testing.expect(t, alicorn.focus(&rt, seek_id), "the seek slider should accept keyboard focus")
+	app.state.playback.position = 0.8
+	alicorn.invalidate_root(&rt, "playhead position updated")
+	_ = build(&app, &rt, 620, 720, 1)
+	updated_seek_id, updated_seek_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-seek"), .Slider)
+	testing.expect(t, updated_seek_found && updated_seek_id == seek_id &&
+		alicorn.focused_node(&rt) == seek_id,
+		"playhead updates should retain seek-slider identity and focus")
+	testing.expect(t, rt.diagnostic == "", "narrow high-text transport layout should have no runtime diagnostic")
+}
+
+@(test)
 test_result_buttons_render_one_filename_and_keep_accessible_names :: proc(t: ^testing.T) {
 	app := layout_test_app()
 	app.search, _ = ui.text_buffer("", context.allocator)

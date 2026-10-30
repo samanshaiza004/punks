@@ -1124,6 +1124,41 @@ mod tests {
     }
 
     #[test]
+    fn pause_resume_preserves_position_and_stop_resets_it() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = handoff_test_engine(shared);
+        let buffer = published(&vec![0.0; 48_000], 1);
+        buffer.cursor.store(24_000, Ordering::SeqCst);
+        buffer.playing.store(true, Ordering::Release);
+        engine.current_file = Some(buffer.audio.file.clone());
+        engine.current_info = Some(buffer.audio.info.clone());
+        engine.active_buffer = Some(buffer);
+
+        assert!(matches!(
+            engine.status(),
+            PlaybackStatus::Playing { position, .. } if position == Duration::from_millis(500)
+        ));
+        engine.pause();
+        assert!(matches!(
+            engine.status(),
+            PlaybackStatus::Paused { position, .. } if position == Duration::from_millis(500)
+        ));
+
+        engine.resume();
+        assert!(matches!(
+            engine.status(),
+            PlaybackStatus::Playing { position, .. } if position == Duration::from_millis(500)
+        ));
+
+        engine.stop();
+        assert_eq!(
+            engine.active_buffer.as_ref().unwrap().cursor.load(Ordering::SeqCst),
+            0
+        );
+        assert!(matches!(engine.status(), PlaybackStatus::Idle));
+    }
+
+    #[test]
     fn request_slot_coalesces_to_latest() {
         // Several sends before anyone reads: only the last one should surface.
         let slot = RequestSlot::new();
