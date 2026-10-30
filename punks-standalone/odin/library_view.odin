@@ -426,7 +426,7 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 	if ui.panel(
 		ctx,
 		key=alicorn.key_string("audition-deck"),
-		height=186,
+		sizing=ui.sizing(height=ui.fit_content()),
 		padding=12,
 		gap=8,
 		clip=true,
@@ -434,7 +434,7 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 		stroke=ui.border(1, alicorn.style_color(ctx, .Border)),
 		label="Audition",
 	) {
-		if ui.row(ctx, height=24, gap=10, align=.Center, label="audition-track-info") {
+		if ui.row(ctx, gap=10, align=.Center, label="audition-track-info") {
 			name := app.state.selected.name
 			if len(app.state.waveform_file) > 0 {
 				name = path_basename(app.state.waveform_file)
@@ -480,13 +480,12 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				color=alicorn.style_color(ctx, .Muted_Text),
 			)
 		}
-		if ui.row(ctx, height=34, gap=8, align=.Center, label="audition-transport") {
+		if ui.row(ctx, gap=8, align=.Center, label="audition-transport") {
 			if ui.button(
 				ctx,
 				"Previous",
 				key=alicorn.key_string("audition-previous"),
 				width=78,
-				height=32,
 				state=ui.Button_State{disabled=len(app.state.selected.id) == 0 || app.state.selected.directory},
 				variant=.Quiet,
 			) {
@@ -506,7 +505,6 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				play_label,
 				key=alicorn.key_string("audition-play-stop"),
 				width=112,
-				height=32,
 				state=ui.Button_State{disabled=play_disabled},
 				variant=.Primary,
 			) {
@@ -517,7 +515,6 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				"Next",
 				key=alicorn.key_string("audition-next"),
 				width=66,
-				height=32,
 				state=ui.Button_State{disabled=len(app.state.selected.id) == 0 || app.state.selected.directory},
 				variant=.Quiet,
 			) {
@@ -539,7 +536,6 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				0,
 				f32(app.state.playback.duration),
 				key=alicorn.key_string("audition-seek"),
-				style=ui.layout_style(.Row, height=30),
 			) {
 				send(app, Command{op="seek", seconds=f64(seek_position)})
 			}
