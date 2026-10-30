@@ -51,6 +51,11 @@ pub enum PlaybackStatus {
         position: Duration,
         duration: Duration,
     },
+    Paused {
+        file: PathBuf,
+        position: Duration,
+        duration: Duration,
+    },
 }
 
 #[derive(Debug)]
@@ -255,6 +260,7 @@ pub struct PlaybackEngine {
     next_buffer_generation: u64,
     /// The decode we're awaiting, if any.
     pending: Option<PendingReq>,
+    paused: bool,
     next_request_id: u64,
     cache: LruCache<PathBuf, Arc<PreparedAudio>>,
     decode_request: Arc<RequestSlot<(u64, DecodeRequest)>>,
@@ -348,6 +354,7 @@ impl PlaybackEngine {
             pending_buffer: None,
             next_buffer_generation: 0,
             pending: None,
+            paused: false,
             next_request_id: 0,
             cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
             decode_request,
@@ -377,7 +384,7 @@ impl PlaybackEngine {
             generation: self.next_buffer_generation,
             audio: Arc::clone(&audio),
             cursor: AtomicUsize::new(0),
-            playing: AtomicBool::new(true),
+            playing: AtomicBool::new(!self.paused),
         });
         let old = self.active_buffer.replace(published);
         let new_ptr = self
@@ -536,6 +543,7 @@ impl PlaybackEngine {
     /// this returns immediately. Call [`poll`] each frame to check for
     /// completion and commit the audio buffer.
     pub fn play(&mut self, path: &Path) {
+        self.paused = false;
         self.set_active_playing(false);
         self.pending_buffer = None;
         self.recovery_attempted = false;
@@ -622,13 +630,29 @@ impl PlaybackEngine {
     }
 
     pub fn stop(&mut self) {
+        self.paused = false;
         self.set_active_playing(false);
         self.pending = None;
         self.pending_buffer = None;
-        // Keep current_file / current_info (and the decoded buffer) so the clip
-        // stays loaded and scrubbable after Stop — seek_fraction can resume it,
-        // and status() correctly reports Playing once it does. A new play()
-        // overwrites them, so nothing goes stale.
+        if let Some(active) = self.active_buffer.as_ref() {
+            active.cursor.store(0, Ordering::SeqCst);
+        }
+        // Keep current_file / current_info and the decoded buffer for the
+        // waveform, but Stop always returns the playhead to the beginning.
+    }
+
+    pub fn pause(&mut self) {
+        self.paused = true;
+        self.set_active_playing(false);
+    }
+
+    pub fn resume(&mut self) {
+        self.paused = false;
+        // A pending decode belongs to the newly selected file. Do not restart
+        // the old buffer while it completes; publish_now will start the new one.
+        if self.pending.is_none() {
+            self.set_active_playing(true);
+        }
     }
 
     pub fn status(&self) -> PlaybackStatus {
@@ -638,45 +662,56 @@ impl PlaybackEngine {
             };
         }
 
-        if !self
-            .active_buffer
-            .as_ref()
-            .is_some_and(|buffer| buffer.playing.load(Ordering::Relaxed))
-        {
-            return PlaybackStatus::Idle;
-        }
-
         match &self.current_file {
             Some(file) => {
-                let cursor = self
+                let playing = self
                     .active_buffer
                     .as_ref()
-                    .map(|buffer| buffer.cursor.load(Ordering::Relaxed))
-                    .unwrap_or(0);
-                let total = self.loaded_total_frames();
-                let channels = self.device_channels as usize;
-                let frame = cursor.checked_div(channels).unwrap_or(0);
-                let rate = self.device_sample_rate as f64;
-                // Position and duration are SOURCE-relative: the loaded buffer
-                // may be a window starting at `current_window_start` into a
-                // longer source, so the playhead and time readout track the
-                // whole file, not just the buffer.
-                let within = frame as f64 / rate;
-                let position = self.current_window_start + Duration::from_secs_f64(within);
+                    .is_some_and(|buffer| buffer.playing.load(Ordering::Relaxed));
+                if !playing && !self.paused {
+                    return PlaybackStatus::Idle;
+                }
+                let position = self.current_position();
                 let duration = self
                     .current_info
                     .as_ref()
                     .map(|i| i.source_duration)
-                    .unwrap_or_else(|| Duration::from_secs_f64(total as f64 / rate));
+                    .unwrap_or_else(|| {
+                        Duration::from_secs_f64(
+                            self.loaded_total_frames() as f64 / self.device_sample_rate as f64,
+                        )
+                    });
 
-                PlaybackStatus::Playing {
-                    file: file.clone(),
-                    position,
-                    duration,
+                if self.paused {
+                    PlaybackStatus::Paused {
+                        file: file.clone(),
+                        position,
+                        duration,
+                    }
+                } else if playing {
+                    PlaybackStatus::Playing {
+                        file: file.clone(),
+                        position,
+                        duration,
+                    }
+                } else {
+                    PlaybackStatus::Idle
                 }
             }
             None => PlaybackStatus::Idle,
         }
+    }
+
+    fn current_position(&self) -> Duration {
+        let cursor = self
+            .active_buffer
+            .as_ref()
+            .map(|buffer| buffer.cursor.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        let channels = self.device_channels.max(1) as usize;
+        let frame = cursor / channels;
+        let within = frame as f64 / self.device_sample_rate.max(1) as f64;
+        self.current_window_start + Duration::from_secs_f64(within)
     }
 
     pub fn current_file(&self) -> Option<&Path> {
@@ -748,6 +783,7 @@ impl PlaybackEngine {
     /// the `Release` store of that buffer's playing flag, which the callback
     /// loads with `Acquire`, so a seek never reads a stale position.
     pub fn seek_to(&mut self, target: Duration) {
+        self.paused = false;
         let total = self.loaded_total_frames();
         if total == 0 {
             return;
@@ -1041,6 +1077,7 @@ mod tests {
             pending_buffer: None,
             next_buffer_generation: 0,
             pending: None,
+            paused: false,
             next_request_id: 0,
             cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
             decode_request: Arc::new(RequestSlot::new()),

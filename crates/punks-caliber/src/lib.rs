@@ -7,7 +7,7 @@ use std::{
     path::Path,
     sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const PROTOCOL: u32 = 1;
@@ -276,6 +276,8 @@ struct Command {
     #[serde(default)]
     seconds: f64,
     #[serde(default)]
+    value: f32,
+    #[serde(default)]
     audition: bool,
     #[serde(default)]
     request_id: u64,
@@ -400,6 +402,7 @@ pub struct State {
     pub selected_index: i64,
     pub selected: Entry,
     pub playback: Playback,
+    pub volume: f32,
     pub audio_available: bool,
     pub audio_error: String,
     pub error: String,
@@ -587,6 +590,16 @@ impl Publication {
                 playback.position = position.as_secs_f64();
                 playback.duration = duration.as_secs_f64();
             }
+            PlaybackStatus::Paused {
+                file,
+                position,
+                duration,
+            } => {
+                playback.status = "paused".into();
+                playback.file = text(&file.to_string_lossy(), 4096);
+                playback.position = position.as_secs_f64();
+                playback.duration = duration.as_secs_f64();
+            }
         }
         if playback.duration == 0.0 {
             playback.duration = b
@@ -650,6 +663,7 @@ impl Publication {
             selected_index: sel.map(|i| i as i64).unwrap_or(-1),
             selected: current,
             playback,
+            volume: b.volume(),
             audio_available: b.audio_available(),
             audio_error: b.audio_error().unwrap_or_default().to_owned(),
             error: text(
@@ -803,7 +817,15 @@ impl Publication {
                 }
             }
             "play" => b.play_selected(),
+            "pause" => b.pause(),
+            "resume" => b.resume(),
             "stop" => b.stop(),
+            "volume" => {
+                if !c.value.is_finite() || !(0.0..=1.0).contains(&c.value) {
+                    return Err("Volume must be a finite value from 0 to 1".into());
+                }
+                b.set_volume(c.value);
+            }
             "seek" => {
                 if !c.seconds.is_finite() || !(0.0..=1e9).contains(&c.seconds) {
                     return Err("Invalid seek position".into());
@@ -921,11 +943,13 @@ fn run(t: Transport, signal: Arc<Signal>, flags: u32) {
     let mut p = Publication::default();
     let _ = p.publish(t, &browser);
     let mut bytes = [0u8; MAX_COMMAND];
+    let mut volume_save_deadline = None;
     loop {
-        let active = matches!(
-            browser.playback_status(),
-            PlaybackStatus::Playing { .. } | PlaybackStatus::Loading { .. }
-        );
+        let active = volume_save_deadline.is_some()
+            || matches!(
+                browser.playback_status(),
+                PlaybackStatus::Playing { .. } | PlaybackStatus::Loading { .. }
+            );
         if !signal.wait(active) {
             break;
         }
@@ -943,6 +967,7 @@ fn run(t: Transport, signal: Arc<Signal>, flags: u32) {
             p.sequence += 1;
             p.error = match serde_json::from_slice::<Command>(&bytes[..len]) {
                 Ok(c) => {
+                    let volume_command = c.op == "volume";
                     let update_config = matches!(
                         c.op.as_str(),
                         "open"
@@ -955,9 +980,14 @@ fn run(t: Transport, signal: Arc<Signal>, flags: u32) {
                             | "tab_reorder"
                     );
                     let result = p.apply(&mut browser, c);
+                    if result.is_ok() && volume_command && flags & 2 == 0 {
+                        volume_save_deadline = Some(Instant::now() + Duration::from_millis(350));
+                    }
                     if result.is_ok() && update_config && flags & 2 == 0 {
                         browser.update_config(&mut cfg);
+                        cfg.volume = browser.volume();
                         punks_core::config::save(&cfg);
+                        volume_save_deadline = None;
                     }
                     result.err().unwrap_or_default()
                 }
@@ -968,9 +998,20 @@ fn run(t: Transport, signal: Arc<Signal>, flags: u32) {
             signal.notify();
         }
         browser.poll();
+        if volume_save_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            browser.update_config(&mut cfg);
+            cfg.volume = browser.volume();
+            punks_core::config::save(&cfg);
+            volume_save_deadline = None;
+        }
         if let Err(e) = p.publish(t, &browser) {
             eprintln!("Punks publication failed: {e:?}");
         }
+    }
+    if volume_save_deadline.is_some() && flags & 2 == 0 {
+        browser.update_config(&mut cfg);
+        cfg.volume = browser.volume();
+        punks_core::config::save(&cfg);
     }
     drop(browser);
     for r in p.old.into_iter().chain([p.resource, p.folder_resource]) {

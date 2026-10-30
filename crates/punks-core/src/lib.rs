@@ -1327,6 +1327,18 @@ impl SampleBrowser {
         }
     }
 
+    pub fn pause(&mut self) {
+        if let Some(p) = self.playback.as_mut() {
+            p.pause();
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if let Some(p) = self.playback.as_mut() {
+            p.resume();
+        }
+    }
+
     pub fn playback_status(&self) -> PlaybackStatus {
         self.playback
             .as_ref()

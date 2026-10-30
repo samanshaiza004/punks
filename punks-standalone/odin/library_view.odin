@@ -501,24 +501,42 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 			) {
 				send(app, Command{op="step", delta=-1, audition=true})
 			}
-			playing := app.state.playback.status == "playing" || app.state.playback.status == "loading"
-			play_label := "Play preview"
+			playing := app.state.playback.status == "playing"
+			paused := app.state.playback.status == "paused"
+			loading := app.state.playback.status == "loading"
+			play_label := "Start"
 			play_op := "play"
 			play_disabled := len(app.state.selected.id) == 0 || app.state.selected.directory
 			if playing {
-				play_label = "Stop preview"
-				play_op = "stop"
+				play_label = "Pause"
+				play_op = "pause"
 				play_disabled = false
+			} else if paused {
+				play_op = "resume"
+				play_disabled = false
+			} else if loading {
+				play_label = "Loading…"
+				play_disabled = true
 			}
 			if ui.button(
 				ctx,
 				play_label,
-				key=alicorn.key_string("audition-play-stop"),
-				width=112,
+				key=alicorn.key_string("audition-start-pause"),
+				width=88,
 				state=ui.Button_State{disabled=play_disabled},
 				variant=.Primary,
 			) {
 				send(app, Command{op=play_op})
+			}
+			if ui.button(
+				ctx,
+				"Stop",
+				key=alicorn.key_string("audition-stop"),
+				width=60,
+				state=ui.Button_State{disabled=app.state.playback.status == "idle"},
+				variant=.Quiet,
+			) {
+				send(app, Command{op="stop"})
 			}
 			if ui.button(
 				ctx,
@@ -549,6 +567,27 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 			) {
 				send(app, Command{op="seek", seconds=f64(seek_position)})
 			}
+		}
+		if ui.row(ctx, gap=8, align=.Center, label="audition-volume-row") {
+			volume := app.state.volume
+			if ui.slider_f32(
+				ctx,
+				"Volume",
+				&volume,
+				0,
+				1,
+				step=0.01,
+				key=alicorn.key_string("audition-volume"),
+				grow=1,
+			) {
+				send(app, Command{op="volume", value=volume})
+			}
+			_ = ui.text(
+				ctx,
+				fmt.tprintf("%.0f%%", f64(volume*100)),
+				style=ui.layout_style(width=42),
+				color=alicorn.style_color(ctx, .Muted_Text),
+			)
 		}
 	}
 }
