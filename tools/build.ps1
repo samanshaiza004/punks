@@ -55,7 +55,6 @@ try {
     }
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
     $Executable = Join-Path $OutputDirectory 'punks.exe'
-    $LinkerFlags = $AccessKit.LinkerFlags
     $PreviousLib = $env:LIB
     if ([string]::IsNullOrWhiteSpace($PreviousLib)) {
         $env:LIB = $CargoOutput
@@ -65,10 +64,10 @@ try {
     $BuildArgs = @(
         'build',
         'punks-standalone/odin',
-        "-collection:alicorn=$AlicornRoot",
-        "-extra-linker-flags:$LinkerFlags",
-        "-out:$Executable"
+        "-collection:alicorn=$AlicornRoot"
     )
+    $BuildArgs += @($AccessKit.CompilerArguments)
+    $BuildArgs += "-out:$Executable"
     if ($Release) {
         $BuildArgs += '-o:speed'
     } else {
@@ -82,7 +81,7 @@ try {
         if ($TestUi) {
             Copy-Item -LiteralPath $SDLRuntime -Destination (Join-Path $OutputDirectory 'SDL3.dll') -Force
             Copy-Item -LiteralPath $CaliberRuntime -Destination (Join-Path $OutputDirectory 'punks_caliber.dll') -Force
-            & $Odin test punks-standalone/odin "-collection:alicorn=$AlicornRoot" "-extra-linker-flags:$LinkerFlags" "-out:$(Join-Path $OutputDirectory 'punks-ui-tests.exe')"
+            & $Odin test punks-standalone/odin "-collection:alicorn=$AlicornRoot" @($AccessKit.CompilerArguments) "-out:$(Join-Path $OutputDirectory 'punks-ui-tests.exe')"
             if ($LASTEXITCODE -ne 0) { throw "Punks UI regression tests failed (exit $LASTEXITCODE)." }
         }
     } finally {

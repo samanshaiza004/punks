@@ -9,17 +9,16 @@ if [ "${1-}" = "--release" ]; then PROFILE=release; CARGO_PROFILE=--release; fi
 mkdir -p target
 cargo build -p punks-caliber $CARGO_PROFILE
 RPATH=
-ACCESSKIT=
 SDL3_FLAGS=
+REPO_ROOT="$ROOT/vendor/alicorn"
+. "$REPO_ROOT/tools/common.sh"
+ACCESSKIT=$(alicorn_accesskit_linker_flags)
+# Alicorn's bootstrap reports paths relative to the vendored checkout.
+ACCESSKIT=$(printf '%s' "$ACCESSKIT" | sed "s@-L.deps/@-L$REPO_ROOT/.deps/@")
 case "$(uname -s)" in
  Darwin)
   install_name_tool -id @rpath/libpunks_caliber.dylib "target/$PROFILE/libpunks_caliber.dylib"
   RPATH='-Wl,-rpath,@executable_path'
-  REPO_ROOT="$ROOT/vendor/alicorn"
-  . "$REPO_ROOT/tools/accesskit.sh"
-  ACCESSKIT=$(alicorn_accesskit_linker_flags)
-  # Alicorn's helper reports a path relative to its own checkout.
-  ACCESSKIT=$(printf '%s' "$ACCESSKIT" | sed "s@-L.deps/@-L$REPO_ROOT/.deps/@")
   SDL3_PREFIX=${SDL3_PREFIX:-$(brew --prefix sdl3)}
   SDL3_VERSION=$(PKG_CONFIG_PATH="$SDL3_PREFIX/lib/pkgconfig" pkg-config --modversion sdl3)
   SDL3_RUNTIME=$(find "$SDL3_PREFIX/lib" -maxdepth 1 -type f -name 'libSDL3*.dylib' | sort | head -n 1)
@@ -29,8 +28,8 @@ case "$(uname -s)" in
  Linux) RPATH='-Wl,-rpath,$ORIGIN' ;;
  *) echo 'The Punks native build helper supports macOS and Linux only.' >&2; exit 1 ;;
 esac
-"$ODIN" build punks-standalone/odin "-collection:alicorn=$ROOT/vendor/alicorn" \
- "-extra-linker-flags:-L$ROOT/target/$PROFILE $RPATH $ACCESSKIT $SDL3_FLAGS" "-out:$ROOT/target/$PROFILE/punks"
+alicorn_odin_with_linker_flags "$ODIN" "-L$ROOT/target/$PROFILE $RPATH $ACCESSKIT $SDL3_FLAGS" \
+ build punks-standalone/odin "-collection:alicorn=$REPO_ROOT" "-out:$ROOT/target/$PROFILE/punks"
 printf 'Built %s\n' "$ROOT/target/$PROFILE/punks"
 if [ "$(uname -s)" = 'Darwin' ]; then
  PACKAGE_OUT="$ROOT/target/$PROFILE/punks-package"
