@@ -1,5 +1,12 @@
 # Native folder-dialog investigation
 
+## Current status
+
+Instrumentation is committed in Punks `c4c120d` and Alicorn `829e463`.
+The manual Windows dialog matrix and matching-symbol dump inspection are
+deferred for later maintainer testing. No cause has been established; keep the
+crash unattributed until a reproduction identifies a specific failure boundary.
+
 This is a controlled diagnostic procedure for the intermittent Windows folder
 picker termination. The available dumps show a COM access violation in
 `KERNELBASE!QISearch`, but that symbol alone does not identify the caller or
