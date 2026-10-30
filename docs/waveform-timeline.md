@@ -36,13 +36,38 @@ a changed resource into one of two bounded-lifetime arenas, then releases the
 lease. Current resource owners are retired at shutdown; mapped reader leases
 remain valid until released.
 
+## Stable listening-deck slots
+
+Playback state changes the contents of reserved bands. Desktop bands use a
+100-unit waveform; the compact profile uses 64. Track information, the time
+footer, transport, and volume reserve explicit heights derived from the active
+text scale and theme control metrics. The deck's height is their sum plus
+padding and gaps. Window/profile, text-scale, and theme-metric changes can
+reallocate the deck; selecting, loading, seeking, playing, pausing, and errors
+do not. The results viewport receives the remaining height.
+
+The numeric time display uses monospace, nonwrapping text in its own grid cell.
+A separate status cell always reserves 72 logical units times text scale, even
+when empty. The compact footer omits the separate start/end labels and keeps
+one current/total display. Long filenames and metadata use ellipsis with full
+values available on hover. Loading a different source keeps the waveform
+footprint and replaces old peaks with a placeholder. A pending seek in the
+same source can continue displaying its cached peaks.
+
+The old content-growth regression has been replaced by a state-transition
+regression covering desktop and 350-unit component layouts, 140% text scale,
+long filenames/durations/errors, stable region and control identities, retained
+keyboard focus, single-line text, and child containment. This compact fixture
+validates the deck component; it does not introduce a complete floating dock.
+
 ## Validation
 
-- Seven Odin UI tests pass, including narrow 140%-text layouts, aligned paint
-  and hit bounds, signed envelope geometry at 150% surface scale, independent
+- Seven Odin UI tests pass, including stable state-transition and narrow
+  140%-text layouts, aligned paint and hit bounds, signed envelope geometry at 150% surface scale, independent
   playhead payloads, accessible range semantics, source-window mapping,
   coalesced drag capture, clamped release, and keyboard Home seeking.
-- All 28 Caliber/core/library tests pass. Resource stability, stale seek
+- The unchanged Rust engine retains the validation from `8d0c791`: all 28
+  Caliber/core/library tests pass. Resource stability, stale seek
   rejection, shutdown lease lifetime, and old peak-cache rejection are covered.
 - 58 audio unit tests and two format-decode tests pass, including mono,
   opposite-polarity stereo through both extractors, short sources, paused seeks,
@@ -57,7 +82,7 @@ remain valid until released.
 The Windows candidate is built with:
 
 ```powershell
-.\tools\build.ps1 -Release -TestUi -OutputDirectory target/windows-x86_64/waveform-release
+.\tools\build.ps1 -Release -TestUi -OutputDirectory target/windows-x86_64/stable-deck-release
 ```
 
 For native acceptance, try paused and playing seeks on short one-shots and long

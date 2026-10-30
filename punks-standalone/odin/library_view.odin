@@ -409,10 +409,11 @@ render_results :: proc(app: ^App, ctx: ^ui.UI) {
 }
 
 render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
+	layout := audition_layout(app, ctx)
 	if ui.panel(
 		ctx,
 		key=alicorn.key_string("audition-deck"),
-		sizing=ui.sizing(height=ui.fit_content()),
+		sizing=ui.sizing(height=ui.logical(layout.height)),
 		padding=12,
 		gap=8,
 		clip=true,
@@ -422,30 +423,35 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 		material=app.materials.mounted,
 		physical_height=1.5,
 	) {
-		if ui.row(ctx, gap=10, align=.Center, label="audition-track-info") {
+		if ui.row(ctx, key="audition-track-info", height=layout.header, gap=10, align=.Center, clip=true, label="audition-track-info") {
 			name := app.state.selected.name
-			if len(app.state.waveform_file) > 0 {
-				name = path_basename(app.state.waveform_file)
+			source := app.state.selected.path
+			if len(app.state.waveform_file) > 0 && waveform_ready(app) { source = app.state.waveform_file; name = path_basename(source) }
+			if app.state.playback.status == "loading" && len(app.state.playback.file) > 0 {
+				source = app.state.playback.file
+				name = path_basename(source)
 			}
-			if len(name) == 0 {
-				name = "Select an audio file"
+			if len(name) == 0 { name = "Select an audio file" }
+			_ = ui.text(ctx, name, key="audition-track-name", size=17,
+				style=ui.layout_style(height=layout.header, grow=1), text_style=alicorn.Text_Style{overflow=.Ellipsis})
+			_ = alicorn.tooltip(ctx, source if len(source) > 0 else name)
+			metadata := ""
+			if source == app.state.selected.path && len(app.state.selected.format) > 0 {
+				metadata = fmt.tprintf("%s %s", app.state.selected.format, format_bytes(app.state.selected.size))
 			}
-			_ = ui.text(ctx, name, size=17, style=ui.layout_style(grow=1))
-			selected_is_loaded := app.state.waveform_file == "" || app.state.selected.path == app.state.waveform_file
-			if selected_is_loaded && len(app.state.selected.format) > 0 {
-				_ = ui.text(ctx, app.state.selected.format, color=alicorn.style_color(ctx, .Muted_Text))
-			}
-			if selected_is_loaded && app.state.selected.size > 0 {
-				_ = ui.text(ctx, format_bytes(app.state.selected.size), color=alicorn.style_color(ctx, .Muted_Text))
-			}
+			_ = ui.text(ctx, metadata, key="audition-track-metadata",
+				style=ui.layout_style(width=120*layout.text_scale, height=layout.header),
+				text_style=alicorn.Text_Style{overflow=.Ellipsis}, color=alicorn.style_color(ctx, .Muted_Text))
+			if len(metadata) > 0 { _ = alicorn.tooltip(ctx, metadata) }
 		}
-		render_waveform(app, ctx)
-		if ui.row(ctx, gap=8, align=.Center, label="audition-transport") {
+		render_waveform(app, ctx, layout)
+		if ui.row(ctx, key="audition-transport", height=layout.transport, gap=8, align=.Center, clip=true, label="audition-transport") {
 			if ui.button(
 				ctx,
 				"Previous",
 				key=alicorn.key_string("audition-previous"),
 				width=78,
+				height=layout.transport,
 				state=ui.Button_State{disabled=len(app.state.selected.id) == 0 || app.state.selected.directory},
 				variant=.Quiet,
 			) {
@@ -465,7 +471,6 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				play_op = "resume"
 				play_disabled = false
 			} else if loading {
-				play_label = "Loading…"
 				play_disabled = true
 			}
 			if ui.button(
@@ -473,6 +478,7 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				play_label,
 				key=alicorn.key_string("audition-start-pause"),
 				width=88,
+				height=layout.transport,
 				state=ui.Button_State{disabled=play_disabled},
 				variant=.Primary,
 			) {
@@ -483,6 +489,7 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				"Stop",
 				key=alicorn.key_string("audition-stop"),
 				width=60,
+				height=layout.transport,
 				state=ui.Button_State{disabled=app.state.playback.status == "idle"},
 				variant=.Quiet,
 			) {
@@ -493,19 +500,15 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				"Next",
 				key=alicorn.key_string("audition-next"),
 				width=66,
+				height=layout.transport,
 				state=ui.Button_State{disabled=len(app.state.selected.id) == 0 || app.state.selected.directory},
 				variant=.Quiet,
 			) {
 				send(app, Command{op="step", delta=1, audition=true})
 			}
-			_ = ui.text(
-				ctx,
-				fmt.tprintf("%s · %.1f / %.1f s", app.state.playback.status, app.state.playback.position, app.state.playback.duration),
-				style=ui.layout_style(grow=1),
-				color=alicorn.style_color(ctx, .Muted_Text),
-			)
+
 		}
-		if ui.row(ctx, gap=8, align=.Center, label="audition-volume-row") {
+		if ui.row(ctx, key="audition-volume-row", height=layout.volume, gap=8, align=.Center, clip=true, label="audition-volume-row") {
 			volume := app.state.volume
 			if ui.slider_f32(
 				ctx,
@@ -515,6 +518,7 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				1,
 				step=0.01,
 				key=alicorn.key_string("audition-volume"),
+				height=layout.volume,
 				grow=1,
 			) {
 				send(app, Command{op="volume", value=volume})
@@ -522,7 +526,9 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 			_ = ui.text(
 				ctx,
 				fmt.tprintf("%.0f%%", f64(volume*100)),
-				style=ui.layout_style(width=42),
+				key="audition-volume-value",
+				style=ui.layout_style(width=42*layout.text_scale, height=layout.volume),
+				text_style=alicorn.Text_Style{overflow=.Ellipsis},
 				color=alicorn.style_color(ctx, .Muted_Text),
 			)
 		}
@@ -562,6 +568,7 @@ render_workspace :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
 		if len(app.state.audio_error) > 0 { message = app.state.audio_error }
 		if len(app.state.error) > 0 { message = app.state.error }
 		if len(app.error) > 0 { message = app.error }
-		_ = ui.text(ctx, message, size=12, style=ui.layout_style(height=18), color=alicorn.style_color(ctx, .Muted_Text))
+		_ = ui.text(ctx, message, size=12, key="application-status", style=ui.layout_style(height=18),
+			text_style=alicorn.Text_Style{overflow=.Ellipsis}, color=alicorn.style_color(ctx, .Muted_Text))
 	}
 }

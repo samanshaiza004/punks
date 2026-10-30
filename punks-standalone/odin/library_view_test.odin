@@ -59,54 +59,148 @@ test_workspace_geometry_survives_resize :: proc(t: ^testing.T) {
 			workspace.w == f32(size[0]) && workspace.h == f32(size[1]),
 			"the themed workbench must cover the complete viewport")
 		testing.expect(t, results.h >= 180 && list.h >= 140,
-			"results and their scroll viewport must receive remaining vertical space")
+			fmt.tprintf("results/list must retain usable space at %dx%d: %.2f / %.2f", size[0], size[1], results.h, list.h))
 		testing.expect(t, results.y > header.y+header.h && deck.y >= results.y+results.h,
 			"header, results and deck must remain in their own vertical bands")
 		testing.expect(t, deck.h > 0 && deck.y+deck.h <= f32(size[1])-26,
-			"the content-sized listening deck must remain above the status line")
+			"the listening deck must remain above the status line")
 		testing.expect(t, rt.diagnostic == "", "the layout must have no identity or scope diagnostics")
 	}
 }
 
-@(test)
-test_audition_deck_and_results_negotiate_in_same_update :: proc(t: ^testing.T) {
-	app := layout_test_app()
-	app.search, _ = ui.text_buffer("", context.allocator)
-	defer ui.text_buffer_destroy(&app.search)
-	rt := alicorn.new_runtime({0, 0, 960, 720})
-	defer alicorn.destroy_runtime(&rt)
-	_ = build(&app, &rt, 960, 720, 1)
-	initial_deck := layout_test_bounds(t, &rt, "audition-deck", .Container)
-	initial_results := layout_test_bounds(t, &rt, "results-surface", .Container)
-	initial_list := layout_test_bounds(t, &rt, "audio-results", .Scroll_Region)
-	initial_builds := app.builds
+layout_test_same_bounds :: proc(a, b: alicorn.Rect) -> bool {
+	return abs(a.x-b.x) <= 0.02 && abs(a.y-b.y) <= 0.02 && abs(a.w-b.w) <= 0.02 && abs(a.h-b.h) <= 0.02
+}
 
-	app.state.waveform_file = app.state.selected.path
-	app.waveform.file = app.state.selected.path
-	app.waveform.duration = 1.25
-	app.waveform.peaks = make([][2]i16, WAVEFORM_BARS, allocator=context.temp_allocator)
-	for &peak, index in app.waveform.peaks {
-		peak = [2]i16{i16(5000+index*200), i16(-4000-index*150)}
+// The compact case composes the same deck beneath a growing results surface
+// without the desktop sidebar. It validates the component at dock widths.
+audition_stability_describe :: proc(app: ^App, rt: ^alicorn.Runtime, width, height: int, compact_fixture: bool) {
+	if !compact_fixture { _ = build(app, rt, width, height, 1); return }
+	app.viewport_width = width
+	ctx, needed := alicorn.begin_frame(rt)
+	if !needed { return }
+	punks_styles_ensure(app, rt)
+	_ = alicorn.container_begin(&ctx, .Root, style=ui.layout_style(.Column, grow=1))
+	scope := alicorn.style_environment_push(&ctx, alicorn.Style_Environment{theme=app.theme})
+	if ui.panel(&ctx, key="results-surface", height=-1, grow=1) {
+		_ = ui.text(&ctx, "Results")
 	}
-	app.state.playback = Playback{status="ready", duration=1.25}
-	alicorn.invalidate_root(&rt, "preview waveform and seek control became available")
-	_ = build(&app, &rt, 960, 720, 1)
-	loaded_deck := layout_test_bounds(t, &rt, "audition-deck", .Container)
-	loaded_results := layout_test_bounds(t, &rt, "results-surface", .Container)
-	loaded_list := layout_test_bounds(t, &rt, "audio-results", .Scroll_Region)
-	_, has_seek_control := alicorn.node_by_key(&rt, alicorn.key_string("audition-seek"), .Slider)
+	render_audio_deck(app, &ctx)
+	alicorn.style_environment_pop(&ctx, scope)
+	alicorn.container_end(&ctx)
+	alicorn.end_frame(&ctx)
+	waveform_update(app, rt)
+}
 
-	testing.expect(t, app.builds == initial_builds+1,
-		"preview adoption should complete through one new application description")
-	testing.expect(t, has_seek_control,
-		"a loaded waveform should add its seek interaction in that same description")
-	testing.expect(t, loaded_deck.h > initial_deck.h,
-		"the content-sized deck should grow when the seek control appears")
-	testing.expect(t, loaded_results.h < initial_results.h && loaded_list.h < initial_list.h,
-		"the results surface and virtualized viewport should give up the deck's added height immediately")
-	testing.expect(t, loaded_results.h >= 180 && loaded_list.h >= 140,
-		"the expanded deck must leave a usable results area at the supported viewport")
-	testing.expect(t, rt.diagnostic == "", "content changes must not produce layout diagnostics")
+@(test)
+test_audition_slots_stay_stable_across_loading_seeking_and_errors :: proc(t: ^testing.T) {
+	testing.expect(t, format_audio_time(59.999) == "1:00.00", "time rounding should carry into the next minute")
+	scenarios := [?]struct {width, height: int, scale: f32, compact_fixture: bool}{
+		{1600, 1000, 1, false}, {960, 720, 1, false}, {620, 720, 1.4, false},
+		{350, 600, 1, true}, {350, 600, 1.4, true},
+	}
+	regions := [?]struct {key: string, kind: alicorn.Node_Kind}{
+		{"results-surface", .Container}, {"audition-deck", .Container},
+		{"audition-track-info", .Container}, {"waveform-timeline", .Grid},
+		{"waveform-footer", .Grid}, {"audition-transport", .Container},
+		{"audition-volume-row", .Container}, {"audition-start-pause", .Button},
+		{"waveform-current-time", .Text}, {"waveform-status", .Text},
+	}
+	long_file := "Samples/A very long audio recording filename with many descriptive words that must remain on one line even while preparing another source recording for audition.wav"
+	other_file := "Samples/Another very long source filename being decoded while the previous recording's waveform is still available.mp3"
+	error_message := "A long decoder error containing detailed source context and multiple explanatory sentences must stay in its reserved status slot without changing the height of the deck or the results above it."
+	for scenario in scenarios {
+		app := layout_test_app()
+		app.search, _ = ui.text_buffer("", context.allocator)
+		defer ui.text_buffer_destroy(&app.search)
+		rt := alicorn.new_runtime({0, 0, f32(scenario.width), f32(scenario.height)})
+		defer alicorn.destroy_runtime(&rt)
+		_ = alicorn.style_root_accessibility_observation_set(&rt,
+			alicorn.Accessibility_Appearance_Observation{text_scale=scenario.scale, text_scale_known=true})
+		peaks := make([][2]i16, 512, allocator=context.temp_allocator)
+		for &peak in peaks { peak = {-8000, 16000} }
+		original: [len(regions)]alicorn.Rect
+		identities: [len(regions)]alicorn.Node_ID
+		seek_identity: alicorn.Node_ID
+		for phase in 0..<9 {
+			app.state.audio_error = ""
+			app.waveform_view.pending = false
+			app.state.playback = Playback{status="idle"}
+			app.waveform = {}
+			if phase >= 2 && phase <= 6 {
+				app.waveform = Waveform_Window{file=long_file, duration=100_000_000, peaks=peaks}
+				app.state.waveform_file = long_file
+				app.state.waveform = Resource{id=1, generation=1}
+				app.state.selected.name = path_basename(long_file)
+				app.state.selected.path = long_file
+				app.state.selected.size = 999_999_999_999
+				app.state.playback = Playback{status="playing", file=long_file, duration=100_000_000, position=99_999_999.99}
+			}
+			if phase == 1 { app.state.playback = Playback{status="loading", file=long_file} }
+			if phase == 3 { app.state.playback.status = "paused" }
+			if phase == 4 { app.waveform_view.pending = true; app.waveform_view.fraction = 0.87; app.state.playback.status = "loading" }
+			if phase == 6 { app.state.playback = Playback{status="loading", file=other_file} }
+			if phase == 7 { app.state.audio_error = error_message }
+			alicorn.invalidate_root(&rt, "audition state transition")
+			audition_stability_describe(&app, &rt, scenario.width, scenario.height, scenario.compact_fixture)
+			for region, index in regions {
+				bounds := layout_test_bounds(t, &rt, region.key, region.kind)
+				id, _ := alicorn.node_by_key(&rt, alicorn.key_string(region.key), region.kind)
+				if phase == 0 { original[index] = bounds; identities[index] = id }
+				else {
+					testing.expect(t, layout_test_same_bounds(bounds, original[index]) && id == identities[index],
+						fmt.tprintf("%s changed geometry/identity in state %d at %dx%d scale %.1f: %v -> %v", region.key, phase,
+							scenario.width, scenario.height, scenario.scale, original[index], bounds))
+				}
+			}
+			footer, _ := alicorn.node_by_key(&rt, alicorn.key_string("waveform-footer"), .Grid)
+			for child, index in rt.nodes[footer].children {
+				node := rt.nodes[child]
+				testing.expect(t, node.text_style.overflow == .Ellipsis && len(node.text_run.lines) <= 1 &&
+					node.text_run.height <= node.bounds.h+0.02, "footer text must remain on one line inside its assigned band")
+				if index > 0 {
+					previous := rt.nodes[rt.nodes[footer].children[index-1]].bounds
+					testing.expect(t, previous.x+previous.w <= node.bounds.x+0.02,
+						"numeric time and status slots must not overlap")
+				}
+			}
+			for band_key in ([?]string{"audition-track-info", "audition-transport", "audition-volume-row"}) {
+				band, _ := alicorn.node_by_key(&rt, alicorn.key_string(band_key), .Container)
+				bounds := rt.nodes[band].bounds
+				for child in rt.nodes[band].children {
+					node := rt.nodes[child]
+					testing.expect(t, node.bounds.x >= bounds.x-0.02 && node.bounds.x+node.bounds.w <= bounds.x+bounds.w+0.02 &&
+						node.bounds.y >= bounds.y-0.02 && node.bounds.y+node.bounds.h <= bounds.y+bounds.h+0.02,
+						fmt.tprintf("%s must contain every control at %d width, scale %.1f, phase %d", band_key, scenario.width, scenario.scale, phase))
+					if node.kind == .Text {
+						testing.expect(t, node.text_style.overflow == .Ellipsis && len(node.text_run.lines) <= 1 &&
+							node.text_run.height <= node.bounds.h+0.02, "track metadata and volume labels must remain bounded to one line")
+					}
+				}
+			}
+			seek, _ := alicorn.node_by_key(&rt, alicorn.key_string("audition-seek"), .Slider)
+			if phase == 0 { seek_identity = seek }
+			testing.expect(t, seek == seek_identity, "waveform interaction identity should survive every source state")
+			if phase == 2 { testing.expect(t, alicorn.focus(&rt, seek), "a ready waveform must accept keyboard focus") }
+			if phase >= 3 && phase <= 5 {
+				testing.expect(t, alicorn.focused_node(&rt) == seek, "pause/seek state updates must preserve waveform focus")
+			}
+			if phase == 4 {
+				status, _ := alicorn.node_by_key(&rt, alicorn.key_string("waveform-status"), .Text)
+				testing.expect(t, rt.nodes[status].text == "Seeking" &&
+					len(rt.nodes[app.waveform_view.peaks_node].surface_segments) > 2,
+					"a pending decode within the same source should keep its waveform and reserved Seeking status")
+			}
+			if phase == 6 {
+				name, _ := alicorn.node_by_key(&rt, alicorn.key_string("audition-track-name"), .Text)
+				testing.expect(t, rt.nodes[name].text == path_basename(other_file) && !waveform_ready(&app) &&
+					len(rt.nodes[app.waveform_view.peaks_node].surface_segments) == 2 &&
+					len(rt.nodes[app.waveform_view.head_node].surface_segments) == 0,
+					"loading a different source must show its placeholder rather than the old recording's peaks or playhead")
+			}
+			testing.expect(t, rt.diagnostic == "", "stable audition slots must not produce runtime diagnostics")
+		}
+	}
 }
 
 @(test)
