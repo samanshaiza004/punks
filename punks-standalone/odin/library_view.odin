@@ -415,7 +415,7 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 		key=alicorn.key_string("audition-deck"),
 		sizing=ui.sizing(height=ui.logical(layout.height)),
 		padding=12,
-		gap=8,
+		gap=layout.gap,
 		clip=true,
 		radius=5,
 		stroke=ui.border(1, alicorn.style_color(ctx, .Border)),
@@ -432,6 +432,32 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 				name = path_basename(source)
 			}
 			if len(name) == 0 { name = "Select an audio file" }
+			status, _ := audition_status(app)
+			indicator_color := alicorn.style_color(ctx, .Muted_Text)
+			indicator_opacity := f64(0.38)
+			switch status {
+			case "Playing":
+				indicator_color = alicorn.style_color(ctx, .Accent)
+				indicator_opacity = 1
+			case "Paused":
+				indicator_color = alicorn.style_color(ctx, .Accent_Hover)
+				indicator_opacity = 0.72
+			case "Loading", "Seeking":
+				indicator_color = alicorn.style_color(ctx, .Accent_Hover)
+				indicator_opacity = 0.82
+			case "Error":
+				indicator_color = alicorn.style_color(ctx, .Danger)
+				indicator_opacity = 1
+			}
+			indicator := ui.box(ctx, key=alicorn.key_string("audition-status-indicator"),
+				size=10, fill=indicator_color, radius=5)
+			intent := ui.Motion_Intent.Settle
+			if !app.status_indicator_initialized {
+				intent = .Snap
+				app.status_indicator_initialized = true
+			}
+			_ = ui.motion(ctx, indicator,
+				ui.Motion_Target{opacity=indicator_opacity, has_opacity=true}, intent)
 			_ = ui.text(ctx, name, key="audition-track-name", size=17,
 				style=ui.layout_style(height=layout.header, grow=1), text_style=alicorn.Text_Style{overflow=.Ellipsis})
 			_ = alicorn.tooltip(ctx, source if len(source) > 0 else name)

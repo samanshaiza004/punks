@@ -56,6 +56,7 @@ App :: struct {
 	requested_folder_revision: u64,
 	requested_folder_offset: int,
 	builds: u64,
+	status_indicator_initialized: bool,
 	smoke: bool,
 	smoke_audio: bool,
 	smoke_stage: int,

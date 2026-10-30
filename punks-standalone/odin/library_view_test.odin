@@ -37,6 +37,13 @@ layout_test_bounds :: proc(t: ^testing.T, rt: ^alicorn.Runtime, key: string, kin
 	return info.bounds
 }
 
+layout_test_build :: proc(app: ^App, rt: ^alicorn.Runtime, width, height: int, dpi: f32) -> alicorn.Node_ID {
+	// Native hosts inject a monotonic timestamp before every description. The
+	// headless frontend fixture does the same with a deterministic clock.
+	_ = alicorn.motion_clock_set_time(rt, alicorn.Motion_Time(i64(app.builds)*100_000_000))
+	return build(app, rt, width, height, dpi)
+}
+
 @(test)
 test_workspace_geometry_survives_resize :: proc(t: ^testing.T) {
 	app := layout_test_app()
@@ -47,7 +54,7 @@ test_workspace_geometry_survives_resize :: proc(t: ^testing.T) {
 	for size in ([4][2]int{{960, 720}, {800, 640}, {1200, 800}, {960, 720}}) {
 		rt.viewport = {0, 0, f32(size[0]), f32(size[1])}
 		alicorn.invalidate_root(&rt, "workspace resize regression")
-		_ = build(&app, &rt, size[0], size[1], 1)
+		_ = layout_test_build(&app, &rt, size[0], size[1], 1)
 		header := layout_test_bounds(t, &rt, "application-tabs", .Container)
 		results := layout_test_bounds(t, &rt, "results-surface", .Container)
 		deck := layout_test_bounds(t, &rt, "audition-deck", .Container)
@@ -102,6 +109,7 @@ test_audition_slots_stay_stable_across_loading_seeking_and_errors :: proc(t: ^te
 	regions := [?]struct {key: string, kind: alicorn.Node_Kind}{
 		{"results-surface", .Container}, {"audition-deck", .Container},
 		{"audition-track-info", .Container}, {"waveform-timeline", .Grid},
+		{"audition-status-indicator", .Container},
 		{"waveform-footer", .Grid}, {"audition-transport", .Container},
 		{"audition-volume-row", .Container}, {"audition-start-pause", .Button},
 		{"waveform-current-time", .Text}, {"waveform-status", .Text},
@@ -115,6 +123,7 @@ test_audition_slots_stay_stable_across_loading_seeking_and_errors :: proc(t: ^te
 		defer ui.text_buffer_destroy(&app.search)
 		rt := alicorn.new_runtime({0, 0, f32(scenario.width), f32(scenario.height)})
 		defer alicorn.destroy_runtime(&rt)
+		_ = alicorn.motion_clock_set_time(&rt, 0)
 		_ = alicorn.style_root_accessibility_observation_set(&rt,
 			alicorn.Accessibility_Appearance_Observation{text_scale=scenario.scale, text_scale_known=true})
 		peaks := make([][2]i16, 512, allocator=context.temp_allocator)
@@ -222,7 +231,7 @@ test_audition_controls_fit_narrow_large_text_and_retain_focus :: proc(t: ^testin
 		&rt,
 		alicorn.Accessibility_Appearance_Observation{text_scale=1.4, text_scale_known=true},
 	)
-	_ = build(&app, &rt, 620, 720, 1)
+	_ = layout_test_build(&app, &rt, 620, 720, 1)
 
 	deck := layout_test_bounds(t, &rt, "audition-deck", .Container)
 	previous := layout_test_bounds(t, &rt, "audition-previous", .Button)
@@ -251,7 +260,7 @@ test_audition_controls_fit_narrow_large_text_and_retain_focus :: proc(t: ^testin
 	app.state.playback.status = "paused"
 	app.state.volume = 0.55
 	alicorn.invalidate_root(&rt, "paused playback and volume state adopted")
-	_ = build(&app, &rt, 620, 720, 1)
+	_ = layout_test_build(&app, &rt, 620, 720, 1)
 	updated_start_id, updated_start_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-start-pause"), .Button)
 	updated_volume_id, updated_volume_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-volume"), .Slider)
 	testing.expect(t, updated_start_found && rt.nodes[updated_start_id].label == "Start",
@@ -263,7 +272,7 @@ test_audition_controls_fit_narrow_large_text_and_retain_focus :: proc(t: ^testin
 	testing.expect(t, alicorn.focus(&rt, seek_id), "the waveform should accept keyboard focus")
 	app.state.playback.position = 0.8
 	alicorn.invalidate_root(&rt, "playhead position updated")
-	_ = build(&app, &rt, 620, 720, 1)
+	_ = layout_test_build(&app, &rt, 620, 720, 1)
 	updated_seek_id, updated_seek_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-seek"), .Slider)
 	testing.expect(t, updated_seek_found && updated_seek_id == seek_id &&
 		alicorn.focused_node(&rt) == seek_id,
@@ -278,7 +287,7 @@ test_result_buttons_render_one_filename_and_keep_accessible_names :: proc(t: ^te
 	defer ui.text_buffer_destroy(&app.search)
 	rt := alicorn.new_runtime({0, 0, 960, 720})
 	defer alicorn.destroy_runtime(&rt)
-	_ = build(&app, &rt, 960, 720, 1)
+	_ = layout_test_build(&app, &rt, 960, 720, 1)
 	filename := app.window.entries[0].name
 	text_count, button_label_count := 0, 0
 	for id in rt.order {
@@ -306,7 +315,7 @@ test_waveform_retains_signed_geometry_and_updates_only_the_playhead :: proc(t: ^
 	app.state.playback = Playback{status="playing", position=12, duration=89.3}
 	rt := alicorn.new_runtime({0, 0, 1200, 800})
 	defer alicorn.destroy_runtime(&rt)
-	_ = build(&app, &rt, 1200, 800, 1.5)
+	_ = layout_test_build(&app, &rt, 1200, 800, 1.5)
 	v := &app.waveform_view
 	peak_info, peak_ok := alicorn.node_info(&rt, v.peaks_node)
 	head_info, head_ok := alicorn.node_info(&rt, v.head_node)
@@ -346,7 +355,7 @@ test_waveform_drag_uses_source_axis_coalesces_and_commits_final_target :: proc(t
 	app.state.playback = Playback{status="paused", position=21, duration=120}
 	rt := alicorn.new_runtime({0, 0, 960, 720})
 	defer alicorn.destroy_runtime(&rt)
-	_ = build(&app, &rt, 960, 720, 1)
+	_ = layout_test_build(&app, &rt, 960, 720, 1)
 	bounds := layout_test_bounds(t, &rt, "audition-seek", .Slider)
 	event := alicorn.Pointer_Event{kind=.Down, x=bounds.x+8+(bounds.w-16)*0.25,
 		y=bounds.y+bounds.h/2, button=alicorn.POINTER_BUTTON_PRIMARY}
@@ -373,6 +382,55 @@ test_waveform_drag_uses_source_axis_coalesces_and_commits_final_target :: proc(t
 	testing.expect(t, app.state.playback.status == "paused", "a seek must not optimistically change transport state")
 	testing.expect(t, alicorn.focus(&rt, app.waveform_view.seek_node), "waveform should be keyboard focusable")
 	_ = alicorn.set_focused_slider_bound(&rt, .Minimum)
-	_ = build(&app, &rt, 960, 720, 1)
+	_ = layout_test_build(&app, &rt, 960, 720, 1)
 	testing.expect(t, app.waveform_view.fraction == 0, "Home should seek to the beginning of the displayed source interval")
+}
+
+@(test)
+test_audition_status_motion_is_presentation_only_and_returns_idle :: proc(t: ^testing.T) {
+	app := layout_test_app()
+	app.search, _ = ui.text_buffer("", context.allocator)
+	defer ui.text_buffer_destroy(&app.search)
+	rt := alicorn.new_runtime({0, 0, 960, 720})
+	defer alicorn.destroy_runtime(&rt)
+	_ = alicorn.motion_clock_set_time(&rt, 0)
+	_ = layout_test_build(&app, &rt, 960, 720, 1)
+	indicator, found := alicorn.node_by_key(&rt, alicorn.key_string("audition-status-indicator"), .Container)
+	testing.expect(t, found, "the audition status indicator should reserve its slot while idle")
+	if !found { return }
+	initial_bounds, _ := alicorn.node_info(&rt, indicator)
+	handle, owner_status := alicorn.motion_owner_begin(&rt, indicator)
+	testing.expect(t, owner_status == .Ok, "the decorative status indicator should have a retained motion owner")
+	initial := alicorn.motion_presentation(&rt, handle)
+	testing.expect(t, initial.status == .Ok && initial.has_opacity && !initial.active,
+		"the idle indicator should begin at its stable target")
+
+	app.state.playback.status = "playing"
+	alicorn.invalidate_root(&rt, "playback status changed")
+	_ = layout_test_build(&app, &rt, 960, 720, 1)
+	updated_id, updated_found := alicorn.node_by_key(&rt, alicorn.key_string("audition-status-indicator"), .Container)
+	updated_bounds, _ := alicorn.node_info(&rt, updated_id)
+	playing := alicorn.motion_presentation(&rt, handle)
+	testing.expect(t, updated_found && updated_id == indicator && updated_bounds.bounds == initial_bounds.bounds,
+		"changing playback status must preserve the reserved indicator slot and retained identity")
+	testing.expect(t, playing.status == .Ok && playing.active && playing.target_opacity == 1,
+		"playing status should retarget the indicator's opacity without changing its layout")
+	builds := app.builds
+	progress := alicorn.motion_tick(&rt, alicorn.Motion_Time(250_000_000))
+	intermediate := alicorn.motion_presentation(&rt, handle)
+	testing.expect(t, progress.status == .Ok && intermediate.presented_opacity > initial.presented_opacity,
+		"native presentation ticks should advance the indicator independently of application description")
+	testing.expect(t, app.builds == builds, "motion sampling must not rebuild the Punks application")
+
+	settled := alicorn.motion_tick(&rt, alicorn.Motion_Time(2_000_000_000))
+	activity := alicorn.motion_activity(&rt)
+	testing.expect(t, settled.status == .Ok && activity.active_owners == 0 && activity.active_properties == 0,
+		"the indicator should retire its active response after settling")
+	for index in 1..=5 {
+		idle := alicorn.motion_tick(&rt, alicorn.Motion_Time(2_000_000_000+i64(index)*100_000_000))
+		testing.expect(t, idle.status == .Ok && idle.changed_owners == 0 &&
+			alicorn.motion_activity(&rt).active_owners == 0,
+			"subsequent presentation opportunities should remain motion-idle")
+	}
+	testing.expect(t, app.builds == builds, "settled status motion should leave application work at zero")
 }
