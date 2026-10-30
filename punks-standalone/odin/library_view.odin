@@ -103,7 +103,11 @@ render_tab_strip :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
 	options.max_tab_width = 210
 	options.height = TAB_BAR_HEIGHT
 	options.presentation = .Compact
-	options.appearance = .Standard
+	options.gap = 0
+	options.appearance = .Connected
+	options.selected_fill = alicorn.style_color(ctx, .Subtle_Surface)
+	options.selected_text = alicorn.style_color(ctx, .Text)
+	options.selected_fill_set = true
 	options.drag_type = PUNKS_TAB_DRAG_TYPE
 	result := alicorn.tab_bar(
 		ctx,
@@ -264,6 +268,8 @@ render_sidebar :: proc(app: ^App, ctx: ^ui.UI) {
 		clip=true,
 		radius=5,
 		label="Library",
+		material=app.materials.recessed,
+		physical_height=-1.75,
 	) {
 		_ = ui.text(ctx, "LIBRARY", size=12, color=alicorn.style_color(ctx, .Muted_Text))
 		location := "No folder selected"
@@ -335,6 +341,8 @@ render_results :: proc(app: ^App, ctx: ^ui.UI) {
 		radius=5,
 		stroke=ui.border(1, alicorn.style_color(ctx, .Border)),
 		label="Audio files",
+		material=app.materials.recessed,
+		physical_height=-1.75,
 	) {
 		if ui.row(ctx, height=30, padding=6, gap=10, align=.Center, label="results-column-headings") {
 			_ = ui.icon(ctx, .File, size=16)
@@ -433,6 +441,8 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 		radius=5,
 		stroke=ui.border(1, alicorn.style_color(ctx, .Border)),
 		label="Audition",
+		material=app.materials.mounted,
+		physical_height=1.5,
 	) {
 		if ui.row(ctx, gap=10, align=.Center, label="audition-track-info") {
 			name := app.state.selected.name

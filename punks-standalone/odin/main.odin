@@ -24,6 +24,7 @@ App :: struct {
 	services: host.Application_Services,
 	search: ui.Text_Buffer,
 	theme: alicorn.Style_Theme_ID,
+	materials: Punks_Relief_Materials,
 	viewport_width: int,
 	search_node: alicorn.Node_ID,
 	list_node: alicorn.Node_ID,
@@ -551,9 +552,7 @@ build :: proc(
 	}
 	app.builds += 1
 	app.viewport_width = width
-	if app.theme == 0 {
-		app.theme = alicorn.style_theme_register(rt, punks_theme())
-	}
+	punks_styles_ensure(app, rt)
 
 	root := alicorn.container_begin(&ctx, .Root, label="punks", style=ui.layout_style(grow=1), color=ui.rgb(0x181B1D))
 	if root == 0 {
