@@ -434,3 +434,30 @@ test_audition_status_motion_is_presentation_only_and_returns_idle :: proc(t: ^te
 	}
 	testing.expect(t, app.builds == builds, "settled status motion should leave application work at zero")
 }
+
+@(test)
+test_audition_status_motion_snaps_for_reduced_motion :: proc(t: ^testing.T) {
+	app := layout_test_app()
+	app.search, _ = ui.text_buffer("", context.allocator)
+	defer ui.text_buffer_destroy(&app.search)
+	rt := alicorn.new_runtime({0, 0, 960, 720})
+	defer alicorn.destroy_runtime(&rt)
+	preferences := alicorn.Accessibility_Appearance_Preferences{reduce_motion=true}
+	testing.expect(t, alicorn.style_root_accessibility_set(&rt, preferences),
+		"the native-host reduced-motion preference should be accepted by the headless fixture")
+	_ = layout_test_build(&app, &rt, 960, 720, 1)
+	indicator, found := alicorn.node_by_key(&rt, alicorn.key_string("audition-status-indicator"), .Container)
+	testing.expect(t, found, "the reduced-motion fixture should retain the fixed-space status indicator")
+	if !found { return }
+	handle, owner_status := alicorn.motion_owner_begin(&rt, indicator)
+	testing.expect(t, owner_status == .Ok, "the reduced-motion indicator should have a retained owner")
+	app.state.playback.status = "playing"
+	alicorn.invalidate_root(&rt, "playback status changed under reduced motion")
+	_ = layout_test_build(&app, &rt, 960, 720, 1)
+	presentation := alicorn.motion_presentation(&rt, handle)
+	activity := alicorn.motion_activity(&rt)
+	testing.expect(t, presentation.status == .Ok && !presentation.active &&
+		presentation.presented_opacity == 1 && presentation.target_opacity == 1 &&
+		activity.active_owners == 0 && activity.active_properties == 0,
+		"reduced motion should snap the decorative status indicator to its new target without scheduling animation")
+}
