@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:time"
 import alicorn "alicorn:runtime"
 import ui "alicorn:ui"
+import host "alicorn:native/sdl_gpu"
 
 // The ordinary slider owns focus, keyboard/AX range actions and drag capture.
 // Two inert geometry surfaces cover its stock presentation. Peaks are uploaded
@@ -373,6 +374,56 @@ waveform_pointer :: proc(data: rawptr, rt: ^alicorn.Runtime, event: alicorn.Poin
 		if event.kind == .Down && event.click_count == 2 { toggle_playback(app) }
 	}
 	waveform_update(app, rt)
+}
+
+punks_pointer :: proc(data: rawptr, rt: ^alicorn.Runtime, event: alicorn.Pointer_Event, target: alicorn.Node_ID) {
+	app := cast(^App)data
+	primary := event.button == 0 || event.button == alicorn.POINTER_BUTTON_PRIMARY
+	if event.kind == .Down {
+		app.file_drag_candidate = false
+		app.file_drag_candidate_node = 0
+		app.file_drag_candidate_path = ""
+		if primary && target != 0 {
+			key, key_ok := alicorn.node_identity_key(rt, target)
+			if key_ok {
+				switch value in key {
+				case string:
+					for entry in app.window.entries {
+						if entry.id == value && !entry.directory && len(entry.path) > 0 {
+							app.file_drag_candidate = true
+							app.file_drag_candidate_node = target
+							app.file_drag_candidate_path = entry.path
+							app.file_drag_start_x, app.file_drag_start_y = event.x, event.y
+							break
+						}
+					}
+				case alicorn.UI_Unkeyed, u64, alicorn.UI_Key_Pair:
+				}
+			}
+		}
+	} else if event.kind == .Move && app.file_drag_candidate {
+		captured, captured_ok := alicorn.node_info(rt, app.file_drag_candidate_node)
+		if !captured_ok || !captured.captured {
+			app.file_drag_candidate = false
+			app.file_drag_candidate_node = 0
+			app.file_drag_candidate_path = ""
+		} else if abs(event.x-app.file_drag_start_x) >= 5 || abs(event.y-app.file_drag_start_y) >= 5 {
+			if host.application_file_drag_start(app.services.file_drag, app.file_drag_candidate_path) {
+				// OLE owns the pointer sequence until drop or cancellation. Clear
+				// Alicorn's pressed state so it cannot activate the row afterwards.
+				_ = alicorn.cancel_pointer_capture(rt)
+				app.file_drag_candidate = false
+				app.file_drag_candidate_node = 0
+				app.file_drag_candidate_path = ""
+				return
+			}
+		}
+	} else if event.kind == .Up || event.kind == .Cancel {
+		app.file_drag_candidate = false
+		app.file_drag_candidate_node = 0
+		app.file_drag_candidate_path = ""
+	}
+	waveform_pointer(data, rt, event, target)
 }
 
 waveform_scroll :: proc(data: rawptr, rt: ^alicorn.Runtime, event: alicorn.Scroll_Event) {

@@ -1,5 +1,5 @@
 use caliber_ffi::*;
-use punks_core::{FileEntry, PlaybackStatus, PunksConfig, SampleBrowser};
+use punks_core::{FileEntry, PlaybackStatus, PunksConfig, SampleBrowser, SUPPORTED_EXTENSIONS};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -803,6 +803,30 @@ impl Publication {
                     .canonicalize()
                     .map_err(|e| e.to_string())?;
                 b.open_directory(&path).map_err(|e| e.to_string())?;
+            }
+            "play_file" => {
+                let path = Path::new(&c.path)
+                    .canonicalize()
+                    .map_err(|e| format!("open dropped audio file: {e}"))?;
+                if !path.is_file() {
+                    return Err("Dropped path is not a file".into());
+                }
+                let extension = path
+                    .extension()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
+                if !SUPPORTED_EXTENSIONS.contains(&extension.as_str()) {
+                    return Err(format!(
+                        "Unsupported audio file type; use {}",
+                        SUPPORTED_EXTENSIONS
+                            .iter()
+                            .map(|extension| extension.to_ascii_uppercase())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                b.play_file(&path);
             }
             "up" => {
                 b.navigate_up().map_err(|e| e.to_string())?;

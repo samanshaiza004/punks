@@ -11,8 +11,11 @@ The workbench has folder navigation, per-tab browsing and search, a virtualized
 file table, and a persistent waveform and listening deck.
 Long-file previews remain bounded. Click or drag the signed waveform to seek;
 Tab focuses it for arrow-key and Home/End seeking. Space pauses or resumes,
-and Stop resets the position. Library tagging controls, settings, waveform
-zoom/pan, and drag-out remain future work.
+and Stop resets the position. Drop a WAV, FLAC, MP3, or OGG file from your file
+manager onto the window to audition it without changing the active browsing
+folder. Drag an audio result out to another application to copy its file there
+(currently supported by the Windows native host). Library tagging controls,
+settings, and waveform zoom/pan remain future work.
 
 ## Build
 

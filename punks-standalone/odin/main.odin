@@ -57,6 +57,10 @@ App :: struct {
 	requested_folder_offset: int,
 	builds: u64,
 	status_indicator_initialized: bool,
+	file_drag_candidate: bool,
+	file_drag_candidate_node: alicorn.Node_ID,
+	file_drag_candidate_path: string,
+	file_drag_start_x, file_drag_start_y: f32,
 	smoke: bool,
 	smoke_audio: bool,
 	smoke_stage: int,
@@ -421,6 +425,16 @@ open_folder :: proc(app: ^App) {
 	}
 }
 
+file_drop :: proc(data: rawptr, _rt: ^alicorn.Runtime, path: string) {
+	app := cast(^App)data
+	if len(path) == 0 || len(path) > 4096 {
+		app.error = "Dropped file path is invalid or too long"
+		return
+	}
+	app.error = ""
+	send(app, Command{op="play_file", path=path})
+}
+
 dialog_initial_location_for_mode :: proc(mode, current_directory: string) -> string {
 	switch mode {
 	case "none":
@@ -675,8 +689,9 @@ main :: proc() {
 		on_wake=wake,
 		on_services=services,
 		on_dialog=dialog,
+		on_file_drop=file_drop,
 		on_key=keys,
-		on_pointer=waveform_pointer,
+		on_pointer=punks_pointer,
 		on_scroll=waveform_scroll,
 		on_scheduled_wake=scheduled,
 		interaction_update_policy=.Correct_After_Interaction,
