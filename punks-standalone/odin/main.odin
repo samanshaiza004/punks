@@ -43,6 +43,12 @@ App :: struct {
 	state_slot: int,
 	entry_slot: int,
 	error: string,
+	tab_drag_source_id: u64,
+	tab_drag_target_id: u64,
+	tab_drag_position: alicorn.Drop_Position,
+	tab_motion_reset_pending: bool,
+	tab_motion_reset_snap: bool,
+	tab_reorder_motion_signature: u64,
 	initial_path: string,
 	dialog_initial_mode: string,
 	next_diagnostic_request_id: u64,
@@ -605,6 +611,60 @@ keys :: proc(data: rawptr, rt: ^alicorn.Runtime, key: host.Application_Key) -> b
 	}
 }
 
+application_drag :: proc(data: rawptr, rt: ^alicorn.Runtime, event: alicorn.Drag_Event) {
+	app := cast(^App)data
+	if app == nil || rt == nil || event.drag_type != PUNKS_TAB_DRAG_TYPE { return }
+	switch event.kind {
+	case .Started:
+		if event.source.namespace != PUNKS_TAB_SEMANTIC_NAMESPACE { return }
+		app.tab_drag_source_id = event.source.value
+		app.tab_drag_target_id = event.target.value if event.target.namespace == PUNKS_TAB_SEMANTIC_NAMESPACE else 0
+		app.tab_drag_position = event.position
+		app.tab_reorder_motion_signature = 0
+		app.tab_motion_reset_pending = false
+		alicorn.invalidate_root(rt, "Punks tab drag started")
+	case .Target_Changed:
+		if app.tab_drag_source_id == 0 || event.source.value != app.tab_drag_source_id { return }
+		target_id := event.target.value if event.target.namespace == PUNKS_TAB_SEMANTIC_NAMESPACE else 0
+		if target_id != app.tab_drag_target_id || event.position != app.tab_drag_position {
+			app.tab_drag_target_id = target_id
+			app.tab_drag_position = event.position
+			app.tab_reorder_motion_signature = 0
+			alicorn.invalidate_root(rt, "Punks tab reorder target changed")
+		}
+	case .Dropped:
+		if app.tab_drag_source_id != 0 &&
+			event.source.namespace == PUNKS_TAB_SEMANTIC_NAMESPACE &&
+			event.target.namespace == PUNKS_TAB_SEMANTIC_NAMESPACE &&
+			(event.position == .Before || event.position == .After) &&
+			event.source.value != event.target.value {
+			send(app, Command{
+				op="tab_reorder",
+				tab_id=event.source.value,
+				tab_target_id=event.target.value,
+				after=event.position == .After,
+			})
+		}
+		app.tab_drag_source_id = 0
+		app.tab_drag_target_id = 0
+		app.tab_drag_position = .None
+		app.tab_motion_reset_pending = true
+		app.tab_motion_reset_snap = true
+		app.tab_reorder_motion_signature = 0
+		alicorn.invalidate_root(rt, "Punks tab drag completed")
+	case .Cancelled:
+		if app.tab_drag_source_id == 0 || event.source.value == app.tab_drag_source_id {
+			app.tab_drag_source_id = 0
+			app.tab_drag_target_id = 0
+			app.tab_drag_position = .None
+			app.tab_motion_reset_pending = true
+			app.tab_motion_reset_snap = false
+			app.tab_reorder_motion_signature = 0
+			alicorn.invalidate_root(rt, "Punks tab drag cancelled")
+		}
+	}
+}
+
 build :: proc(
 	data: rawptr,
 	rt: ^alicorn.Runtime,
@@ -693,6 +753,7 @@ main :: proc() {
 		on_key=keys,
 		on_pointer=punks_pointer,
 		on_scroll=waveform_scroll,
+		on_drag=application_drag,
 		on_scheduled_wake=scheduled,
 		interaction_update_policy=.Correct_After_Interaction,
 	})

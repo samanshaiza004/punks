@@ -25,16 +25,18 @@ Initialize the pinned frontend and ABI dependencies:
 git submodule update --init --recursive
 ```
 
-Install a Rust toolchain, Odin, and SDL3. The native build was validated with
-Odin `dev-2026-09-nightly:a2fb372` and SDL3 from Homebrew on macOS. On macOS:
+Install a Rust toolchain, Odin `dev-2026-11`, and SDL3. On macOS, Alicorn
+provides a verified Odin SDK bootstrap; give it a new destination directory:
 
 ```sh
 brew install sdl3
-./tools/build.sh
+sh vendor/alicorn/tools/setup_macos_odin.sh /path/to/odin-sdk
+ODIN=/path/to/odin-sdk/odin ODIN_ROOT=/path/to/odin-sdk ./tools/build.sh
 ```
 
-Set `ODIN` to the Odin executable if it is not on `PATH`. Set `SDL3_PREFIX` if
-SDL3 is installed outside Homebrew's default location. The build creates
+The compiler and `ODIN_ROOT` must point to the same SDK so Alicorn's macOS
+AppKit bindings resolve. Set `SDL3_PREFIX` if SDL3 is installed outside
+Homebrew's default location. The build creates
 `target/debug/punks` and packages a macOS app at
 `target/debug/punks-package/Punks.app`. Add `--release` to build optimized
 artifacts.

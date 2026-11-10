@@ -99,12 +99,16 @@ render_tab_strip :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
 		}
 	}
 	options := alicorn.DEFAULT_TAB_BAR_OPTIONS
-	options.min_tab_width = 96
-	options.max_tab_width = 210
+	options.min_tab_width = 136
+	options.max_tab_width = 180
 	options.height = TAB_BAR_HEIGHT
+	options.close_policy = .Selected_Or_Hover
+	options.drag_preview_mode = .Source_Subtree
+	options.drag_tracking = alicorn.DRAG_TRACKING_HORIZONTAL_MAGNETIC
 	options.presentation = .Compact
 	options.gap = 0
 	options.appearance = .Connected
+	options.animate_drag_reorder = true
 	options.selected_fill = alicorn.style_color(ctx, .Subtle_Surface)
 	options.selected_text = alicorn.style_color(ctx, .Text)
 	options.selected_fill_set = true
@@ -116,28 +120,92 @@ render_tab_strip :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
 		options,
 		ui.layout_style(.Row, height=TAB_BAR_HEIGHT, grow=1, clip=true),
 	)
+	punks_tab_reorder_motion(app, ctx, rt, result.item_nodes)
 	if result.action == .Select && result.item_index >= 0 && result.item_index < len(app.state.tabs) {
 		send(app, Command{op="tab_switch", tab_id=app.state.tabs[result.item_index].id})
 	} else if result.action == .Close && result.item_index >= 0 && result.item_index < len(app.state.tabs) {
 		send(app, Command{op="tab_close", tab_id=app.state.tabs[result.item_index].id})
-	}
-	if event, found := alicorn.drag_event_take(rt); found &&
-		event.kind == .Dropped &&
-		event.drag_type == PUNKS_TAB_DRAG_TYPE &&
-		event.source.namespace == PUNKS_TAB_SEMANTIC_NAMESPACE &&
-		event.target.namespace == PUNKS_TAB_SEMANTIC_NAMESPACE {
-		send(app, Command{
-			op="tab_reorder",
-			tab_id=event.source.value,
-			tab_target_id=event.target.value,
-			after=event.position == .After,
-		})
 	}
 	if ui.button(ctx, "+", key="punks-new-tab", width=32, height=32, variant=.Toolbar) {
 		send(app, Command{op="tab_new"})
 	}
 	_ = alicorn.semantic_description(ctx, .Button, "New tab", actions=alicorn.semantic_actions_add({}, .Press))
 	_ = alicorn.tooltip(ctx, "New tab")
+}
+
+punks_tab_reorder_motion :: proc(
+	app: ^App,
+	ctx: ^ui.UI,
+	rt: ^alicorn.Runtime,
+	tab_nodes: []alicorn.Node_ID,
+) {
+	if app == nil || ctx == nil || rt == nil || len(tab_nodes) != len(app.state.tabs) { return }
+	if app.tab_motion_reset_pending {
+		intent := ui.Motion_Intent.Settle
+		if app.tab_motion_reset_snap { intent = .Snap }
+		for node in tab_nodes {
+			_ = ui.motion(ctx, node, ui.Motion_Target{
+				translation={},
+				clip_policy=ui.Motion_Clip_Policy.Follow_Visual,
+				has_translation=true,
+			}, intent)
+		}
+		app.tab_reorder_motion_signature = 0
+		app.tab_motion_reset_pending = false
+		app.tab_motion_reset_snap = false
+		return
+	}
+	if app.tab_drag_source_id == 0 || len(tab_nodes) < 2 { return }
+
+	order := make([]u64, len(app.state.tabs), allocator=context.temp_allocator)
+	for tab, index in app.state.tabs { order[index] = tab.id }
+	from, target := -1, -1
+	for id, index in order {
+		if id == app.tab_drag_source_id { from = index }
+		if id == app.tab_drag_target_id { target = index }
+	}
+	if from >= 0 && target >= 0 &&
+		(app.tab_drag_position == .Before || app.tab_drag_position == .After) {
+		to := target
+		if app.tab_drag_position == .After { to += 1 }
+		if from < to { to -= 1 }
+		to = min(to, len(order)-1)
+		if to != from {
+			moving := order[from]
+			if from < to {
+				for index := from; index < to; index += 1 { order[index] = order[index+1] }
+			} else {
+				for index := from; index > to; index -= 1 { order[index] = order[index-1] }
+			}
+			order[to] = moving
+		}
+	}
+
+	first, first_ok := alicorn.node_info(rt, tab_nodes[0])
+	second, second_ok := alicorn.node_info(rt, tab_nodes[1])
+	stride: f32 = 0
+	if first_ok && second_ok { stride = second.bounds.x-first.bounds.x }
+	if stride <= 0 { return }
+
+	signature: u64 = 14_695_981_039_346_656_037
+	for id in order { signature = (signature ~ id) * 1_099_511_628_211 }
+	signature = (signature ~ u64(transmute(u32)stride)) * 1_099_511_628_211
+	if signature == app.tab_reorder_motion_signature { return }
+
+	for node, index in tab_nodes {
+		if app.state.tabs[index].id == app.tab_drag_source_id { continue }
+		destination := index
+		for id, proposed_index in order {
+			if id == app.state.tabs[index].id { destination = proposed_index; break }
+		}
+		delta := f32(destination-index)*stride
+		_ = ui.motion(ctx, node, ui.Motion_Target{
+			translation=ui.Motion_Vector2{x=f64(delta)},
+			clip_policy=ui.Motion_Clip_Policy.Follow_Visual,
+			has_translation=true,
+		}, .Settle)
+	}
+	app.tab_reorder_motion_signature = signature
 }
 
 render_title_row :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
