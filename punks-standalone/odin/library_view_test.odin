@@ -44,6 +44,20 @@ layout_test_build :: proc(app: ^App, rt: ^alicorn.Runtime, width, height: int, d
 	return build(app, rt, width, height, dpi)
 }
 
+audition_circle_test_describe :: proc(rt: ^alicorn.Runtime, app: ^App, activated: ^bool = nil) -> alicorn.Node_ID {
+	ctx, needed := alicorn.begin_frame(rt)
+	if !needed { return 0 }
+	_ = alicorn.container_begin(&ctx, .Root,
+		style=ui.layout_style(.Column, width=120, height=100, align=.Center, justify=.Center))
+	scope := alicorn.style_environment_push(&ctx, alicorn.Style_Environment{theme=app.theme})
+	id, clicked := audition_play_pause_button(&ctx, "Start", false, false, 0.25, 40)
+	if activated != nil { activated^ = clicked }
+	alicorn.style_environment_pop(&ctx, scope)
+	alicorn.container_end(&ctx)
+	alicorn.end_frame(&ctx)
+	return id
+}
+
 @(test)
 test_workspace_geometry_survives_resize :: proc(t: ^testing.T) {
 	app := layout_test_app()
@@ -71,12 +85,87 @@ test_workspace_geometry_survives_resize :: proc(t: ^testing.T) {
 			"header, results and deck must remain in their own vertical bands")
 		testing.expect(t, deck.h > 0 && deck.y+deck.h <= f32(size[1])-26,
 			"the listening deck must remain above the status line")
-		testing.expect(t, rt.diagnostic == "", "the layout must have no identity or scope diagnostics")
+		testing.expect(t, rt.diagnostic == "",
+			fmt.tprintf("the layout must have no identity or scope diagnostics: %s", rt.diagnostic))
 	}
 }
 
 layout_test_same_bounds :: proc(a, b: alicorn.Rect) -> bool {
 	return abs(a.x-b.x) <= 0.02 && abs(a.y-b.y) <= 0.02 && abs(a.w-b.w) <= 0.02 && abs(a.h-b.h) <= 0.02
+}
+
+@(test)
+test_audition_play_button_uses_circle_hit_and_keeps_button_semantics :: proc(t: ^testing.T) {
+	app := App{}
+	rt := alicorn.new_runtime({0, 0, 120, 100})
+	defer alicorn.destroy_runtime(&rt)
+	punks_styles_ensure(&app, &rt)
+	id := audition_circle_test_describe(&rt, &app)
+	info, has_info := alicorn.node_info(&rt, id)
+	semantic, has_semantic := alicorn.semantic_node_lookup(&rt, alicorn.semantic_visual_id(id))
+	testing.expect(t, has_info && info.bounds.w == 40 && info.bounds.h == 40,
+		"the custom transport should retain a square layout allocation for focus and accessibility")
+	testing.expect(t, has_semantic && semantic.role == .Button && semantic.label == "Start" &&
+		semantic.has_bounds && semantic.bounds == info.bounds &&
+		alicorn.semantic_actions_has(semantic.actions, .Press),
+		"the circle should keep the ordinary Button name, Press action, and rectangular accessibility bounds")
+	if !has_info { return }
+	corners := [4][2]f32{
+		{info.bounds.x+1, info.bounds.y+1},
+		{info.bounds.x+info.bounds.w-1, info.bounds.y+1},
+		{info.bounds.x+1, info.bounds.y+info.bounds.h-1},
+		{info.bounds.x+info.bounds.w-1, info.bounds.y+info.bounds.h-1},
+	}
+	for point in corners {
+		target := alicorn.hit_test(&rt, point.x, point.y)
+		testing.expect(t, target != id, "a point in each rectangular allocation corner must fall outside the circular hit target")
+		_ = alicorn.process_pointer(&rt, alicorn.Pointer_Event{
+			kind=.Down, x=point.x, y=point.y, button=alicorn.POINTER_BUTTON_PRIMARY,
+		})
+		_ = alicorn.process_pointer(&rt, alicorn.Pointer_Event{
+			kind=.Up, x=point.x, y=point.y, button=alicorn.POINTER_BUTTON_PRIMARY,
+		})
+		activated := false
+		_ = audition_circle_test_describe(&rt, &app, &activated)
+		testing.expect(t, !activated, "a corner click must not activate playback")
+	}
+	center := [2]f32{info.bounds.x+info.bounds.w/2, info.bounds.y+info.bounds.h/2}
+	_ = alicorn.process_pointer(&rt, alicorn.Pointer_Event{
+		kind=.Down, x=center.x, y=center.y, button=alicorn.POINTER_BUTTON_PRIMARY,
+	})
+	_ = alicorn.process_pointer(&rt, alicorn.Pointer_Event{
+		kind=.Up, x=center.x, y=center.y, button=alicorn.POINTER_BUTTON_PRIMARY,
+	})
+	activated := false
+	_ = audition_circle_test_describe(&rt, &app, &activated)
+	testing.expect(t, activated, "a click inside the circle must activate playback")
+	testing.expect(t, alicorn.focus(&rt, id) && alicorn.activate_focused(&rt, .Space),
+		"the custom presentation should remain keyboard focusable and Space-activatable")
+	activated = false
+	_ = audition_circle_test_describe(&rt, &app, &activated)
+	testing.expect(t, activated, "Space should dispatch through the same Button activation contract")
+}
+
+@(test)
+test_audition_progress_uses_only_valid_backend_playback_values :: proc(t: ^testing.T) {
+	fraction, available := audition_playback_progress(Playback{
+		status="playing", position=25, duration=100,
+	})
+	testing.expect(t, available && abs(fraction-0.25) < 0.001,
+		"playing progress should reflect the latest backend position and duration")
+	fraction, available = audition_playback_progress(Playback{
+		status="paused", position=125, duration=100,
+	})
+	testing.expect(t, available && fraction == 1,
+		"paused progress should remain visible and clamp to the end of the track")
+	_, available = audition_playback_progress(Playback{
+		status="idle", position=25, duration=100,
+	})
+	testing.expect(t, !available, "idle playback should not show a stale progress arc")
+	_, available = audition_playback_progress(Playback{
+		status="playing", position=25, duration=0,
+	})
+	testing.expect(t, !available, "a missing or invalid duration must not produce an arc")
 }
 
 // The compact case composes the same deck beneath a growing results surface
@@ -207,7 +296,8 @@ test_audition_slots_stay_stable_across_loading_seeking_and_errors :: proc(t: ^te
 					len(rt.nodes[app.waveform_view.head_node].surface_segments) == 0,
 					"loading a different source must show its placeholder rather than the old recording's peaks or playhead")
 			}
-			testing.expect(t, rt.diagnostic == "", "stable audition slots must not produce runtime diagnostics")
+			testing.expect(t, rt.diagnostic == "",
+				fmt.tprintf("stable audition slots must not produce runtime diagnostics: %s", rt.diagnostic))
 		}
 	}
 }
@@ -277,7 +367,8 @@ test_audition_controls_fit_narrow_large_text_and_retain_focus :: proc(t: ^testin
 	testing.expect(t, updated_seek_found && updated_seek_id == seek_id &&
 		alicorn.focused_node(&rt) == seek_id,
 		"playhead updates should retain waveform identity and focus")
-	testing.expect(t, rt.diagnostic == "", "narrow high-text transport layout should have no runtime diagnostic")
+	testing.expect(t, rt.diagnostic == "",
+		fmt.tprintf("narrow high-text transport layout should have no runtime diagnostic: %s", rt.diagnostic))
 }
 
 @(test)

@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:math"
 import alicorn "alicorn:runtime"
 import ui "alicorn:ui"
 import host "alicorn:native/sdl_gpu"
@@ -31,6 +32,149 @@ path_basename :: proc(value: string) -> string {
 		}
 	}
 	return value[start:]
+}
+
+audition_playback_progress :: proc(playback: Playback) -> (fraction: f32, available: bool) {
+	if playback.status != "playing" && playback.status != "paused" { return }
+	if playback.duration <= 0 || math.is_nan(playback.duration) || math.is_inf(playback.duration) ||
+		math.is_nan(playback.position) || math.is_inf(playback.position) {
+		return
+	}
+	position := clamp(playback.position, 0, playback.duration)
+	return f32(position/playback.duration), true
+}
+
+audition_line_shape :: proc(start, end: [2]f32) -> alicorn.Surface_Shape {
+	dx, dy := end[0]-start[0], end[1]-start[1]
+	return alicorn.surface_shape_cubic_bezier({
+		start,
+		{start[0]+dx/3, start[1]+dy/3},
+		{start[0]+2*dx/3, start[1]+2*dy/3},
+		end,
+	})
+}
+
+audition_play_pause_button :: proc(
+	ctx: ^ui.UI,
+	label: string,
+	disabled, playing: bool,
+	progress: f32,
+	diameter: f32,
+) -> (id: alicorn.Node_ID, activated: bool) {
+	if ctx == nil || ctx.runtime == nil || diameter <= 0 { return }
+	progress_value := clamp(progress, 0, 1)
+	id, activated = alicorn.button_begin(
+		ctx,
+		label,
+		key=alicorn.key_string("audition-start-pause"),
+		style=ui.layout_style(.Column, width=diameter, height=diameter, align=.Center, justify=.Center),
+		state=alicorn.Button_State{disabled=disabled},
+		content_style=alicorn.button_content_style(.Center, .Center, padding_x=0, padding_y=0),
+		presentation=.Custom,
+		pointer_hit_shape=.Circle,
+	)
+	if id == 0 { return }
+	if progress_value > 0 {
+		_ = alicorn.semantic_augment(ctx,
+			description=fmt.tprintf("Playback progress %.0f percent", f64(progress_value*100)))
+	}
+
+	columns := [1]alicorn.Grid_Track{alicorn.grid_fraction(1)}
+	rows := [1]alicorn.Grid_Track{alicorn.grid_fraction(1)}
+	transparent := ui.Color{0, 0, 0, 0}
+	grid := alicorn.grid_begin(ctx, alicorn.key_string("audition-play-layers"), columns[:], rows[:],
+		style=ui.layout_style(width=diameter, height=diameter), label="audition playback control")
+	if grid != 0 {
+		full_style := ui.layout_style(width=diameter, height=diameter)
+		face := alicorn.surface_begin(ctx, .Subtle_Surface,
+			key=alicorn.key_string("audition-play-face"), style=full_style,
+			shape=alicorn.surface_shape_circle(), fill=alicorn.style_color(ctx, .Subtle_Surface),
+			label="playback control face")
+		_ = alicorn.visual_part_attach(ctx, face, id, alicorn.visual_part_core(.Surface))
+		alicorn.surface_end(ctx)
+		_ = alicorn.grid_cell(ctx, face, 0, 0)
+
+		hover := alicorn.surface_begin(ctx, .Accent_Hover,
+			key=alicorn.key_string("audition-play-hover"), style=full_style,
+			shape=alicorn.surface_shape_arc(-1.5707963, 6.2831853, radius=0.46),
+			fill=transparent,
+			stroke=alicorn.Paint_Stroke{color=alicorn.style_color(ctx, .Accent_Hover), width=1.5},
+			label="playback hover ring")
+		_ = alicorn.visual_part_attach(ctx, hover, id, alicorn.visual_part_core(.Overlay), .Owner_Hovered)
+		alicorn.surface_end(ctx)
+		_ = alicorn.grid_cell(ctx, hover, 0, 0)
+
+		track := alicorn.surface_begin(ctx, .Border,
+			key=alicorn.key_string("audition-play-track"), style=full_style,
+			shape=alicorn.surface_shape_arc(-1.5707963, 6.2831853, radius=0.46),
+			fill=transparent,
+			stroke=alicorn.Paint_Stroke{color=alicorn.style_color(ctx, .Border), width=2},
+			label="playback progress track")
+		_ = alicorn.visual_part_attach(ctx, track, id, alicorn.visual_part_core(.Indicator))
+		alicorn.surface_end(ctx)
+		_ = alicorn.grid_cell(ctx, track, 0, 0)
+
+		if progress_value > 0 {
+			sweep := max(0.0001, 6.2831853*progress_value)
+			progress_arc := alicorn.surface_begin(ctx, .Accent,
+				key=alicorn.key_string("audition-play-progress"), style=full_style,
+				shape=alicorn.surface_shape_arc(-1.5707963, sweep, radius=0.46),
+				fill=transparent,
+				stroke=alicorn.Paint_Stroke{color=alicorn.style_color(ctx, .Accent), width=2.8},
+				label="playback progress")
+			_ = alicorn.visual_part_attach(ctx, progress_arc, id, alicorn.visual_part_core(.Selected_Indicator))
+			alicorn.surface_end(ctx)
+			_ = alicorn.grid_cell(ctx, progress_arc, 0, 0)
+		}
+
+		focus_ring := alicorn.surface_begin(ctx, .Focus,
+			key=alicorn.key_string("audition-play-focus"), style=full_style,
+			shape=alicorn.surface_shape_circle(), fill=transparent,
+			stroke=alicorn.Paint_Stroke{color=alicorn.style_color(ctx, .Focus), width=2},
+			stroke_placement=.Inside,
+			label="keyboard focus ring")
+		_ = alicorn.visual_part_attach(ctx, focus_ring, id,
+			alicorn.visual_part_core(.Focus_Indicator), .Owner_Focus_Visible)
+		alicorn.surface_end(ctx)
+		_ = alicorn.grid_cell(ctx, focus_ring, 0, 0)
+
+		glyph_color := alicorn.style_color(ctx, .Text)
+		if disabled { glyph_color = alicorn.style_color(ctx, .Muted_Text) }
+		glyph_style := ui.layout_style(width=diameter, height=diameter)
+		if playing {
+			pause_id := alicorn.container_begin(ctx, .Container, key=alicorn.key_string("audition-pause-glyph"),
+				style=ui.layout_style(.Row, width=18, height=20, gap=5, align=.Center, justify=.Center),
+				label="pause symbol")
+			if pause_id != 0 {
+				for index in 0..<2 {
+					bar := alicorn.surface_begin(ctx, .Text,
+						key=alicorn.key_u64(u64(index+1)),
+						style=ui.layout_style(.Column, width=4, height=17),
+						shape=alicorn.surface_shape_uniform_corner_radius(2),
+						fill=glyph_color, label="pause bar")
+					_ = bar
+					alicorn.surface_end(ctx)
+				}
+				alicorn.container_end(ctx)
+				_ = alicorn.grid_cell(ctx, pause_id, 0, 0, align_x=.Center, align_y=.Center)
+			}
+		} else {
+			triangle := [3][2]f32{{0.41, 0.29}, {0.41, 0.71}, {0.66, 0.5}}
+			for index in 0..<3 {
+				line := alicorn.surface_begin(ctx, .Text,
+					key=alicorn.key_u64(u64(index+1)), style=glyph_style,
+					shape=audition_line_shape(triangle[index], triangle[(index+1)%3]),
+					fill=transparent,
+					stroke=alicorn.Paint_Stroke{color=glyph_color, width=3.2},
+					label="play symbol stroke")
+				alicorn.surface_end(ctx)
+				_ = alicorn.grid_cell(ctx, line, 0, 0)
+			}
+		}
+		alicorn.grid_end(ctx)
+	}
+	alicorn.button_end(ctx)
+	return
 }
 
 punks_entry_button :: proc(
@@ -613,15 +757,11 @@ render_audio_deck :: proc(app: ^App, ctx: ^ui.UI) {
 			} else if loading {
 				play_disabled = true
 			}
-			if ui.button(
-				ctx,
-				play_label,
-				key=alicorn.key_string("audition-start-pause"),
-				width=88,
-				height=layout.transport,
-				state=ui.Button_State{disabled=play_disabled},
-				variant=.Primary,
-			) {
+			progress, progress_available := audition_playback_progress(app.state.playback)
+			if !progress_available { progress = 0 }
+			if _, clicked := audition_play_pause_button(
+				ctx, play_label, play_disabled, playing, progress, layout.play_control,
+			); clicked {
 				send(app, Command{op=play_op})
 			}
 			if ui.button(
