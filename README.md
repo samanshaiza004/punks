@@ -7,8 +7,10 @@ the frontend to the headless Rust application.
 The current interface opens a folder, navigates audio files, searches names,
 selects files, and previews or stops playback. It reads WAV (including RF64 and
 Broadcast Wave), FLAC, MP3, and OGG through the existing Rust audio engine.
-The workbench has folder navigation, per-tab browsing and search, a virtualized
-file table, and a persistent waveform and listening deck.
+The workbench has per-tab browsing and search, a virtualized file table, and a
+persistent waveform and listening deck. Folder navigation uses AliKit's
+Tree View over revision-tagged backend windows; Punks still owns paging and
+folder-entry commands.
 Long-file previews remain bounded. Click or drag the signed waveform to seek;
 Tab focuses it for arrow-key and Home/End seeking. Space pauses or resumes,
 and Stop resets the position. Drop a WAV, FLAC, MP3, or OGG file from your file
@@ -25,7 +27,9 @@ Initialize the pinned frontend and ABI dependencies:
 git submodule update --init --recursive
 ```
 
-Install a Rust toolchain, Odin `dev-2026-11`, and SDL3. On macOS, Alicorn
+Install a Rust toolchain, Odin `dev-2026-11`, and SDL3. The AliKit Tree View
+source is vendored under `vendor/alicorn-kit` and pinned in its `UPSTREAM.md`.
+On macOS, Alicorn
 provides a verified Odin SDK bootstrap; give it a new destination directory:
 
 ```sh

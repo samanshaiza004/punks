@@ -4,6 +4,7 @@ import "core:fmt"
 import alicorn "alicorn:runtime"
 import ui "alicorn:ui"
 import host "alicorn:native/sdl_gpu"
+import tree_view "alikit:tree_view"
 
 TAB_BAR_HEIGHT :: 36
 WAVEFORM_HEIGHT :: 100
@@ -84,6 +85,91 @@ punks_entry_button :: proc(
 	}
 	alicorn.button_end(ctx)
 	return activated
+}
+
+punks_folder_item_id :: proc(value: string) -> tree_view.Item_ID {
+	hash: u64 = 14_695_981_039_346_656_037
+	for character in value { hash = (hash ~ u64(character)) * 1_099_511_628_211 }
+	if hash == 0 { hash = 1 }
+	return tree_view.Item_ID(hash)
+}
+
+punks_folder_tree_window :: proc(app: ^App) -> tree_view.Window {
+	if app == nil { return {} }
+	window := tree_view.Window{
+		total_count=app.state.folder_count,
+		offset=0,
+		revision=app.state.listing_revision,
+	}
+	if app.folders.listing_revision != app.state.listing_revision { return window }
+	window.offset = app.state.folder_offset
+	items := make([]tree_view.Item, len(app.folders.entries), allocator=context.temp_allocator)
+	for folder, index in app.folders.entries {
+		items[index] = tree_view.Item{
+			id=punks_folder_item_id(folder.id),
+			label=folder.name,
+		}
+	}
+	window.items = items
+	return window
+}
+
+punks_folder_tree_icon :: proc(_data: rawptr, _item: tree_view.Item) -> alicorn.Icon_ID {
+	return .Folder_Closed
+}
+
+punks_folder_tree_row_hook :: proc(_data: rawptr, ctx: ^ui.UI, item: tree_view.Item, _semantic: alicorn.Semantic_ID) {
+	_ = alicorn.tooltip(ctx, item.label)
+}
+
+punks_folder_tree_apply_event :: proc(app: ^App, event: tree_view.Event) {
+	if app == nil { return }
+	if event.kind == .Range_Requested {
+		offset := max(0, event.index-4)
+		if app.requested_folder_revision != app.state.listing_revision || app.requested_folder_offset != offset {
+			send(app, Command{op="folder_window", offset=offset, listing_revision=app.state.listing_revision})
+			app.requested_folder_revision = app.state.listing_revision
+			app.requested_folder_offset = offset
+		}
+		return
+	}
+	if event.kind != .Pressed && event.kind != .Activated { return }
+	if app.folders.listing_revision != app.state.listing_revision { return }
+	for folder in app.folders.entries {
+		if punks_folder_item_id(folder.id) == event.id {
+			send(app, Command{
+				op="enter_folder",
+				id=folder.id,
+				index=folder.index,
+				listing_revision=app.state.listing_revision,
+			})
+			return
+		}
+	}
+}
+
+render_folder_tree :: proc(app: ^App, ctx: ^ui.UI) {
+	if app.folder_tree_revision != app.state.listing_revision {
+		app.folder_tree = {}
+		app.folder_tree_revision = app.state.listing_revision
+	}
+	window := punks_folder_tree_window(app)
+	event := tree_view.build(ctx, &app.folder_tree, window,
+		alicorn.key_string("library-folder-tree"),
+		tree_view.Options{
+			accessible_label="Folders in this location",
+			empty_label="No folders here",
+			loading_label="Loading folders…",
+			row_height=FOLDER_ROW_HEIGHT,
+			row_padding=6,
+			row_gap=10,
+			hide_disclosure=true,
+			icon_proc=punks_folder_tree_icon,
+			row_hook_proc=punks_folder_tree_row_hook,
+		},
+	)
+	app.folder_node = app.folder_tree.scroll_node
+	punks_folder_tree_apply_event(app, event)
 }
 
 render_tab_strip :: proc(app: ^App, rt: ^alicorn.Runtime, ctx: ^ui.UI) {
@@ -347,50 +433,10 @@ render_sidebar :: proc(app: ^App, ctx: ^ui.UI) {
 		_ = ui.text(ctx, location, size=17)
 		_ = ui.text(ctx, "FOLDERS", size=12, color=alicorn.style_color(ctx, .Muted_Text))
 		if len(app.state.breadcrumbs) == 0 {
+			app.folder_node = 0
 			_ = ui.text(ctx, "Open a sample folder to browse its subfolders.", color=alicorn.style_color(ctx, .Muted_Text))
-		} else if list, opened := ui.virtual_list(
-			ctx,
-			app.state.folder_count,
-			FOLDER_ROW_HEIGHT,
-			key=alicorn.key_string("library-folder-list"),
-			grow=1,
-			label="Folders in this location",
-			focusable=true,
-		); opened {
-			app.folder_node = list.scroll.id
-			first, last := list.first, list.last
-			for position := first; position < last; position += 1 {
-				local := position-app.state.folder_offset
-				if app.folders.listing_revision == app.state.listing_revision &&
-					local >= 0 && local < len(app.folders.entries) {
-					folder := app.folders.entries[local]
-					if punks_entry_button(ctx, folder, false, false, FOLDER_ROW_HEIGHT) {
-						send(app, Command{
-							op="enter_folder",
-							id=folder.id,
-							index=folder.index,
-							listing_revision=app.state.listing_revision,
-						})
-					}
-				} else {
-					_ = ui.text(ctx, "Loading folders…", style=ui.layout_style(height=FOLDER_ROW_HEIGHT))
-				}
-			}
-			outside_window := first < app.state.folder_offset ||
-				last > app.state.folder_offset+len(app.folders.entries)
-			if last > first && outside_window {
-				offset := max(0, first-4)
-				if app.requested_folder_revision != app.state.listing_revision ||
-					app.requested_folder_offset != offset {
-					send(app, Command{
-						op="folder_window",
-						offset=offset,
-						listing_revision=app.state.listing_revision,
-					})
-					app.requested_folder_revision = app.state.listing_revision
-					app.requested_folder_offset = offset
-				}
-			}
+		} else {
+			render_folder_tree(app, ctx)
 		}
 	}
 }

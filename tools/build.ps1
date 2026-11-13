@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $AlicornRoot = Join-Path $RepoRoot 'vendor/alicorn'
+$AliKitRoot = Join-Path $RepoRoot 'vendor/alicorn-kit'
 $AlicornTools = Join-Path $AlicornRoot 'tools'
 . (Join-Path $AlicornTools 'common.ps1')
 
@@ -64,7 +65,8 @@ try {
     $BuildArgs = @(
         'build',
         'punks-standalone/odin',
-        "-collection:alicorn=$AlicornRoot"
+        "-collection:alicorn=$AlicornRoot",
+        "-collection:alikit=$AliKitRoot"
     )
     $BuildArgs += @($AccessKit.CompilerArguments)
     $BuildArgs += "-out:$Executable"
@@ -81,7 +83,7 @@ try {
         if ($TestUi) {
             Copy-Item -LiteralPath $SDLRuntime -Destination (Join-Path $OutputDirectory 'SDL3.dll') -Force
             Copy-Item -LiteralPath $CaliberRuntime -Destination (Join-Path $OutputDirectory 'punks_caliber.dll') -Force
-            & $Odin test punks-standalone/odin "-collection:alicorn=$AlicornRoot" @($AccessKit.CompilerArguments) "-out:$(Join-Path $OutputDirectory 'punks-ui-tests.exe')"
+            & $Odin test punks-standalone/odin "-collection:alicorn=$AlicornRoot" "-collection:alikit=$AliKitRoot" @($AccessKit.CompilerArguments) "-out:$(Join-Path $OutputDirectory 'punks-ui-tests.exe')"
             if ($LASTEXITCODE -ne 0) { throw "Punks UI regression tests failed (exit $LASTEXITCODE)." }
         }
     } finally {

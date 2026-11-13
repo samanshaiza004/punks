@@ -29,7 +29,7 @@ case "$(uname -s)" in
  *) echo 'The Punks native build helper supports macOS and Linux only.' >&2; exit 1 ;;
 esac
 alicorn_odin_with_linker_flags "$ODIN" "-L$ROOT/target/$PROFILE $RPATH $ACCESSKIT $SDL3_FLAGS" \
- build punks-standalone/odin "-collection:alicorn=$REPO_ROOT" "-out:$ROOT/target/$PROFILE/punks"
+ build punks-standalone/odin "-collection:alicorn=$REPO_ROOT" "-collection:alikit=$ROOT/vendor/alicorn-kit" "-out:$ROOT/target/$PROFILE/punks"
 printf 'Built %s\n' "$ROOT/target/$PROFILE/punks"
 if [ "$(uname -s)" = 'Darwin' ]; then
  PACKAGE_OUT="$ROOT/target/$PROFILE/punks-package"

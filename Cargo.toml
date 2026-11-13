@@ -6,4 +6,4 @@ members = [
     "crates/punks-core",
     "crates/punks-caliber",
 ]
-exclude = ["punks-standalone", "vendor/caliber", "vendor/alicorn"]
+exclude = ["punks-standalone", "vendor/caliber", "vendor/alicorn", "vendor/alicorn-kit"]

@@ -17,14 +17,20 @@ Punks Core (Rust)
 
 The Odin frontend owns layout, rendering, keyboard and pointer input, focus,
 scroll position, and the cached state needed to draw its current view. It uses
-Alicorn's procedural UI, keyed virtual list, native folder dialog, application
-waker, and host lifecycle.
+Alicorn's procedural UI, keyed virtual lists, the AliKit Tree View for folder
+navigation, native folder dialog, application waker, and host lifecycle.
 
 Punks Core is a headless Rust library. It owns filesystem navigation, search,
 selection, playback commands and state, configuration, and background work.
 It does not depend on a GUI toolkit, Alicorn, or native window handles. The
 Caliber adapter translates versioned commands and publishes a compact state summary with a
 bounded entry window. It does not implement audio playback.
+
+The backend returns a revision-scoped folder window; the frontend passes it to
+AliKit as a flat visible-row window. AliKit owns row presentation, tree semantics,
+focus, and keyboard traversal, while Punks requests missing ranges and maps row
+activation back to a revision-checked `enter_folder` command. The UI never asks
+the component to enumerate directories or own folder mutations.
 
 `punks-audio` retains the existing decoders, resampling, preview cache,
 playback engine, metadata readers, and analysis routines. `punks-library`

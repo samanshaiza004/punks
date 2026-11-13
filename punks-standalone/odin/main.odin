@@ -9,6 +9,7 @@ import arena "core:mem/virtual"
 import alicorn "alicorn:runtime"
 import ui "alicorn:ui"
 import host "alicorn:native/sdl_gpu"
+import tree_view "alikit:tree_view"
 
 ROW_HEIGHT :: 32
 FOLDER_ROW_HEIGHT :: 30
@@ -29,6 +30,8 @@ App :: struct {
 	search_node: alicorn.Node_ID,
 	list_node: alicorn.Node_ID,
 	folder_node: alicorn.Node_ID,
+	folder_tree: tree_view.State,
+	folder_tree_revision: u64,
 	state: State,
 	waveform: Waveform_Window,
 	waveform_view: Waveform_View,
@@ -566,6 +569,14 @@ scheduled :: proc(data: rawptr, rt: ^alicorn.Runtime, class: host.Scheduled_Wake
 
 keys :: proc(data: rawptr, rt: ^alicorn.Runtime, key: host.Application_Key) -> bool {
 	app := cast(^App)data
+	if app.folder_node != 0 && alicorn.focused_node(rt) == app.folder_node {
+		window := punks_folder_tree_window(app)
+		handled, event := tree_view.handle_key(&app.folder_tree, rt, window, key)
+		if handled {
+			punks_folder_tree_apply_event(app, event)
+			return true
+		}
+	}
 	#partial switch key {
 	case .Up, .Down:
 		if rt.focused == app.search_node {
