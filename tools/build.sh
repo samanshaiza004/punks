@@ -5,6 +5,8 @@ cd "$ROOT"
 ODIN=${ODIN:-odin}
 PROFILE=debug
 CARGO_PROFILE=
+# Keep Odin's main executable compatible with the declared application floor.
+MACOS_DEPLOYMENT_TARGET=13.0
 if [ "${1-}" = "--release" ]; then PROFILE=release; CARGO_PROFILE=--release; fi
 mkdir -p target
 cargo build -p punks-caliber $CARGO_PROFILE
@@ -28,10 +30,35 @@ case "$(uname -s)" in
  Linux) RPATH='-Wl,-rpath,$ORIGIN' ;;
  *) echo 'The Punks native build helper supports macOS and Linux only.' >&2; exit 1 ;;
 esac
-alicorn_odin_with_linker_flags "$ODIN" "-L$ROOT/target/$PROFILE $RPATH $ACCESSKIT $SDL3_FLAGS" \
- build punks-standalone/odin "-collection:alicorn=$REPO_ROOT" "-collection:alikit=$ROOT/vendor/alicorn-kit" "-out:$ROOT/target/$PROFILE/punks"
+set -- build punks-standalone/odin "-collection:alicorn=$REPO_ROOT" "-collection:alikit=$ROOT/vendor/alicorn-kit" "-out:$ROOT/target/$PROFILE/punks"
+if [ "$(uname -s)" = 'Darwin' ]; then
+ set -- "$@" "-minimum-os-version:$MACOS_DEPLOYMENT_TARGET"
+fi
+alicorn_odin_with_linker_flags "$ODIN" "-L$ROOT/target/$PROFILE $RPATH $ACCESSKIT $SDL3_FLAGS" "$@"
 printf 'Built %s\n' "$ROOT/target/$PROFILE/punks"
 if [ "$(uname -s)" = 'Darwin' ]; then
+ EXECUTABLE_MINIMUM=$(xcrun vtool -show-build "target/$PROFILE/punks" | awk '/^[[:space:]]+minos / {print $2; exit}')
+ if [ "$EXECUTABLE_MINIMUM" != "$MACOS_DEPLOYMENT_TARGET" ]; then
+  echo "Odin executable minimum is $EXECUTABLE_MINIMUM; expected $MACOS_DEPLOYMENT_TARGET" >&2
+  exit 1
+ fi
+ # Bundled dynamic libraries can require a newer OS than the application code.
+ BUNDLE_MINIMUM=$(python3 - "$MACOS_DEPLOYMENT_TARGET" "target/$PROFILE/punks" "target/$PROFILE/libpunks_caliber.dylib" "$SDL3_RUNTIME" <<'PY'
+import re
+import subprocess
+import sys
+
+version = lambda value: tuple(int(part) for part in value.split("."))
+minimum = version(sys.argv[1])
+for image in sys.argv[2:]:
+    output = subprocess.check_output(["xcrun", "vtool", "-show-build", image], text=True)
+    versions = re.findall(r"(?m)^\s*minos\s+([0-9]+(?:\.[0-9]+){0,2})\s*$", output)
+    if not versions:
+        raise SystemExit(f"No LC_BUILD_VERSION minimum found in {image}")
+    minimum = max(minimum, *(version(item) for item in versions))
+print(".".join(str(part) for part in minimum))
+PY
+ )
  PACKAGE_OUT="$ROOT/target/$PROFILE/punks-package"
  cat > "target/$PROFILE/punks-package.json" <<EOF
 {
@@ -39,6 +66,7 @@ if [ "$(uname -s)" = 'Darwin' ]; then
   "version": "0.3.0",
   "bundleIdentifier": "com.punks.foundation",
   "executableName": "punks",
+  "minimumMacOSVersion": "$BUNDLE_MINIMUM",
   "privateLibraries": ["libpunks_caliber.dylib"]
 }
 EOF
@@ -54,4 +82,5 @@ EOF
   --accesskit-license-mit "$REPO_ROOT/.deps/accesskit/accesskit-c-0.23.1/LICENSE-MIT" \
   --output "$PACKAGE_OUT"
  printf 'Built %s\n' "$PACKAGE_OUT/Punks.app"
+ printf 'Minimum macOS version: %s\n' "$BUNDLE_MINIMUM"
 fi
